@@ -1,0 +1,50 @@
+api_settings:
+  gemini_tier: "free"
+
+current_strategy: "Conservative Grow"
+
+data:
+  jp_stock_list: "data/test_jp_stock_list.csv"
+  output_path: "data/test_result.csv"
+
+paths:
+  db_file: "data/test_stock.db"
+  output_dir: "data"
+
+filter:
+  min_quant_score: 50
+
+csv_mapping:
+  col_map:
+    code: "コード"
+    name: "銘柄名"
+  numeric_cols: []
+
+scoring:
+  lower_is_better: ["per", "pbr"]
+
+strategies:
+  "Conservative Grow":
+    default_style: "value_balanced"
+    persona: "Conservative"
+    default_horizon: "long_term"
+    base_score: 50
+    min_requirements:
+      roe: 8.0
+    points:
+      roe: 10
+    thresholds:
+      roe: 8.0
+
+ai:
+  model_name: "gemini-1.5-flash"
+  max_concurrency: 1
+  interval_sec: 1.0
+  validity_days: 30
+
+circuit_breaker:
+  consecutive_failure_threshold: 5
+  reset_timeout: 60
+
+database:
+  retention_days: 30

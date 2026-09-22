@@ -1,0 +1,69 @@
+current_strategy: "value_strict"
+
+data:
+  jp_stock_list: "data/input/jp_stock_list.csv"
+  output_path: "data/output/analysis_result.csv"
+
+filter:
+  max_rsi: 100
+  min_quant_score: 60
+  min_trading_value: 10000000
+
+metric_metadata_defaults:
+  direction: "higher"
+  category: "quality"
+  missing_penalty: 0.0
+
+ai:
+  model_name: "gemini-pro"
+  max_concurrency: 1
+  interval_sec: 2.0
+  validity_days: 7
+  refresh_triggers: {}
+
+circuit_breaker:
+  consecutive_failure_threshold: 5
+  reset_timeout: 60
+
+database:
+  retention_days: 30
+
+financial_repair:
+  ratio_scaling_threshold: 10.0
+
+api_settings:
+  gemini_tier: "free"
+
+scoring:
+  lower_is_better: []
+  min_coverage_pct: 50
+  weekly_scan_limit: 50 # 各戦略ごとのスキャン上限数 (0=無制限)
+
+scoring_v2:
+  macro: {}
+  styles: {}
+  tech_points: {}
+  penalty_rules: {}
+
+sector_policies: {}
+# sector_risks: {} # defined as dict[str, str] = {} in schema
+
+metadata_mapping: null # Optional in schema
+paths:
+  db_file: "data/stock_master.db"
+  output_dir: "data/output"
+gdrive:
+  enabled: true
+  use_shared_drive: false
+
+csv_mapping: 
+  col_map: {}
+  numeric_cols: []
+
+strategies: {} # Required, no default? No, schema says dict[str, StrategyConfig]
+
+notification:
+  discord_webhook_url: ""
+
+fetcher:
+  skip_heavy_repair: true  # [v17.3] GASデータで十分な場合、yfinance財務諸表取得を完全スキップ

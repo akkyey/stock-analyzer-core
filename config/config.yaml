@@ -1,0 +1,511 @@
+api_settings:
+  gemini_tier: "paid" # "free" or "paid"
+
+current_strategy: value_strict
+use_polars: true
+gdrive:
+  enabled: true
+  shared_folder_id: 1q3pkSJvFmWiLR8icbb-pVbQiWE3hewyU
+  report_spreadsheet_id: 1OWSy8ee8lG_a_jd7-qVxsTh87dXGvgmZbfZfW0ZcSHw
+paths:
+  # [v15.0] Explicitly point to the migrated DB
+  db_file: data/stock_master.db
+  
+data:
+  jp_stock_list: data/input/jp_stock_list.csv
+  output_path: data/output/analysis_result.csv
+filter:
+  max_rsi: 100
+  min_quant_score: 60
+  min_trading_value: 10000000
+
+csv_mapping:
+  col_map:
+    'コード': 'code'
+    'コード/ティッカー': 'code'
+    '銘柄名': 'name'
+    '売上高': 'sales'
+    '市場': 'market'
+    '業種': 'sector'
+    '財務': 'financial'
+    '現在値': 'current_price'
+    '現値': 'current_price'
+    '前日比(%)': 'price_change_pct'
+    'PER(株価収益率)': 'per'
+    '予想PER': 'per'
+    'PER': 'per'
+    'PBR(株価純資産倍率)': 'pbr'
+    '実績PBR': 'pbr'
+    'PBR': 'pbr'
+    'ROE(自己資本利益率)': 'roe'
+    '配当利回り': 'dividend_yield'
+    '予想配当利回り': 'dividend_yield'
+    '売上高変化率': 'sales_growth'
+    '経常利益変化率': 'profit_growth'
+    '流動比率': 'current_ratio'
+    '当座比率': 'quick_ratio'
+    '平均売買代金': 'trading_value'
+    '売買代金': 'trading_value'
+    'RSI': 'rsi'
+    '売上高営業利益率': 'operating_margin'
+    '有利子負債自己資本比率': 'debt_equity_ratio'
+    'フリーキャッシュフロー': 'free_cf'
+    '営業キャッシュフロー': 'operating_cf'
+  numeric_cols:
+    - per
+    - pbr
+    - roe
+    - dividend_yield
+    - sales_growth
+    - profit_growth
+    - current_ratio
+    - quick_ratio
+    - trading_value
+    - rsi
+    - current_price
+    - ocf_margin
+    - free_cf
+    - debt_equity_ratio
+    - volatility
+    - macd
+    - peg_ratio
+    - trend_signal
+    - cf_status
+    - sma_75
+scoring:
+  lower_is_better:
+  - per
+  - pbr
+  - debt_equity_ratio
+  - peg_ratio
+  - volatility
+strategies:
+  growth_quality:
+    default_style: long_term_growth
+    persona: "Growth Investor" # [v7.1]
+    default_horizon: "Long-term" # [v7.1]
+    base_score: 20
+    min_requirements:
+      profit_growth: 5.0
+      roe: 8.0
+      sales_growth: 5.0
+    points:
+      cf_status: 5
+      peg_ratio: 15
+      profit_growth: 20
+      roe: 20
+      rsi_overbought: -10
+      rsi_oversold: 10
+      sales_growth: 20
+      trend_signal: 10
+    thresholds:
+      cf_status: 1.0
+      peg_ratio: 1.5
+      profit_growth: 15.0
+      roe: 10.0
+      rsi_overbought: 80
+      rsi_oversold: 40
+      sales_growth: 10.0
+      trend_signal: 1.0
+    metrics_metadata:
+      cf_status: {direction: "higher", category: "quality"}
+      peg_ratio: {direction: "lower", category: "value"}
+      profit_growth: {direction: "higher", category: "growth"}
+      roe: {direction: "higher", category: "quality"}
+      rsi_overbought: {direction: "higher", category: "trend"}
+      rsi_oversold: {direction: "lower", category: "trend"}
+      sales_growth: {direction: "higher", category: "growth"}
+      trend_signal: {direction: "higher", category: "trend"}
+  value_growth_hybrid:
+    default_style: value_balanced
+    persona: "GARP Evaluator" # [v7.1] Growth at a Reasonable Price
+    default_horizon: "Long-term" # [v7.1]
+    base_score: 30
+    min_requirements:
+      roe: 5.0
+      sales_growth: 0.0
+    points:
+      dividend_yield: 10
+      pbr: 10
+      per: 10
+      roe: 20
+      sales_growth: 20
+    thresholds:
+      dividend_yield: 2.5
+      pbr: 2.0
+      per: 20.0
+      roe: 10.0
+      sales_growth: 10.0
+    metrics_metadata:
+      dividend_yield: {direction: "higher", category: "value"}
+      pbr: {direction: "lower", category: "value"}
+      per: {direction: "lower", category: "value"}
+      roe: {direction: "higher", category: "quality"}
+      sales_growth: {direction: "higher", category: "growth"}
+  Balanced Strategy:
+    default_style: value_balanced
+    persona: "Multi-Strategy Allocator"
+    default_horizon: "Medium-term"
+    base_score: 20
+    min_requirements:
+      roe: 5.0
+    points:
+      per: 10
+      roe: 10
+    thresholds:
+      per: 15.0
+      roe: 8.0
+    metrics_metadata:
+      per: {direction: "lower", category: "value"}
+      roe: {direction: "higher", category: "quality"}
+  value_strict:
+    default_style: value_balanced
+    persona: "Deep Value Investor" # [v7.1]
+    default_horizon: "Long-term" # [v7.1]
+    base_score: 25
+    min_requirements:
+      current_ratio: 150.0
+      dividend_yield: 2.0
+      pbr_max: 2.0
+      per_max: 20.0
+      profit_growth: 0.0
+      quick_ratio: 100.0
+      roe: 5.0
+      sales_growth: 0.0
+    points:
+      cf_status: 5
+      current_ratio: 5
+      dividend_yield: 15
+      pbr: 15
+      peg_ratio: 10
+      per: 15
+      roe: 10
+      rsi_overbought: -10
+      rsi_oversold: 10
+      trend_signal: 5
+    thresholds:
+      cf_status: 1.0
+      current_ratio: 200.0
+      dividend_yield: 3.5
+      pbr: 0.8
+      peg_ratio: 2.0
+      per: 12.0
+      roe: 8.0
+      rsi_overbought: 70
+      rsi_oversold: 30
+      trend_signal: 1.0
+    metrics_metadata:
+      cf_status: {direction: "higher", category: "quality"}
+      current_ratio: {direction: "higher", category: "quality"}
+      dividend_yield: {direction: "higher", category: "value"}
+      pbr: {direction: "lower", category: "value"}
+      peg_ratio: {direction: "lower", category: "value"}
+      per: {direction: "lower", category: "value"}
+      roe: {direction: "higher", category: "quality"}
+      rsi_overbought: {direction: "higher", category: "trend"}
+      rsi_oversold: {direction: "lower", category: "trend"}
+      trend_signal: {direction: "higher", category: "trend"}
+
+  turnaround_spec: # [v6.1] 新設: ターンアラウンド・投機戦略
+    default_style: turnaround_style
+    persona: "Distressed Asset Specialist" # [v7.1]
+    default_horizon: "Short-term" # [v7.1]
+    base_score: 10
+    min_requirements:
+      sales_growth: 0.0
+      pbr_max: 5.0
+    points: # PERを除外した配点構成
+      sales_growth: 30
+      pbr: 25
+      roe: 20
+      profit_growth: 15
+      trend_signal: 10
+    thresholds:
+      sales_growth: 15.0
+      pbr: 1.2
+      roe: 10.0
+      profit_growth: 0.0
+      trend_signal: 1.0
+    metrics_metadata:
+      sales_growth: {direction: "higher", category: "growth"}
+      pbr: {direction: "lower", category: "value"}
+      roe: {direction: "higher", category: "quality", missing_penalty: 10.0}
+      profit_growth: {direction: "higher", category: "growth"}
+      trend_signal: {direction: "higher", category: "trend"}
+    status_bonuses:
+      turnaround_status:
+        turnaround_black: 20   # 黒字転換
+        loss_shrinking: 5      # 赤字縮小
+        fall_red: -15          # 転落赤字 (Penalty)
+      profit_status:
+        surge: 10              # 急増
+        loss_expanding: -5     # 赤字拡大 (Penalty)
+        crash: -15             # 急減 (Penalty)
+      is_turnaround:
+        "1": 10                # ターンアラウンドフラグ
+      trend_up:
+        "0": -10               # Trend Down Penalty (Matches logic: +10 if 1, -10 if 0)
+
+scoring_v2:
+  macro:
+    sentiment: "neutral"
+    interest_rate: "stabilizing"
+    active_sector: "Technology"
+  styles:
+    value_balanced:
+      weight_fund: 0.7
+      weight_tech: 0.3
+    short_term_momentum:
+      weight_fund: 0.3
+      weight_tech: 0.7
+    long_term_growth:
+      weight_fund: 0.9
+      weight_tech: 0.1
+    turnaround_style: # Value: 0.3, Growth: 0.4, Quality: 0.1, Trend: 0.2 相当の配分
+      weight_fund: 0.8  # (0.3+0.4+0.1)
+      weight_tech: 0.2  # (0.2)
+  tech_points:
+    macd_bullish: 15
+    rsi_oversold: 10
+    rsi_overbought: -10
+    trend_up: 10
+ 
+  penalty_rules:
+    high_volatility:
+      threshold: 50.0
+      points: -10.0
+
+ai:
+  model_name: "gemini-flash-latest"
+  # [Concurrency Control]
+  # Free: concurrency=1,  # Gemini API Target (Paid Tier)
+  # - max_concurrency: 10 (推奨: 10-20 for Paid)
+  # - interval_sec: 0.5 (推奨: 0.1-0.5 for Paid)
+  max_concurrency: 10
+  interval_sec: 0.5
+  enable_cache: true
+  validity_days: 14
+  # [v13.0] Smart Refresh
+  refresh_triggers:
+    price_change_pct: 5.0
+    score_change_point: 15.0
+
+# ---------------------------------------------------------
+# Filter Settings (Global Hard Filter)
+# ---------------------------------------------------------
+# [v15.0] Updated for Production
+# - min_trading_value: 30,000,000 (3000万円)
+#   -> Excludes ~17% of low-liquidity stocks to optimize ROI.
+hard_filters:
+  # min_trading_value: 10000000 -> 30000000
+  min_trading_value: 30000000
+circuit_breaker:
+  consecutive_failure_threshold: 1 # 連続でこの回数以上API制限(429)が発生したら中断
+
+database:
+  retention_days: 30  # 市況データと分析結果を保持する期間（日数）。
+
+# [v6.0] セクター別ポリシー
+# セクター特有の「構造的欠損」に対応
+# Based on full database diagnostic analysis (2025-12-25)
+sector_policies:
+  銀行業:
+    na_allowed:           # バリデーションで欠損を許容（全銘柄で確認された構造的欠損）
+      - debt_equity_ratio
+      - operating_margin
+      - operating_cf
+      - free_cf
+      - current_ratio     # 銀行業では流動比率の概念が異なる
+      - quick_ratio       # 銀行業では当座比率の概念が異なる
+    score_exemptions:     # スコアリングから除外（正規化対象）
+      - debt_equity_ratio
+      - current_ratio
+      - quick_ratio
+    ai_prompt_excludes:   # AIプロンプトで「分析対象外」と明示
+      - Debt/Equity Ratio
+      - Operating Margin
+      - Current Ratio
+      - Quick Ratio
+  
+  情報・通信業:
+    na_allowed:
+      - free_cf
+      - operating_cf
+      - debt_equity_ratio  # 新興企業対応
+    score_exemptions:
+      - free_cf
+      - debt_equity_ratio
+    ai_prompt_excludes:
+      - Free CF
+      - Debt/Equity Ratio
+  
+  証券、商品先物取引業:
+    na_allowed:
+      - free_cf
+      - debt_equity_ratio
+      - current_ratio
+      - quick_ratio
+    score_exemptions:
+      - free_cf
+      - debt_equity_ratio
+    ai_prompt_excludes:
+      - Free CF
+      - Debt/Equity Ratio
+  
+  鉱業:
+    na_allowed:
+      - debt_equity_ratio
+    score_exemptions: []
+    ai_prompt_excludes: []
+  
+  保険業:
+    na_allowed:
+      - free_cf
+      - operating_cf
+      - current_ratio
+      - quick_ratio
+    score_exemptions:
+      - free_cf
+    ai_prompt_excludes:
+      - Free CF
+  
+  サービス業:
+    na_allowed:
+      - free_cf
+      - operating_cf
+    score_exemptions:
+      - free_cf
+    ai_prompt_excludes:
+      - Free CF
+  
+  電気機器:
+    na_allowed:
+      - free_cf
+      - operating_cf
+    score_exemptions:
+      - free_cf
+    ai_prompt_excludes:
+      - Free CF
+  
+  建設業:
+    na_allowed:
+      - debt_equity_ratio
+      - free_cf
+      - operating_cf
+    score_exemptions:
+      - free_cf
+    ai_prompt_excludes:
+      - Free CF
+  
+  不動産業:
+    na_allowed:
+      - free_cf
+      - operating_cf
+    score_exemptions:
+      - free_cf
+    ai_prompt_excludes:
+      - Free CF
+  
+  その他製品:
+    na_allowed:
+      - free_cf
+      - operating_cf
+    score_exemptions:
+      - free_cf
+    ai_prompt_excludes:
+      - Free CF
+  
+  石油・石炭製品:
+    na_allowed:
+      - free_cf
+      - operating_cf
+    score_exemptions:
+      - free_cf
+    ai_prompt_excludes:
+      - Free CF
+
+  # [v6.1] 構造的欠損セクターの拡充
+  小売業:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+  化学:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+  機械:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+  金属製品:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+  医薬品:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+  精密機器:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+  繊維製品:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+  電気・ガス業:
+    na_allowed: [free_cf, operating_cf]
+    score_exemptions: [free_cf]
+    ai_prompt_excludes: [Free CF]
+
+  # [v6.1] 戦略レベルのポリシー（セクター不問でPER欠損を許容）
+  # [v7.4] turnaround_spec: 財務困難銘柄対応として複数指標の欠損を許容
+  # ValidationEngine側で戦略名をフックして適用
+  _strategy_turnaround_spec:
+    na_allowed: [per, roe, operating_margin, debt_equity_ratio, free_cf, operating_cf, pbr]
+    score_exemptions: [per]
+    ai_prompt_excludes: []
+
+  # デフォルト（未定義セクターに適用）
+  default:
+    na_allowed: []
+    score_exemptions: []
+    ai_prompt_excludes: []
+
+# [v7.1] Sector-specific Risk Factors for AI Analysis
+sector_risks:
+  不動産業: "Interest Rate Hike Impact: High sensitivity to rising rates due to debt financing."
+  建設業: "Interest Rate & Labor Cost: Impact of rising borrowing costs and labor shortages."
+  機械: "FX Risk: High sensitivity to JPY appreciation via export profits."
+  電気機器: "Global Trade: High sensitivity to global economic cycles and semiconductor market."
+  銀行業: "YCC/Interest Rate: Benefit from rising rates but valuation risk on bond holdings."
+  輸送用機器: "FX & Supply Chain: Highly sensitive to USD/JPY rates and global logistics."
+  小売業: "Domestic Consumption: Sensitive to inflation (cost push) and consumer spending power."
+  医薬品: "Regulatory & R&D: Drug pricing revisions and patent expirations."
+  情報・通信業: "Talent & Security: Risks related to IT talent shortage and potential data breaches."
+  商社: "Commodity & FX: Exposure to resource price volatility and exchange rates."
+
+# [v7.0] Metadata Mapping for Validation and Analysis
+metadata_mapping:
+  metrics:
+    # prompt label -> model field name
+    "PER": "per"
+    "PBR": "pbr"
+    "ROE": "roe"
+    "Operating Margin": "operating_margin"
+    "Debt/Equity Ratio": "debt_equity_ratio"
+    "Free CF": "free_cf"
+    "Op CF Margin": "operating_cf" # Validated as proxy check
+    "Sales Growth": "sales_growth"
+    "Profit Growth": "profit_growth"
+    "Current Ratio": "current_ratio"
+    "Quick Ratio": "quick_ratio"
+  
+  validation:
+    # 7 items out of 11 criticals missing => Fatal
+    critical_missing_threshold: 7
+    mode: "tiered" # "strict" or "tiered" [v12.5 Tiered Validation]
+
+# 正規化設定
+scoring:
+  min_coverage_pct: 50  # 有効配点がこの割合以下なら警告

@@ -1,0 +1,15 @@
+notification:
+  # GAS Web App のURLをここに設定します
+  gas_webapp_url: ""
+  # 直接通知が必要な場合のみ設定。GAS連携時は空欄でOK。
+  discord_webhook_url: ""
+
+data:
+  # GASが配置するファイルのパスに合わせます
+  jp_stock_list: "data/input/jp_stock_list.csv"
+  output_path: "data/output/daily_report.csv"
+
+# [v17.0] Server Edition specific settings
+server_mode:
+  enabled: true
+  auto_import_to_sheets: true

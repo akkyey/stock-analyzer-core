@@ -1,0 +1,10 @@
+# Antigravity AI Analysis Blacklist
+# 
+# Lines starting with # are comments.
+
+
+
+
+
+
+

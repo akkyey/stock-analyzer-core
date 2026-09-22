@@ -1,0 +1,31 @@
+thresholds:
+  valuation:
+    per_high: 25.0
+    per_low: 15.0
+    pbr_high: 3.0
+    pbr_low: 1.0
+  profitability:
+    roe_target: 15.0
+    roe_min: 8.0
+    op_margin_target: 10.0
+    op_margin_min: 5.0
+  quality:
+    ocf_margin_target: 10.0
+    ocf_margin_min: 0.0
+  growth:
+    sales_growth_target: 20.0
+    sales_growth_min: 5.0
+  safety:
+    de_ratio_max: 100.0
+    de_ratio_safe: 30.0
+  anomaly:
+    dividend_yield_max: 10.0
+    dividend_yield_target: 4.0
+    payout_ratio_max: 200.0
+    payout_ratio_min: 0.0
+    pbr_bubble: 10.0
+    roe_bubble: 50.0
+    ocf_margin_min_critical: 0.0
+  technical:
+    rsi_high: 60
+    rsi_low: 40
