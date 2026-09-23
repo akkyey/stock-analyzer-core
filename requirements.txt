@@ -27,3 +27,4 @@ google-api-python-client
 yahooquery==2.4.1
 pandas-market-calendars
 duckdb
+openpyxl

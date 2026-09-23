@@ -3,9 +3,9 @@
 複数のハンドラから共通で利用されるレポート生成ロジック。
 """
 
-from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
 from collections import defaultdict
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any
 
 from src.utils import get_current_time
 
@@ -35,7 +35,9 @@ def export_reports(
         # [v28.11] Fix Discord URL missing: URLだけでも確保を試みる
         fixed_id = context.config.get("gdrive", {}).get("report_spreadsheet_id")
         if fixed_id:
-            context.report_url = f"https://docs.google.com/spreadsheets/d/{fixed_id}/edit"
+            context.report_url = (
+                f"https://docs.google.com/spreadsheets/d/{fixed_id}/edit"
+            )
         return
 
     # 2. 重複排除とスキップレコードの除外
@@ -51,7 +53,9 @@ def export_reports(
         # [v28.11] Fix Discord URL missing: URLだけでも確保を試みる
         fixed_id = context.config.get("gdrive", {}).get("report_spreadsheet_id")
         if fixed_id:
-            context.report_url = f"https://docs.google.com/spreadsheets/d/{fixed_id}/edit"
+            context.report_url = (
+                f"https://docs.google.com/spreadsheets/d/{fixed_id}/edit"
+            )
         return
 
     # 3. ランク履歴の注入
@@ -66,7 +70,9 @@ def export_reports(
     _upload_summary_to_gspread(context, report_paths)
 
 
-def _fetch_master_market_data(context: "OrchestratorContext", target_codes: list[str] | None) -> dict[str, Any]:
+def _fetch_master_market_data(
+    context: "OrchestratorContext", target_codes: list[str] | None
+) -> dict[str, Any]:
     """1. 銘柄ごとの「最新」マーケットデータを取得 (Master構築)"""
     # [v6.1.0] DuckDB SQL で一括取得 (daily_metrics が最新スナップショットを保持)
     query = """
@@ -84,11 +90,11 @@ def _fetch_master_market_data(context: "OrchestratorContext", target_codes: list
         params.extend(target_codes)
 
     master_dicts = {}
-    with context.db.duck_repo.client.get_connection() as conn:
+    with context.duck_repo.client.get_connection() as conn:
         res = conn.execute(query, params).fetchall()
         cols = [desc[0] for desc in conn.description]
         for row in res:
-            d = dict(zip(cols, row))
+            d = dict(zip(cols, row, strict=False))
             # code カラムを明示的に文字列に
             code = str(d["code"])
             master_dicts[code] = d
@@ -104,7 +110,7 @@ def _fetch_db_analysis(
 ) -> list[dict]:
     """2. 分析結果を取得"""
     context.logger.info("  [v6.1.0] Fetching Analysis Results from DuckDB...")
-    
+
     today_dt = get_current_time().date()
     cutoff_date = (today_dt - timedelta(days=4)).isoformat()
 
@@ -141,10 +147,10 @@ def _fetch_db_analysis(
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
 
-    with context.db.duck_repo.client.get_connection() as conn:
+    with context.duck_repo.client.get_connection() as conn:
         res = conn.execute(query, params).fetchall()
         cols = [desc[0] for desc in conn.description]
-        db_analysis_list = [dict(zip(cols, row)) for row in res]
+        db_analysis_list = [dict(zip(cols, row, strict=False)) for row in res]
 
     # [v28.4] 常に scout_results をベースにし、過去の分析結果をマージする構造に変更
     if not scout_results:
@@ -408,10 +414,9 @@ def _filter_and_deduplicate_results(
     return final_entries
 
 
-from collections import defaultdict
-
-
-def _inject_rank_history(context: "OrchestratorContext", final_entries: dict) -> list[dict]:
+def _inject_rank_history(
+    context: "OrchestratorContext", final_entries: dict
+) -> list[dict]:
     """ランク履歴を成果物データに注入 (N+1問題解消済)"""
     report_data = []
     codes = list({key[0] for key in final_entries.keys() if key[0]})
@@ -457,7 +462,9 @@ def _upload_summary_to_gspread(
         context.add_error(f"Spreadsheet upload failed: {e}")
 
 
-def _fetch_bulk_rank_history(context: "OrchestratorContext", codes: list[str]) -> dict[tuple[str, str], list[str]]:
+def _fetch_bulk_rank_history(
+    context: "OrchestratorContext", codes: list[str]
+) -> dict[tuple[str, str], list[str]]:
     """指定された銘柄リストの直近の順位履歴を一括取得する。"""
     if not codes:
         return {}
@@ -470,11 +477,11 @@ def _fetch_bulk_rank_history(context: "OrchestratorContext", codes: list[str]) -
         WHERE code IN ({})
         ORDER BY code, strategy_name, recorded_at DESC
     """
-    
-    with context.db.duck_repo.client.get_connection() as conn:
+
+    with context.duck_repo.client.get_connection() as conn:
         # 大量銘柄の場合、チャンク分けして実行
         for i in range(0, len(codes), 900):
-            chunk = codes[i:i+900]
+            chunk = codes[i : i + 900]
             placeholders = ",".join(["?" for _ in chunk])
             formatted_query = query.format(placeholders)
             res = conn.execute(formatted_query, chunk).fetchall()

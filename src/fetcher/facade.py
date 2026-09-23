@@ -2,12 +2,11 @@ import time
 from typing import Any, Dict, List
 
 import pandas as pd
-from tqdm.auto import tqdm
 
 from .base import FetcherBase
+from .fundamentals_fetcher import FundamentalsFetcher
 from .jpx import JPXFetcher
 from .market_fetcher import MarketFetcher
-from .fundamentals_fetcher import FundamentalsFetcher
 
 
 class DataFetcher(FetcherBase):
@@ -66,7 +65,7 @@ class DataFetcher(FetcherBase):
 
         for i, chunk in enumerate(code_chunks):
             self.logger.info(
-                f"📦 Fetching chunk {i+1}/{len(code_chunks)} ({len(chunk)} stocks)..."
+                f"📦 Fetching chunk {i + 1}/{len(code_chunks)} ({len(chunk)} stocks)..."
             )
             # [v1.0] 分離された MarketFetcher を使用
             chunk_results = {}
@@ -78,10 +77,10 @@ class DataFetcher(FetcherBase):
                     if chunk_results:
                         break
                     self.logger.warning(
-                        f"⚠️ Chunk {i+1} returned empty. Retry {attempt+1}/2..."
+                        f"⚠️ Chunk {i + 1} returned empty. Retry {attempt + 1}/2..."
                     )
                 except Exception as e:
-                    self.logger.warning(f"⚠️ Issue in chunk {i+1}: {e}")
+                    self.logger.warning(f"⚠️ Issue in chunk {i + 1}: {e}")
 
                 if attempt == 0:
                     import time
@@ -113,8 +112,6 @@ class DataFetcher(FetcherBase):
         """
         import json
         import os
-        import queue
-        import threading
 
         from src.config_singleton import ConfigSingleton
 
@@ -144,9 +141,9 @@ class DataFetcher(FetcherBase):
         )
 
         from tqdm import tqdm
+
         pbar = tqdm(total=len(pending_codes), desc="Fetching Fundamentals")
 
-        import time
         t_fetch_start = time.time()
         try:
             for code in pending_codes:
@@ -166,8 +163,11 @@ class DataFetcher(FetcherBase):
 
                 except Exception as e:
                     self.logger.warning(f"⚠️ Fetch failed for {code}: {e}")
-                    results_map[str(code)] = {"code": code, "fetch_status": "error_other"}
-                
+                    results_map[str(code)] = {
+                        "code": code,
+                        "fetch_status": "error_other",
+                    }
+
                 pbar.update(1)
 
         except KeyboardInterrupt:
@@ -279,9 +279,9 @@ class DataFetcher(FetcherBase):
     def fetch_data_from_db(self, codes: list) -> pd.DataFrame:
         """データベースから指定銘柄の最新データを取得する。"""
         from src.repositories.duck_repository import DuckDBRepository
-        
+
         duck_repo = DuckDBRepository()
-        
+
         # 銘柄マスタと市況データを JOIN して取得
         query = """
             SELECT m.*, s.name, s.sector, s.market
@@ -290,7 +290,7 @@ class DataFetcher(FetcherBase):
             WHERE m.code IN (SELECT UNNEST(?))
             QUALIFY ROW_NUMBER() OVER (PARTITION BY m.code ORDER BY m.entry_date DESC) = 1
         """
-        
+
         try:
             with duck_repo.client.get_connection() as conn:
                 df_pl = conn.execute(query, [codes]).pl()

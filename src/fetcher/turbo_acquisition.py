@@ -1,14 +1,15 @@
+import json
 import logging
 import os
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from threading import Semaphore
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
 
 from src.fetcher.edinet_fetcher import EdinetFetcher
 from src.fetcher.xbrl_parser import XbrlParser
+
 
 class TurboAcquisitionManager:
     """
@@ -16,7 +17,9 @@ class TurboAcquisitionManager:
     旧 backfill_edinet.py の『10分の壁を突破する』ロジックを実働コードに再統合。
     """
 
-    def __init__(self, fetcher: EdinetFetcher, parser: XbrlParser, config: Dict[str, Any]):
+    def __init__(
+        self, fetcher: EdinetFetcher, parser: XbrlParser, config: Dict[str, Any]
+    ):
         self.fetcher = fetcher
         self.parser = parser
         self.config = config
@@ -42,7 +45,7 @@ class TurboAcquisitionManager:
         3. Download & Parse Pipeline (Asymmetric Parallel)
         """
         self.logger.info(f"🚀 Starting Turbo Acquisition for {days} days...")
-        
+
         # 1. 書類リストのスキャン (Turbo 1: 並列スキャン)
         raw_docs = self._scan_document_list(days)
         if not raw_docs:
@@ -55,34 +58,49 @@ class TurboAcquisitionManager:
 
         # 3. 非対称パイプライン (Turbo 3: DL制限付き並列パース)
         final_results = self._execute_pipeline(target_docs)
-        
+
         self.logger.info(f"✨ Turbo Acquisition completed. Total: {len(final_results)}")
         return final_results
 
     def _scan_document_list(self, days: int) -> List[Dict[str, Any]]:
         """過去 N 日分の書類を並列にスキャンする"""
-        dates = [(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
+        dates = [
+            (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(days)
+        ]
         raw_docs = []
 
         with ThreadPoolExecutor(max_workers=self.scan_workers) as scan_executor:
-            future_to_date = {scan_executor.submit(self.fetcher.fetch_documents_by_date, d): d for d in dates}
+            future_to_date = {
+                scan_executor.submit(self.fetcher.fetch_documents_by_date, d): d
+                for d in dates
+            }
             for future in future_to_date:
                 try:
                     day_res = future.result()
                     # 有報(120), 四半報(140), 修正(130-170) などを対象とする
                     for d in day_res.get("results", []):
                         doc_type = d.get("docTypeCode")
-                        if doc_type in ["120", "130", "140", "150", "160", "170"] and d.get("secCode"):
+                        if doc_type in [
+                            "120",
+                            "130",
+                            "140",
+                            "150",
+                            "160",
+                            "170",
+                        ] and d.get("secCode"):
                             # 証券コード 4桁化
                             d["clean_code"] = d.get("secCode")[:4]
-                            d["is_annual"] = (doc_type == "120")
+                            d["is_annual"] = doc_type == "120"
                             raw_docs.append(d)
                 except Exception as e:
                     self.logger.error(f"❌ Scan error: {e}")
 
         return raw_docs
 
-    def _filter_annual_priority(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _filter_annual_priority(
+        self, docs: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """銘柄ごとに『本決算(有報)』を最優先で残し、最新のものを選択する"""
         latest_docs = {}
         for doc in docs:
@@ -102,7 +120,7 @@ class TurboAcquisitionManager:
             elif is_annual == current["is_annual"]:
                 if submit_time > current.get("submitDateTime", ""):
                     latest_docs[code] = doc
-        
+
         return list(latest_docs.values())
 
     def _execute_pipeline(self, target_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -125,11 +143,11 @@ class TurboAcquisitionManager:
                 # 1. ダウンロード (I/O 制限)
                 with dl_semaphore:
                     zip_path = self.fetcher.download_xbrl(doc_id, self.tmp_dir)
-                    time.sleep(0.5) # EDINET API への敬意としてのスリープ
+                    time.sleep(0.5)  # EDINET API への敬意としてのスリープ
 
                 # 2. パース (CPU 並列)
                 financials = self.parser.parse_zip(zip_path)
-                
+
                 # 3. 掃除
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
@@ -154,7 +172,9 @@ class TurboAcquisitionManager:
             return None
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_code = {executor.submit(pipeline_worker, doc): doc for doc in target_docs}
+            future_to_code = {
+                executor.submit(pipeline_worker, doc): doc for doc in target_docs
+            }
             for future in future_to_code:
                 res = future.result()
                 if res:

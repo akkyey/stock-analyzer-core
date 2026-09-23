@@ -1,7 +1,8 @@
 """src/orchestration/ モジュール群の包括的テスト"""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.orchestration.context import OrchestratorContext
 from src.orchestration.pipeline_orchestrator import PipelineOrchestrator

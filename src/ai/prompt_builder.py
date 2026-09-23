@@ -58,7 +58,11 @@ class PromptBuilder:
                 try:
                     with open(path, encoding="utf-8") as f:  # noqa: PTH123
                         data = yaml.safe_load(f)
-                        return data.get("thresholds", {})
+                        return (
+                            dict(data.get("thresholds", {}))
+                            if isinstance(data, dict)
+                            else {}
+                        )
                 except Exception as e:
                     self.logger.error(
                         f"Failed to load thresholds.yaml from {path}: {e}"
@@ -129,8 +133,10 @@ class PromptBuilder:
     def _get_risk_context(self, sector_info: str) -> str:
         """セクターリスクコンテキストを取得する。"""
         sector_risks = self.config.get("sector_risks", {})
-        return sector_risks.get(
-            sector_info, "General Market Risk (No specific sector data)."
+        return str(
+            sector_risks.get(
+                sector_info, "General Market Risk (No specific sector data)."
+            )
         )
 
     def _build_exclusion_notice(self, sector_info: str, strategy_name: str) -> str:
@@ -490,7 +496,7 @@ class PromptBuilder:
         vars_dict["metrics_section"] = metrics_section
 
         try:
-            return base_tmpl.format(**vars_dict)
+            return str(base_tmpl.format(**vars_dict))
         except Exception as e:
             self.logger.error(f"Failed to format base prompt: {e}")
             return f"Analyze stock {row.get('code')} ({row.get('name')})"
@@ -546,6 +552,7 @@ class PromptBuilder:
     def build_dossier_analysis_prompt(cls, dossier: dict[str, Any]) -> str:
         """[Agentic Pipeline] 単一の StockDossier から投資判断用プロンプトを生成する。"""
         from src.orchestration.dossier_builder import StockDossierBuilder
+
         summary_md = StockDossierBuilder.to_markdown_summary(dossier)
 
         return f"""あなたはプロフェッショナルな株式クオンツ/ファンダメンタルズアナリストです。
@@ -562,7 +569,7 @@ class PromptBuilder:
 ### 出力フォーマット (JSON のみを出力してください):
 ```json
 {{
-  "code": "{dossier.get('code')}",
+  "code": "{dossier.get("code")}",
   "verdict": "STRONG_BUY | BUY | WATCH | PASS",
   "agent_score": 85.0,
   "investment_thesis": "具体的な投資仮説・推奨理由（150文字程度）",

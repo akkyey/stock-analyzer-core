@@ -1,8 +1,8 @@
-import os
-import zipfile
-import lxml.etree as et
 import logging
-from typing import Dict, Any, Optional
+import zipfile
+from typing import Any, Dict
+
+import lxml.etree as et
 
 
 class XbrlParser:
@@ -19,7 +19,7 @@ class XbrlParser:
         ],
         "total_assets": ["TotalAssets", "Assets"],
         "net_assets": ["NetAssets", "Equity"],
-        "shares_outstanding": ["OrdinarySharesNumber"], # PER修復用
+        "shares_outstanding": ["OrdinarySharesNumber"],  # PER修復用
     }
 
     def __init__(self):
@@ -27,7 +27,7 @@ class XbrlParser:
 
     def parse_zip(self, zip_path: str) -> Dict[str, Any]:
         """ダウンロードした ZIP 内の XBRL 本体を探してパースする"""
-        results = {}
+        results: dict[str, Any] = {}
         with zipfile.ZipFile(zip_path, "r") as z:
             # .xbrl ファイルを探す (PublicDoc/ 内にあることが多い)
             xbrl_files = [f for f in z.namelist() if f.endswith(".xbrl")]
@@ -52,7 +52,7 @@ class XbrlParser:
             return {}
 
         ns = tree.nsmap
-        extracted = {}
+        extracted: dict[str, Any] = {}
 
         # コンテキストの定義 (EDINET XBRL 準拠)
         # Instant(時点: 貸借対照表項目), Duration(期間: 損益計算書項目)
@@ -74,7 +74,7 @@ class XbrlParser:
                 for label, target_ctx in CONTEXTS.items():
                     # net_income の場合のみ、current/prior を別キーで保持（比較用）
                     store_key = f"{key}_{label}" if key == "net_income" else key
-                    
+
                     # 既に現在のタグ・コンテキストで値が見つかっているなら最優先を保持
                     if store_key in extracted:
                         continue
@@ -90,15 +90,15 @@ class XbrlParser:
                                     break
                                 except ValueError:
                                     continue
-                
+
                 # 主要項目で値が埋まったら次のキーへ
                 if key in extracted:
                     break
-        
+
         # 後方互換性および計算層への橋渡し
         # 損益計算書の CurrentYearDuration を優先
         if "net_income_current_d" in extracted:
             extracted["net_profit"] = extracted["net_income_current_d"]
             extracted["prev_net_profit"] = extracted.get("net_income_prior_d")
-        
+
         return extracted

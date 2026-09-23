@@ -1,5 +1,6 @@
 import json
 from unittest.mock import MagicMock, patch
+
 from src.ai.agent import AIAgent
 
 
@@ -24,14 +25,16 @@ def test_analyze_dossier_debug_mode():
 @patch("src.ai.agent.AIAgent._generate_content_with_retry")
 def test_analyze_dossier_success(mock_generate):
     mock_resp = MagicMock()
-    mock_resp.text = json.dumps({
-        "code": "7203",
-        "verdict": "STRONG_BUY",
-        "agent_score": 92.5,
-        "investment_thesis": "圧倒的な財務健全性と反発余地あり",
-        "risk_factors": ["為替リスク"],
-        "time_horizon": "Swing (2〜6週)",
-    })
+    mock_resp.text = json.dumps(
+        {
+            "code": "7203",
+            "verdict": "STRONG_BUY",
+            "agent_score": 92.5,
+            "investment_thesis": "圧倒的な財務健全性と反発余地あり",
+            "risk_factors": ["為替リスク"],
+            "time_horizon": "Swing (2〜6週)",
+        }
+    )
     mock_generate.return_value = (mock_resp, 1)
 
     agent = AIAgent("gemini-1.5-flash", interval_sec=0, debug_mode=False)
@@ -74,9 +77,13 @@ def test_analyze_dossiers_batch(mock_generate):
     def fake_generate(prompt):
         resp = MagicMock()
         if "1001" in prompt:
-            resp.text = json.dumps({"code": "1001", "verdict": "BUY", "agent_score": 70.0})
+            resp.text = json.dumps(
+                {"code": "1001", "verdict": "BUY", "agent_score": 70.0}
+            )
         else:
-            resp.text = json.dumps({"code": "1002", "verdict": "STRONG_BUY", "agent_score": 90.0})
+            resp.text = json.dumps(
+                {"code": "1002", "verdict": "STRONG_BUY", "agent_score": 90.0}
+            )
         return resp, 1
 
     mock_generate.side_effect = fake_generate

@@ -4,19 +4,19 @@
 [v1.0] YahooFetcher から物理的に分離。
 """
 
+import logging
 import random
 import threading
 import time
 from typing import Any
 
-import logging
 import pandas as pd
 import yfinance as yf
-# [v28.4] Level set to WARNING to catch rate limits without clogging logs with DEBUG
-logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 from .base import FetcherBase
-from .technical import calc_technical_indicators
+
+# [v28.4] Level set to WARNING to catch rate limits without clogging logs with DEBUG
+logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 
 class MarketFetcher(FetcherBase):
@@ -28,7 +28,6 @@ class MarketFetcher(FetcherBase):
         super().__init__(*args, **kwargs)
         self._thread_local = threading.local()
         self.lock = threading.Lock()
-
 
     def _warm_up(self) -> None:
         if MarketFetcher._warmed_up:
@@ -74,7 +73,7 @@ class MarketFetcher(FetcherBase):
             sub_symbols: list[str], end_date: str | None = None
         ) -> tuple[pd.DataFrame, float]:
             t_sub_start = time.time()
-            
+
             # [v30.4] Initial jitter to avoid synchronized requests
             time.sleep(random.uniform(0.1, 0.5))
 
@@ -92,28 +91,28 @@ class MarketFetcher(FetcherBase):
                         threads=False,
                         progress=False,
                     )
-                    
+
                     if not df.empty:
                         # Success: small break before returning
                         time.sleep(0.2)
                         break
-                    
+
                     # If empty, it might be 429 or simply no data
-                    wait_time = (2 ** attempt) * 5 + random.uniform(1, 3)
+                    wait_time = (2**attempt) * 5 + random.uniform(1, 3)
                     self.logger.warning(
-                        f"⚠️ Batch {sub_symbols[:2]}... empty. Backoff {wait_time:.1f}s (Attempt {attempt+1}/3)"
+                        f"⚠️ Batch {sub_symbols[:2]}... empty. Backoff {wait_time:.1f}s (Attempt {attempt + 1}/3)"
                     )
                     time.sleep(wait_time)
-                    
+
                 except Exception as e:
-                    wait_time = (2 ** attempt) * 10 + random.uniform(2, 5)
+                    wait_time = (2**attempt) * 10 + random.uniform(2, 5)
                     self.logger.error(
                         f"❌ Error downloading {sub_symbols[:2]}...: {e}. Retry in {wait_time:.1f}s"
                     )
                     time.sleep(wait_time)
                     if attempt == 2:
                         raise e
-                        
+
             return df, time.time() - t_sub_start
 
         t_method_start = time.time()
@@ -165,7 +164,7 @@ class MarketFetcher(FetcherBase):
     def _extract_dfs_from_batch(
         self, all_hist: pd.DataFrame, full_symbols: list[str]
     ) -> dict[str, pd.DataFrame]:
-        batch_results = {}
+        batch_results: dict[str, pd.DataFrame] = {}
         if all_hist is None or all_hist.empty:
             self.logger.debug("--- [DEBUG] all_hist is empty or None ---")
             return batch_results

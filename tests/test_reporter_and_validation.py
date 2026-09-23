@@ -3,18 +3,19 @@
 import os
 import time
 from pathlib import Path
+
 import pandas as pd
 import pytest
 
-from src.validation_engine import ValidationEngine
 from src.reporter import StockReporter
-
+from src.validation_engine import ValidationEngine
 
 # --- ValidationEngine Tests ---
 
+
 def test_validation_engine_basic():
     ve = ValidationEngine(debug_mode=True)
-    
+
     policy_bank = ve.get_policy("銀行業")
     assert isinstance(policy_bank, dict)
 
@@ -27,19 +28,22 @@ def test_validation_engine_basic():
 
 def test_validation_engine_validate_polars():
     import polars as pl
+
     ve = ValidationEngine(debug_mode=True)
 
-    df_pl = pl.DataFrame({
-        "code": ["7203", "8306"],
-        "sector": ["輸送用機器", "銀行業"],
-        "price": [2500.0, 1000.0],
-        "per": [10.0, None],
-        "pbr": [1.0, 0.8],
-        "operating_cf": [100.0, 50.0],
-        "sales_growth": [0.05, 0.02],
-        "operating_margin": [0.10, 0.15],
-        "equity_ratio": [0.50, 0.08],
-    })
+    df_pl = pl.DataFrame(
+        {
+            "code": ["7203", "8306"],
+            "sector": ["輸送用機器", "銀行業"],
+            "price": [2500.0, 1000.0],
+            "per": [10.0, None],
+            "pbr": [1.0, 0.8],
+            "operating_cf": [100.0, 50.0],
+            "sales_growth": [0.05, 0.02],
+            "operating_margin": [0.10, 0.15],
+            "equity_ratio": [0.50, 0.08],
+        }
+    )
 
     res = ve.validate_batch_polars(df_pl, strategy="value")
     assert res is not None
@@ -47,10 +51,11 @@ def test_validation_engine_validate_polars():
 
 # --- StockReporter Tests ---
 
+
 def test_stock_reporter_generate_reports(tmp_path):
     os.environ["STOCK_ENV"] = "test"
     reporter = StockReporter(output_dir=str(tmp_path))
-    
+
     row_data = {
         "code": "7203",
         "name": "トヨタ自動車",
@@ -63,7 +68,7 @@ def test_stock_reporter_generate_reports(tmp_path):
         "quant_score": 85.0,
         "strategy_name": "value",
     }
-    
+
     results = [
         {
             "latest": row_data,

@@ -2,7 +2,9 @@ from logging import getLogger
 from typing import Any, Optional
 
 import polars as pl
+
 from src.repositories.duck_repository import DuckDBRepository
+
 
 class FundamentalsRepository:
     """業績データのリポジトリ (v6.1.0 DuckDB 一本化)"""

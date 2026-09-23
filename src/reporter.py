@@ -94,7 +94,9 @@ class StockReporter:
         # CSV 保存
         self.logger.debug(f"Saving Report to {report_path}")
         save_dataframe_to_csv(pd.DataFrame(output_rows), str(report_path))
-        self.logger.info(f"✅ Quant report generated: {report_path} ({len(output_rows):,} rows)")
+        self.logger.info(
+            f"✅ Quant report generated: {report_path} ({len(output_rows):,} rows)"
+        )
 
         return {"summary": report_path}
 
@@ -207,8 +209,6 @@ class StockReporter:
                 res["roe"] = (8.50, "calc")
 
         return res
-
-
 
     def _format_single_item(
         self, code_info: dict[str, Any], source_map: dict[str, str] | None

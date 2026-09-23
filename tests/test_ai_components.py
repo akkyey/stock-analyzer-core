@@ -1,15 +1,16 @@
 """src/ai/ モジュール群の包括的テスト"""
 
 from unittest.mock import MagicMock, patch
+
 import pytest
 
+from src.ai.agent import AIAgent
+from src.ai.key_manager import APIKeyManager
 from src.ai.prompt_builder import PromptBuilder
 from src.ai.response_parser import ResponseParser
-from src.ai.key_manager import APIKeyManager
-from src.ai.agent import AIAgent
-
 
 # --- PromptBuilder Tests ---
+
 
 def test_prompt_builder_basic():
     pb = PromptBuilder()
@@ -45,7 +46,13 @@ def test_prompt_builder_special_sectors():
 
 def test_prompt_builder_trend_and_deficiency():
     pb = PromptBuilder()
-    row_deficient = {"code": "1001", "name": "サンプル", "per": None, "pbr": None, "rsi_14": None}
+    row_deficient = {
+        "code": "1001",
+        "name": "サンプル",
+        "per": None,
+        "pbr": None,
+        "rsi_14": None,
+    }
     deficiency = pb._classify_data_deficiency(row_deficient)
     assert isinstance(deficiency, dict)
 
@@ -68,6 +75,7 @@ def test_prompt_builder_dossier():
 
 
 # --- ResponseParser Tests ---
+
 
 def test_response_parser_valid_json():
     rp = ResponseParser()
@@ -121,6 +129,7 @@ def test_response_parser_broken_json_and_validation():
 
 # --- APIKeyManager Tests ---
 
+
 def test_key_manager_basics():
     km = APIKeyManager(debug_mode=True)
     assert km.get_total_calls() >= 0
@@ -128,12 +137,13 @@ def test_key_manager_basics():
     idx = km.current_key_idx
     km.update_stats(idx, "success_count", 1)
     km.update_stats(idx, "total_calls", 1)
-    
+
     rotated = km.rotate_key()
     assert isinstance(rotated, bool)
 
 
 # --- Agent Tests ---
+
 
 def test_agent_initialization():
     agent = AIAgent(model_name="gemini-2.5-flash", debug_mode=True)
@@ -160,7 +170,9 @@ def test_agent_analyze_mocked(mock_get_client):
 
     agent = AIAgent(model_name="gemini-2.5-flash", debug_mode=True)
     agent.key_manager.api_keys = ["mock_key_1"]
-    agent.key_manager.key_stats = [{"success_count": 0, "error_count": 0, "total_calls": 0}]
+    agent.key_manager.key_stats = [
+        {"success_count": 0, "error_count": 0, "total_calls": 0}
+    ]
 
     row = {"code": "9999", "name": "テスト銘柄", "price": 1000}
     res = agent.analyze(row, strategy_name="value")
@@ -185,7 +197,9 @@ def test_agent_analyze_dossier_mocked(mock_get_client):
 
     agent = AIAgent(model_name="gemini-2.5-flash", debug_mode=True)
     agent.key_manager.api_keys = ["mock_key_1"]
-    agent.key_manager.key_stats = [{"success_count": 0, "error_count": 0, "total_calls": 0}]
+    agent.key_manager.key_stats = [
+        {"success_count": 0, "error_count": 0, "total_calls": 0}
+    ]
 
     dossier = {
         "code": "8888",

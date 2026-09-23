@@ -33,7 +33,7 @@ class JPXFetcher(FetcherBase):
             print("   ✨ Using latest JPX list from Local cache.", flush=True)
             return local_df
 
-        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
 
         # Session setup for User-Agent
         print(

@@ -2,7 +2,9 @@ from logging import getLogger
 from typing import Any, Optional
 
 import polars as pl
+
 from src.repositories.duck_repository import DuckDBRepository
+
 
 class StockRepository:
     """銘柄マスタのリポジトリ (v6.1.0 DuckDB 一本化)"""
@@ -43,7 +45,7 @@ class StockRepository:
             res = conn.execute(query, [code]).fetchone()
             if res:
                 cols = [desc[0] for desc in conn.description]
-                return dict(zip(cols, res))
+                return dict(zip(cols, res, strict=False))
         return None
 
     def exists(self, code: str) -> bool:

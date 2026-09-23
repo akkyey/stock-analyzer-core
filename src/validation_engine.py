@@ -8,9 +8,10 @@
 """
 
 from logging import getLogger
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
+    from src.config_schema import SectorPolicy
     from src.domain.models import StockAnalysisData
 
 
@@ -27,30 +28,27 @@ class ValidationEngine:
     """
 
     def __init__(
-        self, context: Optional["OrchestratorContext"] = None, debug_mode: bool = False
+        self,
+        context: Any = None,
+        debug_mode: bool = False,
     ):
         """ValidationEngine を初期化する。
 
         Args:
-            config (Dict[str, Any]): アプリケーション全体の設定辞書。
+            context (Any): OrchestratorContext または config 辞書。
         """
         self.logger = getLogger(__name__)
         self.context = context
         self.debug_mode = debug_mode
         self._policy_map: dict[str, "SectorPolicy"] = {}
+        self.config: dict[str, Any] = {}
 
-        # Assuming config is now accessed via context, or that the user intended to keep config.
-        # The original `__init__` took `config`. The new one takes `context`.
-        # If `config` is gone, then `self.config` must be set from `context`.
-        # Let's assume `context` has a `config` attribute.
         if self.context:
             if isinstance(self.context, dict):
                 self.config = self.context
             else:
                 self.config = getattr(self.context, "config", {})
         else:
-            # Fallback if no context is provided, though this might indicate a larger refactoring.
-            # For syntactic correctness, I'll initialize self.config to an empty dict if context is None.
             self.config = {}
 
         self.sector_policies = self.config.get("sector_policies", {})
@@ -85,15 +83,18 @@ class ValidationEngine:
         Returns:
             Dict[str, Any]: 該当セクターのポリシー辞書（未定義ならデフォルトを返す）。
         """
-        return self.sector_policies.get(sector, self.sector_policies.get("default", {}))
+        return cast(
+            dict[str, Any],
+            self.sector_policies.get(sector, self.sector_policies.get("default", {})),
+        )
 
     def get_ai_excludes(self, sector: str) -> list[str]:
         policy = self.get_policy(sector)
-        return policy.get("ai_prompt_excludes", [])
+        return cast(list[str], policy.get("ai_prompt_excludes", []))
 
     def get_score_exemptions(self, sector: str) -> list[str]:
         policy = self.get_policy(sector)
-        return policy.get("score_exemptions", [])
+        return cast(list[str], policy.get("score_exemptions", []))
 
     def check_sector_coverage(self, db_sectors: list[str]) -> None:
         defined_sectors = set(self.sector_policies.keys()) - {"default"}
@@ -131,7 +132,8 @@ class ValidationEngine:
 
         # テクニカル異常値チェック (RSI 範囲外等)
         anomalous_rsi = (
-            pl.col("rsi_14").is_not_null() & ((pl.col("rsi_14") < 0) | (pl.col("rsi_14") > 100))
+            pl.col("rsi_14").is_not_null()
+            & ((pl.col("rsi_14") < 0) | (pl.col("rsi_14") > 100))
             if "rsi_14" in df.columns
             else pl.lit(False)
         )

@@ -1,6 +1,7 @@
 """QuantAgentEvaluator の単体テスト (Phase 3 検証)"""
 
 import pytest
+
 from src.calc.quant_evaluator import QuantAgentEvaluator
 
 
@@ -21,7 +22,7 @@ def test_dead_stock_penalty():
             "ma25_divergence": 0.0,
             "macd_hist": 0.0,
             "macd_status": "Neutral",
-        }
+        },
     }
     score, verdict, thesis, risks = QuantAgentEvaluator.evaluate(dossier)
     assert score == 45.0
@@ -47,7 +48,7 @@ def test_macd_none_neutral():
             "ma25_divergence": 1.0,
             "macd_hist": None,
             "macd_status": "",
-        }
+        },
     }
     score, verdict, thesis, risks = QuantAgentEvaluator.evaluate(dossier)
     assert score > 50.0  # スコアが健全に算出されること
@@ -59,13 +60,23 @@ def test_rsi_gap_smooth_transition():
         "name": "テスト過熱株",
         "code": "1002",
         "fundamentals": {"roe": 10.0, "pbr": 1.5, "per": 12.0, "equity_ratio": 50.0},
-        "technicals": {"ma25_divergence": 2.0, "macd_hist": 0.1, "macd_status": "Bullish"},
+        "technicals": {
+            "ma25_divergence": 2.0,
+            "macd_hist": 0.1,
+            "macd_status": "Bullish",
+        },
     }
-    
+
     # RSI 65, 70, 75
-    dossier_65 = dict(base_dossier, technicals=dict(base_dossier["technicals"], rsi_14=65.0))
-    dossier_70 = dict(base_dossier, technicals=dict(base_dossier["technicals"], rsi_14=70.0))
-    dossier_75 = dict(base_dossier, technicals=dict(base_dossier["technicals"], rsi_14=75.0))
+    dossier_65 = dict(
+        base_dossier, technicals=dict(base_dossier["technicals"], rsi_14=65.0)
+    )
+    dossier_70 = dict(
+        base_dossier, technicals=dict(base_dossier["technicals"], rsi_14=70.0)
+    )
+    dossier_75 = dict(
+        base_dossier, technicals=dict(base_dossier["technicals"], rsi_14=75.0)
+    )
 
     s65, _, _, _ = QuantAgentEvaluator.evaluate(dossier_65)
     s70, _, _, _ = QuantAgentEvaluator.evaluate(dossier_70)
@@ -80,13 +91,23 @@ def test_ma_divergence_crash_penalty():
         "name": "通常リバウンド",
         "code": "1003",
         "fundamentals": {"roe": 10.0, "pbr": 1.0, "per": 10.0, "equity_ratio": 50.0},
-        "technicals": {"rsi_14": 30.0, "ma25_divergence": -15.0, "macd_hist": -0.5, "macd_status": "Bearish"},
+        "technicals": {
+            "rsi_14": 30.0,
+            "ma25_divergence": -15.0,
+            "macd_hist": -0.5,
+            "macd_status": "Bearish",
+        },
     }
     dossier_crash = {
         "name": "大暴落株",
         "code": "1004",
         "fundamentals": {"roe": 10.0, "pbr": 1.0, "per": 10.0, "equity_ratio": 50.0},
-        "technicals": {"rsi_14": 30.0, "ma25_divergence": -35.0, "macd_hist": -0.5, "macd_status": "Bearish"},
+        "technicals": {
+            "rsi_14": 30.0,
+            "ma25_divergence": -35.0,
+            "macd_hist": -0.5,
+            "macd_status": "Bearish",
+        },
     }
     s_norm, _, _, _ = QuantAgentEvaluator.evaluate(dossier_normal)
     s_crash, _, _, _ = QuantAgentEvaluator.evaluate(dossier_crash)
@@ -106,14 +127,14 @@ def test_one_off_profit_trap_suppression():
             "equity_ratio": 65.2,
             "dividend_yield": 0.0,
             "operating_income": -2588000000.0,  # 本業赤字
-            "net_profit": 3940000000.0,         # 資産売却等による最終黒字
+            "net_profit": 3940000000.0,  # 資産売却等による最終黒字
         },
         "technicals": {
             "rsi_14": 37.0,
             "ma25_divergence": -1.1,
             "macd_hist": 0.5,
             "macd_status": "Bullish (Above Signal)",
-        }
+        },
     }
     score, verdict, _, _ = QuantAgentEvaluator.evaluate(dossier_trap)
     # 本来満点(12点)なら80点超STRONG_BUYになるが、PER0点抑制かつゲートキーパーによりWATCHに制限されること
@@ -139,7 +160,7 @@ def test_negative_roe_verdict_cap():
             "ma25_divergence": -5.0,
             "macd_hist": 2.0,
             "macd_status": "Bullish (Above Signal)",
-        }
+        },
     }
     score, verdict, _, _ = QuantAgentEvaluator.evaluate(dossier_neg_roe)
     assert verdict in ["WATCH", "PASS"]
@@ -147,8 +168,18 @@ def test_negative_roe_verdict_cap():
     assert verdict != "STRONG_BUY"
 
     # 2. _determine_verdict ゲートキーパー単体での上限キャップ検証 (仮にスコアが75.0や85.0でもWATCHに落とされること)
-    assert QuantAgentEvaluator._determine_verdict(score=75.0, roe=-0.5, macd_status="Bullish", ma_div=0.0) == "WATCH"
-    assert QuantAgentEvaluator._determine_verdict(score=85.0, roe=-1.2, macd_status="Bullish", ma_div=0.0) == "WATCH"
+    assert (
+        QuantAgentEvaluator._determine_verdict(
+            score=75.0, roe=-0.5, macd_status="Bullish", ma_div=0.0
+        )
+        == "WATCH"
+    )
+    assert (
+        QuantAgentEvaluator._determine_verdict(
+            score=85.0, roe=-1.2, macd_status="Bullish", ma_div=0.0
+        )
+        == "WATCH"
+    )
 
 
 def test_bearish_momentum_gatekeeper():
@@ -168,12 +199,15 @@ def test_bearish_momentum_gatekeeper():
             "ma25_divergence": -4.1,
             "macd_hist": -0.5,
             "macd_status": "Bearish (Below Signal)",
-        }
+        },
     }
     _, verdict, _, _ = QuantAgentEvaluator.evaluate(dossier_bearish)
     assert verdict != "STRONG_BUY"
 
     # さらに深い下落トレンド (-15%) の場合は WATCH へ制限
-    dossier_deep_bearish = dict(dossier_bearish, technicals=dict(dossier_bearish["technicals"], ma25_divergence=-15.0))
+    dossier_deep_bearish = dict(
+        dossier_bearish,
+        technicals=dict(dossier_bearish["technicals"], ma25_divergence=-15.0),
+    )
     _, verdict_deep, _, _ = QuantAgentEvaluator.evaluate(dossier_deep_bearish)
     assert verdict_deep == "WATCH"

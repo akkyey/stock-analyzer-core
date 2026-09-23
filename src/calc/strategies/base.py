@@ -3,6 +3,7 @@
 BaseStrategy: Abstract Base Class for Investment Strategies
 [v8.0] Enhanced with common utility methods from BaseCalculator.
 """
+
 from abc import ABC, abstractmethod
 from logging import getLogger
 from typing import Any
@@ -44,7 +45,7 @@ class BaseStrategy(ABC):
             else self.config.get("current_strategy", "Balanced Strategy")
         )
         strategies = self.config.get("strategies", {})
-        return strategies.get(target, {})
+        return dict(strategies.get(target, {}))
 
     def _safe_float(self, value) -> float | None:
         """Convert value to float safely (Scalar version) - delegated to utils."""

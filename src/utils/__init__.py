@@ -30,7 +30,7 @@ class DateManager:
 
         # pd.Timestamp / datetime 対応
         if hasattr(val, "strftime"):
-            return val.strftime("%Y-%m-%d")
+            return str(val.strftime("%Y-%m-%d"))
 
         # 文字列対応
         s = str(val).strip()
@@ -42,7 +42,7 @@ class DateManager:
             # [v21.8] 警告抑制のため errors='coerce' を明示
             dt = pd.to_datetime(s, errors="coerce")
             if pd.notna(dt) and hasattr(dt, "strftime"):
-                return dt.strftime("%Y-%m-%d")
+                return str(dt.strftime("%Y-%m-%d"))
         except (ValueError, TypeError):
             pass
 
@@ -107,7 +107,7 @@ def clean_nan_dict(data: dict[str, Any]) -> dict[str, Any]:
     Returns:
         変換後の辞書。元の辞書は変更しない。
     """
-    result = {}
+    result: dict[str, Any] = {}
     for k, v in data.items():
         if isinstance(v, dict):
             result[k] = clean_nan_dict(v)
@@ -193,6 +193,7 @@ def save_dataframe_to_csv(
     """
     logger = getLogger(__name__)
     import csv
+
     try:
         file_path = Path(path)
         if file_path.parent:
@@ -200,11 +201,26 @@ def save_dataframe_to_csv(
 
         now_str = get_current_time().strftime("%Y-%m-%d %H:%M:%S")
         if include_timestamp_header:
-            with open(file_path, "w", encoding=encoding, newline="", errors="replace") as f:
+            with open(
+                file_path, "w", encoding=encoding, newline="", errors="replace"
+            ) as f:
                 f.write(f"# Generated At: {now_str}\n")
-            df.to_csv(file_path, mode="a", index=index, encoding=encoding, errors="replace", quoting=csv.QUOTE_MINIMAL)
+            df.to_csv(
+                file_path,
+                mode="a",
+                index=index,
+                encoding=encoding,
+                errors="replace",
+                quoting=csv.QUOTE_MINIMAL,
+            )
         else:
-            df.to_csv(file_path, index=index, encoding=encoding, errors="replace", quoting=csv.QUOTE_MINIMAL)
+            df.to_csv(
+                file_path,
+                index=index,
+                encoding=encoding,
+                errors="replace",
+                quoting=csv.QUOTE_MINIMAL,
+            )
 
         logger.info(f"✅ CSV saved: {path} (Generated At: {now_str})")
         return True
@@ -338,4 +354,3 @@ def rotate_file_backup(file_path: str) -> None:
     except Exception as e:
         logger = getLogger(__name__)
         logger.warning(f"⚠️ Failed to backup file: {e}")
-

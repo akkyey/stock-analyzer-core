@@ -1,10 +1,11 @@
 from logging import getLogger
 from typing import Any, Optional
 
-import polars as pl
 import pandas as pd
+import polars as pl
+
 from src.repositories.duck_repository import DuckDBRepository
-from src.utils import get_current_time
+
 
 class MarketDataRepository:
     """市況データのリポジトリ (v6.1.0 DuckDB 一本化)"""
@@ -30,7 +31,7 @@ class MarketDataRepository:
             res = conn.execute(query, [date_str]).fetchall()
             return {row[0] for row in res}
 
-    def get_id(self, code: str, entry_date: str) -> int | None:
+    def get_id(self, code: str, entry_date: str) -> str | None:
         """market_data_id (DuckDB では便宜上の一意識別) を取得する。"""
         # DuckDB では ID 自体より (code, entry_date) が主キー相当
         return f"{code}_{entry_date}"
@@ -74,7 +75,10 @@ class MarketDataRepository:
     def get_all_history_pl(self, months: int = 3) -> pl.DataFrame:
         """指定された月数分の全銘柄の履歴データを取得する。"""
         from datetime import datetime, timedelta
-        cutoff_date = (datetime.now() - timedelta(days=months * 31)).strftime("%Y-%m-%d")
+
+        cutoff_date = (datetime.now() - timedelta(days=months * 31)).strftime(
+            "%Y-%m-%d"
+        )
 
         query = """
             SELECT 
@@ -89,25 +93,33 @@ class MarketDataRepository:
         try:
             with self.duck_repo.client.get_connection() as conn:
                 df = conn.execute(query, [cutoff_date]).pl()
-            
+
             if df.is_empty():
                 return df
 
             # OHLC 形式のダミー列を追加（バックテスト/検証用互換性）
-            return df.with_columns([
-                pl.lit(0.0).alias("Open"),
-                pl.lit(0.0).alias("High"),
-                pl.lit(0.0).alias("Low"),
-                pl.col("Close").alias("Adj Close"),
-                pl.col("Date").cast(pl.String).str.to_datetime("%Y-%m-%d", strict=False)
-            ]).select(["code", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"])
+            return df.with_columns(
+                [
+                    pl.lit(0.0).alias("Open"),
+                    pl.lit(0.0).alias("High"),
+                    pl.lit(0.0).alias("Low"),
+                    pl.col("Close").alias("Adj Close"),
+                    pl.col("Date")
+                    .cast(pl.String)
+                    .str.to_datetime("%Y-%m-%d", strict=False),
+                ]
+            ).select(
+                ["code", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            )
         except Exception as e:
             self.logger.error(f"Error fetching historical records: {e}")
             return pl.DataFrame()
 
     def get_calendar_dates(self, start_date: str, end_date: str) -> list[Any]:
         """指定期間の営業日リストを DB から取得する。"""
-        query = "SELECT date FROM market_calendar WHERE date BETWEEN ? AND ? ORDER BY date"
+        query = (
+            "SELECT date FROM market_calendar WHERE date BETWEEN ? AND ? ORDER BY date"
+        )
         try:
             with self.duck_repo.client.get_connection() as conn:
                 res = conn.execute(query, [start_date, end_date]).fetchall()
@@ -120,7 +132,7 @@ class MarketDataRepository:
         """営業日リストを DB へ永続化する。"""
         if not dates:
             return
-        
+
         # DuckDB への INSERT OR IGNORE 相当の処理
         query = "INSERT OR IGNORE INTO market_calendar (date) VALUES (?)"
         try:

@@ -1,10 +1,12 @@
 from datetime import timedelta
 from logging import getLogger
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import polars as pl
+
 from src.repositories.duck_repository import DuckDBRepository
 from src.utils import get_current_time
+
 
 class AnalysisRepository:
     """分析結果のリポジトリ (v6.1.0 DuckDB 一本化)"""
@@ -18,15 +20,17 @@ class AnalysisRepository:
         """分析結果を DuckDB に保存する。"""
         if not record:
             return
-        
+
         # 銘柄マスタへの参照を保証するため、必要ならコードを正規化
         df = pl.from_dicts([record])
         self.duck_repo.save_analysis_results(df)
         self.logger.debug(f"Saved analysis record to DuckDB for {record.get('code')}")
 
-    def get_cache(self, code: str, row_hash: str, strategy: str) -> dict[str, Any] | None:
+    def get_cache(
+        self, code: str, row_hash: str, strategy: str
+    ) -> dict[str, Any] | None:
         """AI分析結果のキャッシュを取得する。
-        
+
         銘柄コード、入力データのハッシュ(row_hash)、および戦略名がすべて一致する最新のレコードを返す。
         """
         query = """
@@ -38,10 +42,12 @@ class AnalysisRepository:
             res = conn.execute(query, [code, row_hash, strategy]).fetchone()
             if res:
                 cols = [desc[0] for desc in conn.description]
-                return dict(zip(cols, res))
+                return dict(zip(cols, res, strict=False))
         return None
 
-    def get_smart_cache(self, code: str, strategy: str, validity_days: int) -> dict[str, Any] | None:
+    def get_smart_cache(
+        self, code: str, strategy: str, validity_days: int
+    ) -> dict[str, Any] | None:
         """指定期間内の最新かつ有効な AI分析結果を取得する。"""
         threshold_date = get_current_time() - timedelta(days=validity_days)
         query = """
@@ -53,10 +59,12 @@ class AnalysisRepository:
             res = conn.execute(query, [code, strategy, threshold_date]).fetchone()
             if res:
                 cols = [desc[0] for desc in conn.description]
-                return dict(zip(cols, res))
+                return dict(zip(cols, res, strict=False))
         return None
 
-    def clear(self, strategy_name: str | None = None, date_str: str | None = None) -> int:
+    def clear(
+        self, strategy_name: str | None = None, date_str: str | None = None
+    ) -> int:
         """分析結果をクリアする。"""
         query = "DELETE FROM analysis_results WHERE 1=1"
         params = []
@@ -75,7 +83,11 @@ class AnalysisRepository:
                 return count
         except Exception as e:
             self.logger.error(f"Error clearing analysis results: {e}")
-    def get_top_results(self, strategy_name: str, limit: int = 50) -> list[dict[str, Any]]:
+            return 0
+
+    def get_top_results(
+        self, strategy_name: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
         """戦略ごとのスコア上位銘柄を取得する。"""
         query = """
             SELECT code, quant_score 
@@ -88,7 +100,10 @@ class AnalysisRepository:
             with self.duck_repo.client.get_connection() as conn:
                 res = conn.execute(query, [strategy_name, limit]).fetchall()
                 # code, quant_score の辞書リストに変換
-                return [{"code": row[0], "quant_score": row[1], "strategy": strategy_name} for row in res]
+                return [
+                    {"code": row[0], "quant_score": row[1], "strategy": strategy_name}
+                    for row in res
+                ]
         except Exception as e:
             self.logger.error(f"Error fetching top results for {strategy_name}: {e}")
             return []
@@ -104,30 +119,30 @@ class AnalysisRepository:
             return 0
 
     def delete_by_codes(
-        self, 
-        codes: list[str], 
-        before_date: Any | None = None, 
-        exclude_mock: bool = False
+        self,
+        codes: list[str],
+        before_date: Any | None = None,
+        exclude_mock: bool = False,
     ) -> int:
         """指定された銘柄コードの分析結果を削除する。
-        
+
         Optional:
         - before_date: この日付より前のレコードのみ削除
         - exclude_mock: True の場合、ai_reason に '[MOCK]' を含むレコードを削除対象から除外する
         """
         if not codes:
             return 0
-            
+
         query = "DELETE FROM analysis_results WHERE code IN (SELECT * FROM (SELECT UNNEST(?)))"
         params = [codes]
-        
+
         if before_date:
             query += " AND analyzed_at < ?"
             params.append(before_date)
-            
+
         if exclude_mock:
             query += " AND ai_reason NOT LIKE '%[MOCK]%'"
-            
+
         try:
             with self.duck_repo.client.get_connection() as conn:
                 res = conn.execute(query + " RETURNING *", params).fetchall()

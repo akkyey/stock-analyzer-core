@@ -109,7 +109,7 @@ class ConfigLoader:
             )
             return {}
 
-        self.config_path = actual_path
+        self.config_path = str(actual_path)
         try:
             with open(actual_path, encoding="utf-8") as f:  # noqa: PTH123
                 print(f"✅ Loaded user config from: {actual_path.resolve()}")

@@ -1,7 +1,9 @@
-import pandas as pd
+import os
 import sys
 from pathlib import Path
-import os
+
+import pandas as pd
+
 
 def generate_html_report(csv_path: str, output_path: str):
     """CSV を DataTables 付きの HTML レポートに変換する。"""
@@ -10,7 +12,7 @@ def generate_html_report(csv_path: str, output_path: str):
         return
 
     df = pd.read_csv(csv_path)
-    
+
     # 簡易的な HTML テンプレート
     html_template = f"""
     <!DOCTYPE html>
@@ -18,7 +20,7 @@ def generate_html_report(csv_path: str, output_path: str):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Stock Analysis Report - {pd.Timestamp.now().strftime('%Y-%m-%d')}</title>
+        <title>Stock Analysis Report - {pd.Timestamp.now().strftime("%Y-%m-%d")}</title>
         <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css">
         <style>
             body {{ font-family: 'Helvetica Neue', Arial, sans-serif; margin: 20px; background-color: #f4f7f9; }}
@@ -34,10 +36,10 @@ def generate_html_report(csv_path: str, output_path: str):
     <body>
         <h1>📈 Stock Analysis Report</h1>
         <div class="center" style="text-align: center; margin-bottom: 20px;">
-            Update: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M JST')}
+            Update: {pd.Timestamp.now().strftime("%Y-%m-%d %H:%M JST")}
         </div>
         <div class="container">
-            {df.to_html(classes='display nowrap', id='analysis-table', index=False)}
+            {df.to_html(classes="display nowrap", id="analysis-table", index=False)}
         </div>
 
         <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
@@ -65,20 +67,21 @@ def generate_html_report(csv_path: str, output_path: str):
     </body>
     </html>
     """
-    
+
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html_template)
     print(f"✅ HTML report generated: {output_path}")
 
+
 if __name__ == "__main__":
     csv_file = "data/output/analysis_result.csv"
     output_file = "docs/index.html"
-    
+
     # 実行場所に合わせてパスを調整
     if len(sys.argv) > 1:
         csv_file = sys.argv[1]
     if len(sys.argv) > 2:
         output_file = sys.argv[2]
-        
+
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     generate_html_report(csv_file, output_file)

@@ -11,7 +11,9 @@ import polars as pl
 import yfinance as yf
 
 # パス解決
-sys.path.insert(0, os.path.abspath("."))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from src.fetcher.polars_processor import PolarsProcessor
 from src.orchestration.dossier_builder import StockDossierBuilder

@@ -7,8 +7,11 @@ GenericStrategy (軽量互換スタブ)
 以下のアーカイブへ完全退避されました:
 `archive/legacy_strategies/generic_original.py`
 """
+
 from typing import Any
+
 import pandas as pd
+
 from .base import BaseStrategy
 
 

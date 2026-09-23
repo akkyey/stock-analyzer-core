@@ -1,9 +1,10 @@
-import os
-import requests
-import pandas as pd
 import logging
+import os
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional, cast
+
+import pandas as pd
+import requests
 
 
 class EdinetFetcher:
@@ -24,7 +25,9 @@ class EdinetFetcher:
         )
         self.api_key = os.getenv("EDINET_API_KEY")
 
-    def _get_headers_and_params(self, extra_params: Dict[str, Any] = None) -> tuple:
+    def _get_headers_and_params(
+        self, extra_params: Optional[Dict[str, Any]] = None
+    ) -> tuple:
         params = extra_params.copy() if extra_params else {}
         headers = self.DEFAULT_HEADERS.copy()
 
@@ -43,14 +46,16 @@ class EdinetFetcher:
         try:
             response = requests.get(url, params=params, headers=headers, timeout=30)
             response.raise_for_status()
-            return response.json()
+            return cast(Dict[str, Any], response.json())
         except requests.exceptions.JSONDecodeError as e:
             self.logger.warning(
                 f"⚠️ EDINET API returned non-JSON response for {date_str} (HTTP {response.status_code}): {e}. Content preview: {response.text[:150]}"
             )
             return {"results": []}
         except Exception as e:
-            self.logger.error(f"❌ Failed to fetch EDINET documents for {date_str}: {e}")
+            self.logger.error(
+                f"❌ Failed to fetch EDINET documents for {date_str}: {e}"
+            )
             return {"results": []}
 
     def parse_code_listing(self) -> Dict[str, str]:

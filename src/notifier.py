@@ -6,8 +6,9 @@ DiscordNotifier (軽量互換スタブ)
 以下のアーカイブへ退避されました:
 `archive/legacy_orchestrator_v13/notifier_original.py`
 """
-from typing import Any
+
 from logging import getLogger
+from typing import Any
 
 logger = getLogger(__name__)
 

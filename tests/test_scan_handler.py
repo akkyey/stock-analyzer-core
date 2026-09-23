@@ -1,7 +1,10 @@
-import pytest
-import polars as pl
 from unittest.mock import MagicMock, patch
+
+import polars as pl
+import pytest
+
 from src.orchestration.scan_handler import ScanHandler
+
 
 @pytest.fixture
 def mock_context():
@@ -9,17 +12,19 @@ def mock_context():
     context.config = {
         "strategies": {"growth": {}},
         "ai": {"target_limit": 10},
-        "scoring": {"scan_limit": 100}
+        "scoring": {"scan_limit": 100},
     }
     context.logger = MagicMock()
     context.debug_mode = True
     context.perf_stats = {"calc_sec": 0, "db_sec": 0}
     return context
 
+
 def test_scan_handler_mode_name():
     """ScanHandler のモード名が 'daily' であることのテスト"""
     handler = ScanHandler()
     assert handler.get_mode_name() == "daily"
+
 
 @patch("src.orchestration.scan_handler.OrchestrationPipeline")
 def test_scan_handler_execute_success(mock_pipeline_cls, mock_context):
@@ -33,6 +38,7 @@ def test_scan_handler_execute_success(mock_pipeline_cls, mock_context):
     mock_pipeline_cls.assert_called_once_with(mock_context)
     mock_pipeline.run.assert_called_once()
     mock_context.print_session_summary.assert_called_once()
+
 
 @patch("src.orchestration.scan_handler.OrchestrationPipeline")
 def test_scan_handler_execute_failure(mock_pipeline_cls, mock_context):

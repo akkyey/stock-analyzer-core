@@ -6,6 +6,7 @@ AI エージェント（アナリスト）が最も解釈・推論しやすい�
 """
 
 from typing import Any, Dict, List, Optional
+
 import polars as pl
 
 
@@ -69,11 +70,14 @@ class StockDossierBuilder:
     @classmethod
     def build_trigger_reasons(cls, row: Dict[str, Any]) -> List[str]:
         """各種指標から、一次選定された理由（着目トリガー）を人間・AIに分かりやすくタグ化する。"""
-        return cls._extract_technical_triggers(row) + cls._extract_fundamental_triggers(row)
+        return cls._extract_technical_triggers(row) + cls._extract_fundamental_triggers(
+            row
+        )
 
     @classmethod
     def from_row(cls, row: Dict[str, Any]) -> Dict[str, Any]:
         """DataFrame の 1 行（辞書形式）から単一の StockDossier を構築する。"""
+
         # 数値の丸め・Null 安全処理
         def _round(val: Any, digits: int = 2) -> Optional[float]:
             if val is None:
@@ -81,6 +85,7 @@ class StockDossierBuilder:
             try:
                 f = float(val)
                 import math
+
                 if math.isnan(f) or math.isinf(f):
                     return None
                 return round(f, digits)
@@ -139,7 +144,9 @@ class StockDossierBuilder:
         }
 
     @classmethod
-    def from_dataframe(cls, df: pl.DataFrame, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def from_dataframe(
+        cls, df: pl.DataFrame, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         """Polars DataFrame から StockDossier リストを構築する。limit 未指定時は全件。"""
         if df.is_empty():
             return []
@@ -155,11 +162,11 @@ class StockDossierBuilder:
         t = dossier.get("technicals", {})
         triggers = ", ".join(dossier.get("trigger_reasons", [])) or "特記事項なし"
 
-        md = f"""### 銘柄: {dossier.get('name')} ({dossier.get('code')}) [{dossier.get('sector')} / {dossier.get('market')}]
-- **現在株価**: {t.get('price')} 円 (出来高倍率: {t.get('volume_ratio')}x)
-- **テクニカル**: RSI(14)={t.get('rsi_14')}, 25日乖離率={t.get('ma25_divergence')}%, MACD={t.get('macd_status')}
-- **ファンダメンタルズ**: PER={f.get('per')}倍, PBR={f.get('pbr')}倍, ROE={f.get('roe')}%, 配当利回り={f.get('dividend_yield')}%, 自己資本比率={f.get('equity_ratio')}%
-- **業績水準**: 営業利益率={f.get('operating_margin')}%, 純利益成長率={f.get('net_profit_growth')}%
+        md = f"""### 銘柄: {dossier.get("name")} ({dossier.get("code")}) [{dossier.get("sector")} / {dossier.get("market")}]
+- **現在株価**: {t.get("price")} 円 (出来高倍率: {t.get("volume_ratio")}x)
+- **テクニカル**: RSI(14)={t.get("rsi_14")}, 25日乖離率={t.get("ma25_divergence")}%, MACD={t.get("macd_status")}
+- **ファンダメンタルズ**: PER={f.get("per")}倍, PBR={f.get("pbr")}倍, ROE={f.get("roe")}%, 配当利回り={f.get("dividend_yield")}%, 自己資本比率={f.get("equity_ratio")}%
+- **業績水準**: 営業利益率={f.get("operating_margin")}%, 純利益成長率={f.get("net_profit_growth")}%
 - **着目トリガー**: {triggers}
 """
         return md

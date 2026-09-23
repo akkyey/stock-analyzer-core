@@ -1,7 +1,7 @@
 [tool.ruff]
 line-length = 88
 target-version = "py312"
-exclude = ["venv", "stock-analyzer4"]
+exclude = ["venv", ".venv", "stock-analyzer4"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
@@ -17,13 +17,13 @@ python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
-exclude = ["venv", "stock-analyzer4"]
+exclude = ["venv", ".venv", "stock-analyzer4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 pythonpath = ["."]
-norecursedirs = [".git", "venv", "env", "data", "stock-analyzer4", "archive"]
+norecursedirs = [".git", "venv", ".venv", "env", "data", "stock-analyzer4", "archive"]
 addopts = "-v --ignore=tests/integration_old --cov=src --cov-report=term-missing"
 markers = [
     "integration: integration tests",

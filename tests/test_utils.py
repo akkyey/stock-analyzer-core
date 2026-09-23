@@ -2,22 +2,23 @@
 
 import math
 from datetime import datetime
+
 import pandas as pd
 import pytest
 
 from src.utils import (
     DateManager,
+    clean_nan_dict,
+    ensure_dir,
+    generate_row_hash,
     get_current_time,
     get_today_str,
     is_empty,
-    clean_nan_dict,
+    rotate_file_backup,
+    safe_display_value,
     safe_float,
     safe_float_or_none,
-    ensure_dir,
     save_dataframe_to_csv,
-    safe_display_value,
-    generate_row_hash,
-    rotate_file_backup,
 )
 
 
@@ -33,7 +34,7 @@ def test_date_manager():
 def test_time_and_empty():
     assert isinstance(get_current_time(), datetime)
     assert len(get_today_str()) == 10
-    
+
     assert is_empty(None) is True
     assert is_empty(math.nan) is True
     assert is_empty("") is True

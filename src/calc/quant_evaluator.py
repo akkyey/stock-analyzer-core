@@ -19,8 +19,10 @@ class QuantAgentEvaluator:
     def _is_dead_stock(cls, rsi: Optional[float], ma_div: Optional[float]) -> bool:
         """死に株・商い停止（直近で値動きなし）の判定"""
         return (
-            rsi is not None and abs(rsi - 50.0) < 0.001
-            and ma_div is not None and abs(ma_div) < 0.001
+            rsi is not None
+            and abs(rsi - 50.0) < 0.001
+            and ma_div is not None
+            and abs(ma_div) < 0.001
         )
 
     @classmethod
@@ -70,7 +72,11 @@ class QuantAgentEvaluator:
         if per < 4.0:
             if operating_margin is not None and operating_margin <= 0:
                 return 0.0  # 営業利益率赤字による特別利益トラップ
-            if operating_income is not None and net_profit is not None and net_profit > 0:
+            if (
+                operating_income is not None
+                and net_profit is not None
+                and net_profit > 0
+            ):
                 if operating_income <= 0 or (operating_income / net_profit < 0.5):
                     return 0.0  # 本業実力と乖離した特別利益トラップ
             if per < 3.0:
@@ -262,5 +268,3 @@ class QuantAgentEvaluator:
         )
 
         return score, verdict, "", []
-
-

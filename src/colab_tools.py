@@ -46,9 +46,9 @@ class ColabTools:
             return None
 
         try:
+            from google.oauth2 import service_account
             from googleapiclient.discovery import build
             from googleapiclient.http import MediaFileUpload
-            from google.oauth2 import service_account
 
             creds = service_account.Credentials.from_service_account_file(
                 creds_path,
@@ -65,10 +65,11 @@ class ColabTools:
                 .create(body=file_metadata, media_body=media, fields="id, webViewLink")
                 .execute()
             )
-            return uploaded_file.get("webViewLink")
+            val = uploaded_file.get("webViewLink")
+            return str(val) if val is not None else None
         except Exception:
             return None
 
-    def export_to_sheets(self, *args: Any, **kwargs: Any) -> None:
+    def export_to_sheets(self, *args: Any, **kwargs: Any) -> str | None:
         """Google Sheets エクスポート互換スタブ"""
-        pass
+        return None

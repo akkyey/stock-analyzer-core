@@ -158,7 +158,9 @@ class ConfigModel(BaseModel):
     ai: AIConfig
     circuit_breaker: CircuitBreakerConfig
     database: DatabaseConfig
-    financial_repair: FinancialRepairConfig = Field(default_factory=FinancialRepairConfig)
+    financial_repair: FinancialRepairConfig = Field(
+        default_factory=FinancialRepairConfig
+    )
     gdrive: GDriveConfig | None = None
     sector_policies: dict[str, SectorPolicy] = Field(default_factory=dict)
     sector_risks: dict[str, str] = Field(default_factory=dict)

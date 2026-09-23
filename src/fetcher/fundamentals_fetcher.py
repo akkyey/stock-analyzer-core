@@ -7,6 +7,7 @@
 
 import logging
 from typing import Any
+
 import yfinance as yf
 
 from .base import FetcherBase

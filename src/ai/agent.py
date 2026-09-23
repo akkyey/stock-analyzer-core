@@ -120,7 +120,7 @@ class AIAgent:
     @property
     def sector_policies(self) -> dict[str, Any]:
         """互換性のためのエイリアス"""
-        return self.config.get("sector_policies", {})
+        return dict(self.config.get("sector_policies", {}))
 
     @sector_policies.setter
     def sector_policies(self, value: dict[str, Any]) -> None:
@@ -155,7 +155,7 @@ class AIAgent:
         ]
         for i, stats in enumerate(self.key_stats):
             status_icon = "✅" if stats["status"] == "active" else "🚫"
-            lines.append(f"Key #{i+1}: {status_icon} {stats['status']}")
+            lines.append(f"Key #{i + 1}: {status_icon} {stats['status']}")
             lines.append(f"  - Total Calls: {stats['total_calls']}")
             lines.append(f"  - Success:     {stats['success_count']}")
             lines.append(f"  - Retries(BL): {stats['retry_count']}")
@@ -203,7 +203,9 @@ class AIAgent:
 
             # クォータ制限（429 / ResourceExhausted）のチェック
             if "429" in err_msg or "ResourceExhausted" in err_msg:
-                self.logger.warning(f"⚠️ Key #{idx+1} hit rate limit (429). Rotating...")
+                self.logger.warning(
+                    f"⚠️ Key #{idx + 1} hit rate limit (429). Rotating..."
+                )
                 self.key_manager.update_stats(idx, "error_429_count")
                 self.key_manager.key_stats[idx]["is_exhausted"] = True
                 if self._rotate_key():
@@ -341,7 +343,7 @@ class AIAgent:
 
                 if not response:
                     self.logger.warning(
-                        f"⚠️ Attempt {attempt+1} failed: No response from API."
+                        f"⚠️ Attempt {attempt + 1} failed: No response from API."
                     )
                     continue
 
@@ -357,11 +359,11 @@ class AIAgent:
                     break
                 else:
                     self.logger.warning(
-                        f"⚠️ Attempt {attempt+1} failed quality check: {err_reason}"
+                        f"⚠️ Attempt {attempt + 1} failed quality check: {err_reason}"
                     )
                     self.key_manager.update_stats(idx, "retry_count")
             except Exception as e:
-                self.logger.error(f"Attempt {attempt+1} failed with error: {e}")
+                self.logger.error(f"Attempt {attempt + 1} failed with error: {e}")
 
         if not final_result:
             return {
@@ -445,7 +447,7 @@ class AIAgent:
             try:
                 parsed = json.loads(json_match.group(0))
                 parsed["name"] = name
-                return parsed
+                return dict(parsed)
             except Exception as e:
                 self.logger.warning(f"Failed to parse verdict JSON for {code}: {e}")
 

@@ -5,16 +5,16 @@ DuckDB への具体的なデータ読み書きを担当する。
 """
 
 from logging import getLogger
-from typing import List, Optional
+from typing import Any, List, Optional
+
 import polars as pl
-import duckdb
 
 from src.database.duck_client import DuckDBClient
-from src.utils import get_current_time
+
 
 class DuckDBRepository:
     """DuckDB 向けリポジトリ実装 (v6.1.0 Unified)
-    
+
     - [x] **Task 1: DuckDBRepository の基盤化 (Structural Hardening)**
     - [x] `_upsert_dataframe` 共通テンプレートメソッドの実装
     - [x] `save_stocks` のテンプレート移行
@@ -29,10 +29,7 @@ class DuckDBRepository:
         self.ensure_schema()
 
     def _upsert_dataframe(
-        self, 
-        table_name: str, 
-        df: pl.DataFrame, 
-        conflict_keys: List[str]
+        self, table_name: str, df: pl.DataFrame, conflict_keys: List[str]
     ) -> None:
         """[v6.3.0] 基盤的な UPSERT ロジック。
         入力 DF のカラム構成に依存せず、テーブル定義に基づいた固定 SQL 生成を強制する。
@@ -47,7 +44,7 @@ class DuckDBRepository:
             # ターゲットテーブルの実際のカラム一覧を取得
             table_info = conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
             fixed_cols = [row[1] for row in table_info if row[1] != "updated_at"]
-            
+
             # 元の入力 DF に存在するカラムを保持（UPDATE対象を限定するため）
             input_cols = set(df.columns)
 
@@ -55,27 +52,31 @@ class DuckDBRepository:
             for col in fixed_cols:
                 if col not in df.columns:
                     df = df.with_columns(pl.lit(None).alias(col))
-            
+
             # 保存対象カラムの文字列化
             col_str = ", ".join(fixed_cols)
             # UPDATE 対象は「元の入力 DF に存在したカラム」かつ「conflict_keys でないもの」に限定
-            update_cols = [c for c in fixed_cols if c not in conflict_keys and c in input_cols]
+            update_cols = [
+                c for c in fixed_cols if c not in conflict_keys and c in input_cols
+            ]
             set_exprs = [f"{c} = EXCLUDED.{c}" for c in update_cols]
             set_str = ", ".join(set_exprs)
-            
+
             if "updated_at" in [row[1] for row in table_info]:
                 if set_str:
                     set_str += ", updated_at = now()"
                 else:
                     set_str = "updated_at = now()"
-            
+
             conflict_target = ", ".join(conflict_keys)
             temp_table = f"_tmp_upsert_{table_name}"
 
             # Polars DF を temp table として登録（必要なカラムのみを select）
-            df_to_save = df.select(fixed_cols)
-            conn.execute(f"CREATE OR REPLACE TEMPORARY TABLE {temp_table} AS SELECT * FROM df_to_save")
-            
+            df_to_save = df.select(fixed_cols)  # noqa: F841
+            conn.execute(
+                f"CREATE OR REPLACE TEMPORARY TABLE {temp_table} AS SELECT * FROM df_to_save"
+            )
+
             if set_str:
                 conflict_action = f"DO UPDATE SET {set_str}"
             else:
@@ -99,9 +100,10 @@ class DuckDBRepository:
         """非営業日（土日）のレコードを一括削除する (v26.6 Resilience)。"""
         with self.client.get_connection() as conn:
             # DuckDB's dayofweek: 0 (Sunday) to 6 (Saturday)
-            res = conn.execute("DELETE FROM daily_metrics WHERE dayofweek(entry_date) IN (0, 6)")
+            conn.execute(
+                "DELETE FROM daily_metrics WHERE dayofweek(entry_date) IN (0, 6)"
+            )
             self.logger.info("Purged weekend records from daily_metrics.")
-
 
     def ensure_schema(self):
         """必要なテーブルが存在することを確認する。"""
@@ -238,9 +240,15 @@ class DuckDBRepository:
                 )
             """)
             # [v28.5] Schema Evolution
-            conn.execute("ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS prev_net_profit DOUBLE")
-            conn.execute("ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS shares_outstanding DOUBLE")
-            conn.execute("ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS operating_income DOUBLE")
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS prev_net_profit DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS shares_outstanding DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS operating_income DOUBLE"
+            )
 
             # 順位履歴
             conn.execute("""
@@ -262,9 +270,11 @@ class DuckDBRepository:
     def get_all_codes(self) -> List[str]:
         """登録されている全銘柄コードを取得する。"""
         with self.client.get_connection() as conn:
-            res = conn.execute("SELECT code FROM stocks WHERE is_active = TRUE").fetchall()
+            res = conn.execute(
+                "SELECT code FROM stocks WHERE is_active = TRUE"
+            ).fetchall()
             return [str(r[0]) for r in res]
-            
+
     def get_metrics_count(self) -> int:
         """蓄積されている時系列データの総件数を取得する。"""
         with self.client.get_connection() as conn:
@@ -274,34 +284,38 @@ class DuckDBRepository:
     def save_stocks(self, df: pl.DataFrame):
         """銘柄マスタを保存・更新する。"""
         self._upsert_dataframe("stocks", df, ["code"])
-        
+
     def save_metrics(self, df: pl.DataFrame):
         """日次指標データを保存・更新する。"""
         if df.is_empty():
             return
-        if 'code' not in df.columns or 'entry_date' not in df.columns:
-            raise ValueError("UPSERT to daily_metrics requires 'code' and 'entry_date'.")
+        if "code" not in df.columns or "entry_date" not in df.columns:
+            raise ValueError(
+                "UPSERT to daily_metrics requires 'code' and 'entry_date'."
+            )
         self._upsert_dataframe("daily_metrics", df, ["code", "entry_date"])
-            
+
     def save_fundamentals(self, df: pl.DataFrame):
         """財務データを保存・更新する。"""
         if df.is_empty():
             return
-        if 'code' not in df.columns:
+        if "code" not in df.columns:
             raise ValueError("UPSERT to fundamentals requires 'code'.")
         self._upsert_dataframe("fundamentals", df, ["code"])
 
-    def load_metrics(self, codes: Optional[List[str]] = None, days: int = 365) -> pl.DataFrame:
+    def load_metrics(
+        self, codes: Optional[List[str]] = None, days: int = 365
+    ) -> pl.DataFrame:
         """指定された期間・銘柄のデータを取得する。"""
         with self.client.get_connection() as conn:
             # DuckDB で interval へのパラメータ指定は 'interval 1 day * ?' の形式が安全
             query = "SELECT * FROM daily_metrics WHERE entry_date >= current_date - (interval '1 day' * ?)"
-            params = [days]
-            
+            params: list[Any] = [days]
+
             if codes:
                 query += " AND code IN (" + ",".join(["?" for _ in codes]) + ")"
                 params.extend(codes)
-            
+
             return conn.execute(query, params).pl()
 
     def load_stocks(self) -> pl.DataFrame:
@@ -313,28 +327,36 @@ class DuckDBRepository:
         """分析結果を保存する。"""
         if df.is_empty():
             return
-        if 'code' not in df.columns or 'analyzed_at' not in df.columns:
+        if "code" not in df.columns or "analyzed_at" not in df.columns:
             raise ValueError("UPSERT requires 'code' and 'analyzed_at'.")
         self._upsert_dataframe("analysis_results", df, ["code", "analyzed_at"])
 
     def save_alert(self, code: str, alert_type: str, message: str):
         """通知を保存する"""
         with self.client.get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO sentinel_alerts (code, alert_type, alert_message)
                 VALUES (?, ?, ?)
-            """, [code, alert_type, message])
+            """,
+                [code, alert_type, message],
+            )
 
     def get_unprocessed_alerts(self) -> pl.DataFrame:
         """未処理の通知を取得する"""
         with self.client.get_connection() as conn:
-            return conn.execute("SELECT * FROM sentinel_alerts WHERE is_processed = FALSE").pl()
+            return conn.execute(
+                "SELECT * FROM sentinel_alerts WHERE is_processed = FALSE"
+            ).pl()
 
     def mark_alert_processed(self, alert_id: int):
         """通知を処理済みとする"""
         with self.client.get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 UPDATE sentinel_alerts 
                 SET is_processed = TRUE, processed_at = CURRENT_TIMESTAMP 
                 WHERE id = ?
-            """, [alert_id])
+            """,
+                [alert_id],
+            )

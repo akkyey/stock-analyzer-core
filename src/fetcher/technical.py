@@ -157,4 +157,4 @@ def _calc_volatility(close: pd.Series) -> float | None:
     log_returns = np.log(close / close.shift(1)).dropna()
     if log_returns.empty:
         return None
-    return log_returns.std() * np.sqrt(252) * 100
+    return float(log_returns.std() * np.sqrt(252) * 100)

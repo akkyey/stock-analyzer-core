@@ -108,6 +108,7 @@ class ScoringEngine:
                     f"🚀 Using Ultra-Fast Engine (Polars/V4) for {strategy_name}"
                 )
                 import polars as pl
+
                 from src.calc.engines.polars_engine import PolarsEngine
 
                 engine = PolarsEngine(self.config, strategy_name=strategy_name)
@@ -167,13 +168,24 @@ class ScoringEngine:
             )
             if self.config.get("use_polars"):
                 import polars as pl
+
                 if isinstance(data, pl.DataFrame):
                     # [v17.1] Safe fallback for Polars
-                    fill_exprs = [pl.lit(0.0).alias(c) for c in [
-                        "quant_score", "score_value", "score_growth", "score_quality", "score_trend", "score_penalty"
-                    ]]
+                    fill_exprs = [
+                        pl.lit(0.0).alias(c)
+                        for c in [
+                            "quant_score",
+                            "score_value",
+                            "score_growth",
+                            "score_quality",
+                            "score_trend",
+                            "score_penalty",
+                        ]
+                    ]
                     fallback = data.with_columns(fill_exprs)
-                    fallback = fallback.with_columns([pl.lit(strategy_name).alias("strategy_name")])
+                    fallback = fallback.with_columns(
+                        [pl.lit(strategy_name).alias("strategy_name")]
+                    )
                     return fallback
 
             fallback = data.copy()
