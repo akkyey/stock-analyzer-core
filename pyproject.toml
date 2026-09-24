@@ -1,7 +1,7 @@
 [tool.ruff]
 line-length = 88
 target-version = "py312"
-exclude = ["venv", ".venv", "stock-analyzer4"]
+exclude = ["venv", ".venv", "stock-analyzer4", "archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
@@ -16,8 +16,9 @@ ignore = ["E501"]
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
+check_untyped_defs = true
 ignore_missing_imports = true
-exclude = ["venv", ".venv", "stock-analyzer4"]
+exclude = ["venv", ".venv", "stock-analyzer4", "archive"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,5 +1,5 @@
 ---
-title: 【10分の壁突破から半年】全4,000銘柄を3.8秒でスクリーニングする3層防御クオンツ設計――AIを狂わせない意味整合性と2ファイル分離【後編】
+title: 【10分の壁突破から半年】全4,000銘柄を0.15秒でスクリーニングする3層防御クオンツ設計――AIを狂わせない意味整合性と2ファイル分離【後編】
 tags:
   - Python
   - Polars
@@ -9,13 +9,13 @@ tags:
 private: false
 ---
 
-# 【10分の壁突破から半年】全4,000銘柄を3.8秒でスクリーニングする3層防御クオンツ設計――AIを狂わせない意味整合性と2ファイル分離【後編】
+# 【10分の壁突破から半年】全4,000銘柄を0.15秒でスクリーニングする3層防御クオンツ設計――AIを狂わせない意味整合性と2ファイル分離【後編】
 
 ## 概要
 
-本記事は、東証全上場銘柄（約3,900社）の財務・株価データをスクリーニングし、下流のAIエージェント（LLM）と連携する分析基盤において、**「意味整合性（Semantic Integrity）」** と **「AI協調境界（Contract Design）」** を確立した設計転換の記録です。
+本記事は、東証全上場銘柄（全3,920社）の財務・株価データをスクリーニングし、下流のAIエージェント（LLM）と連携する分析基盤において、**「意味整合性（Semantic Integrity）」** と **「AI協調境界（Contract Design）」** を確立した設計転換の記録です。
 
-前編『【10分の壁突破から半年】東証全銘柄パイプラインを9分から4分へ半減させた設計思想――直近30日差分スキャンと耐障害性の対比』では、データ取得層における耐障害性の再定義により、9分台から4分台への半減と自己修復を実現しました。
+前編『【10分の壁突破から半年】東証全銘柄パイプラインを9分から5分へ短縮させた設計思想――直近30日差分スキャンと耐障害性の対比』では、データ取得層における耐障害性の再定義により、9分台から5分台への短縮と自己修復を実現しました。
 
 しかし、堅牢に取得された確定データであっても、前作[『【完結編】10分の壁を突破せよ！』](https://qiita.com/akkyey/items/9a808e45a2abe8f0f0a1)で採用していた「単純ソートによる全件線形ランキング」へそのまま流し込んだ瞬間、**「赤字企業の低PER」「債務超過企業の高配当利回り」といった意味の崩壊**に直面しました。
 さらに、欠損値を含むランキングCSVをLLMに渡した結果、AIエージェントが欠損を誤解して重大なハルシネーションを起こす事象が頻発しました。
@@ -26,11 +26,11 @@ private: false
 
 | 評価・比較項目 | 前回記事（第4弾：9分台達成時） | 今回の設計（最新アーキテクチャ） | 改善効果・もたらされた価値 |
 | :--- | :--- | :--- | :--- |
-| **全銘柄スクリーニング所要時間** | **約 4.0 秒**<br>（Polars単純ソート） | **3.8 秒**<br>（Polars 3層多重判定＆出力） | **計算量は大幅増加しながら同等以上の爆速処理を維持** |
+| **全銘柄スクリーニング所要時間** | **約 4.0 秒**<br>（Polars単純ソート） | **0.15 秒 (147 ms)**<br>（Polars 3層多重判定＆出力） | **判定レイヤーを多重化しながら約 25 倍 高速化（ミリ秒台で完走）** |
 | **評価モデル構造** | **0 層（単純線形評価）**<br>（単一の加重平均式で全件を強引に順位付け） | **3 層防御アーキテクチャ**<br>（①Pre-Filter ➔ ②配点 ➔ ③Gatekeeper） | **投資適格性のない銘柄をスコアリング前に完全遮断** |
-| **地雷銘柄の排除率<br>（債務超過・赤字等）** | **0.0 %（混入事故あり）**<br>（表面上の低PBRや高利回りで上位浮上） | **100.0 % 完全排除**<br>（構造的欠陥銘柄を第1層で絶対足切り） | **統計的・意味的な指標破綻銘柄の推薦を根絶** |
-| **出力ファイル構造** | **1 ファイル（全件混在）**<br>（計算不能・欠損銘柄も同一CSVに同居） | **2 ファイル完全物理分離**<br>（適格 1,434社 / 除外 1,323社に二分） | **下流システム・AIに条件分岐や曖昧な解釈を強制しない** |
-| **下流AIエージェントの<br>データ欠損率 (Contract)** | **欠損・例外値が混在**<br>（null/NaNが残り解釈をLLMに依存） | **0.00 %（契約による完全保証）**<br>（合格ファイルには欠損が1セルも存在しない） | **AIエージェントのハルシネーション（誤認・捏造）をゼロ化** |
+| **地雷銘柄の排除率<br>（債務超過・極小商い・営業CF赤字等）** | **0.0 %（混入事故あり）**<br>（表面上の低PBRや高利回りで上位浮上） | **構造的欠陥を完全足切り**<br>（債務超過・低流動性を第1層で排除、実績赤字は第3層で判定制限） | **統計的・意味的な指標破綻銘柄の買い推奨を防止** |
+| **出力ファイル構造** | **1 ファイル（全件混在）**<br>（計算不能・欠損銘柄も同一CSVに同居） | **2 ファイル完全物理分離**<br>（適格 2,120社 / 除外 1,800社に二分） | **下流システム・AIに条件分岐や曖昧な解釈を強制しない** |
+| **下流AIエージェントの<br>データ欠損率 (Contract)** | **欠損・例外値が混在**<br>（null/NaNが残り解釈をLLMに依存） | **必須列 0.00%（契約保証）**<br>（判定必須の3列にnullゼロ。算出不能指標は安全にハイフン表記） | **AIエージェントの欠損誤認によるハルシネーションを防止** |
 
 ---
 
@@ -67,7 +67,7 @@ flowchart LR
 線形スコアリングの上位に、以下のような「投資対象として致命的な欠陥を抱える銘柄」が頻繁にランクインする現象が発生しました。
 - **債務超過企業の極小PBR**: 純資産がマイナス（または極小）となった企業が、算出式上「異常な低PBR」となり、超割安株として最上位に誤抽出される
 - **最終赤字・減配転落企業の高利回り**: 業績急悪化で株価が急落した銘柄が、過去実績の配当額に基づき「超高配当株」としてスコアリング上位を占領する
-- **継続企業の前提に関する注記（GC注記）企業の混入**: 経営危機に瀕した銘柄が、逆張り指標として高得点を獲得する
+- **本業赤字・キャッシュ枯渇企業の混入**: 営業CFが大幅赤字（マージン-10%未満）で資金流出が止まらない企業が、表面的な低PBR等で高得点を獲得してしまう
 
 数値としては算出可能であっても、投資指標としての「意味」が完全に崩壊していました。
 
@@ -86,7 +86,7 @@ flowchart LR
 観測された事象は、アルゴリズムの調整不足ではなく、設計仮定そのものの破綻を示しています。
 
 ### 線形評価モデルの破綻
-適格な黒字企業と、債務超過・GC注記企業を「同一の数式」で評価することは不可能です。
+適格な黒字企業と、債務超過・大幅キャッシュ枯渇企業を「同一の数式」で評価することは不可能です。
 財務指標における「割安（バリュー）」と「構造的欠陥（ディストレス）」は紙一重であり、境界条件による足切りを行わない線形モデルは、構造的に破綻します。
 
 ### 「LLMに判断を委ねる」仮定の破綻
@@ -111,31 +111,36 @@ AIエージェントは高度な推論能力を持ちますが、入力データ
 
 ### 新たな設計原則
 1. **3層防御クオンツアーキテクチャ (3-Tier Quantitative Defense)**:
-   - **第1層（Pre-Filter: 地雷足切り）**: 債務超過、営業赤字、無配、上場廃止懸念、流動性欠如銘柄をスコアリング前に絶対除外する
-   - **第2層（Linear Scoring: 適格母集団配点）**: 第1層を通過した「健全な母集団」のみに対し、バリュー・クオリティ・配当を多角配点する
-   - **第3層（Gatekeeper: 境界値バリデーション）**: スコアリング後の異常値や極端な偏りを最終検証する
+   - **第1層（Pre-Filter: 地雷足切り＆データ不適格隔離）**: 債務超過（自己資本比率 <= 0%）、超低位株（株価 < 50円）、極小流動性（20日平均売買代金 < 3,000万円）、出来高ゼロ日あり、致命的キャッシュ枯渇（営業CFマージン < -10%）に加え、**取引停止銘柄（直近5営業日以内に市場取引なし）や重要指標未開示/算出不能銘柄（株価欠損、または自己資本比率等の必須財務データ未開示）** をスコアリング前に絶対除外する。**※無配株や営業赤字は、急成長中のグロース企業を拾い上げるため第1層では除外せず、第3層ゲートキーパーによる判定上限キャップで制御する多層防御を採用**
+   - **第2層（Linear Scoring: 適格母集団配点）**: 第1層を通過した「健全な母集団」のみに対し、バリュー・クオリティ・配当・モメンタムを多角配点する
+   - **第3層（Gatekeeper: 判定上限キャップ・安全弁）**: 実績赤字（ROE < 0）、本業赤字・一過性特益トラップ（営業赤字かつ純利益黒字）、強い下降トレンド等を検知し、スコアが高くても判定（Verdict）を最大 `WATCH` に制限して買い推奨を禁止する
 2. **AI協調のための2ファイル物理分離原則 (Physical Dual Output)**:
-   - `daily_report.csv`: 欠損率0.00%を厳密に保証した適格銘柄のみを出力（AIエージェントが100%信用して分析可能）
-   - `uncalculable_stocks.csv`: 除外された銘柄と、その厳密な除外理由コード（`INSOLVENCY`, `OPERATING_LOSS`, `NO_DIVIDEND`等）を隔離出力
+   - `daily_report.csv`: 必須キー（code, price, verdict）の欠損ゼロを厳密に保証した適格銘柄のみを出力（AIエージェントや外部LLMが100%信用して分析可能）
+   - `uncalculable_stocks.csv`: 除外された銘柄と、その厳密な日本語除外理由コード（`データ鮮度不足 (取引停止)`, `重要指標未開示/算出不能`, `商い不成立`, `極小流動性トラップ`, `超低位ボロ株`, `構造的破綻 (債務超過)`, `致命的キャッシュ枯渇`等）を隔離出力
 
 ```mermaid
 flowchart TD
     Raw["東証全3,920銘柄 生データ"] --> L1{"第1層: Pre-Filter<br>(地雷足切り)"}
     
-    L1 -- "不適格 (赤字・債務超過・無配等)" --> Uncalc["uncalculable_stocks.csv<br>(除外理由をコード化して隔離)"]
+    L1 -- "不適格 (債務超過・超低位・流動性欠如等)" --> Uncalc["uncalculable_stocks.csv<br>(詳細な除外理由付きで完全隔離)"]
     L1 -- "適格 (健全母集団)" --> L2["第2層: Linear Scoring<br>(バランス型多角スコアリング)"]
     
-    L2 --> L3{"第3層: Gatekeeper<br>(境界値検証)"}
-    L3 -- "合格 (欠損率 0.00%)" --> Daily["daily_report.csv<br>(AIエージェント専用の純粋データ)"]
-    L3 -- "異常値検出" --> Uncalc
+    L2 --> L3{"第3層: Gatekeeper<br>(判定制限・安全弁)"}
+    L3 -- "実績赤字・本業赤字・下降トレンド" --> Cap["判定上限を WATCH に制限<br>(BUY / STRONG_BUY 禁止)"]
+    L3 -- "健全・順張り" --> Normal["正規判定<br>(STRONG_BUY / BUY / WATCH / PASS)"]
     
-    Daily --> AI["AIエージェント<br>(ハルシネーション 0 件の安全分析)"]
+    Cap --> Daily["daily_report.csv<br>(必須列 欠損ゼロ契約保証)"]
+    Normal --> Daily
+    
+    Daily --> AI["外部AI・LLM利用者<br>(Claude / ChatGPT 等での安全分析)"]
     
     style Raw fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#333
     style L1 fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#333
     style L2 fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#333
     style L3 fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#333
     style Uncalc fill:#fff0f0,stroke:#d33,stroke-width:1px,color:#333
+    style Cap fill:#fff9e6,stroke:#fa0,stroke-width:1px,color:#333
+    style Normal fill:#e6f7ff,stroke:#1890ff,stroke-width:1px,color:#333
     style Daily fill:#f0fff0,stroke:#2a2,stroke-width:1px,color:#333
     style AI fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#333
 ```
@@ -144,44 +149,137 @@ flowchart TD
 
 ## 第5章：実装原理（核心のみ）
 
-設計思想を具現化する実装の核心は、**「Polarsによる宣言的マスク演算」** と **「契約（Contract）に基づく物理分離」** にあります。
+設計思想を具現化する実装の核心は、**「Polarsによる高速集計と明示的な日本語理由付与」**、**「第3層ゲートキーパーによる判定上限キャップ」**、そして**「データ契約（Contract）による物理遮断」**にあります。
 
-### 1. Polarsによる非ループ・宣言的3層フィルタリング
-Pythonのfor文や行イテレーションを完全に排除し、PolarsのSIMD・マルチスレッドRustエンジンを活用したベクトル演算として記述します。
+### 1. Polars集計と辞書走査による明示的除外理由付与（第1層 Pre-Filter）
+直近20日間の平均売買代金や直近5日間の出来高ゼロ日数といった時系列集計は、PolarsのマルチスレッドRustエンジンでミリ秒処理します。
+その上で、個々の銘柄に対する5大足切り判定と「人間にもAIにも一目でわかる詳細な日本語除外理由（`filter_reason`, `filter_detail`）」の付与を辞書走査により厳格に行います。
 
-```python
-# 核心ロジック：Polarsによる宣言的Pre-Filter
-import polars as pl
+```python:src/calc/pre_filter.py
+# 核心ロジック：第1層 Pre-Filter（地雷足切り判定と詳細理由付与）
+class PreFilter:
+    """第1層：地雷銘柄の即座除外と母集団の物理分離。"""
+    MIN_TRADING_VALUE_20D = 30_000_000.0  # 20日平均売買代金 3,000万円基準
+    MIN_PRICE = 50.0                      # 株価 50円基準
+    MIN_EQUITY_RATIO = 0.0                # 自己資本比率 0%基準 (債務超過)
+    MIN_OP_CF_MARGIN = -0.10              # 営業CFマージン -10%基準
 
-def apply_pre_filter(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """第1層：地雷銘柄の足切りと母集団の物理分離。"""
-    
-    # 構造的欠陥・投資方針外を示すブールマスクを定義
-    is_insolvent = pl.col("equity_ratio") <= 0.0        # 債務超過
-    is_loss = pl.col("operating_profit") <= 0           # 本業赤字
-    is_no_dividend = pl.col("dividend_yield") <= 0.0    # 無配 (※バリュー・還元重視ポリシー)
-    is_illiquid = pl.col("trading_value_25d") < 50_000_000 # 流動性不足 (25日平均5,000万円未満)
-    
-    disqualification_mask = is_insolvent | is_loss | is_no_dividend | is_illiquid
-    
-    # 適格母集団と除外母集団に完全分離
-    qualified_df = df.filter(~disqualification_mask)
-    uncalculable_df = df.filter(disqualification_mask).with_columns(
-        exclusion_reason=pl.when(is_insolvent).then(pl.lit("INSOLVENT"))
-                           .when(is_loss).then(pl.lit("OPERATING_LOSS"))
-                           .when(is_no_dividend).then(pl.lit("NO_DIVIDEND"))
-                           .otherwise(pl.lit("LOW_LIQUIDITY"))
-    )
-    
-    return qualified_df, uncalculable_df
+    @classmethod
+    def evaluate(cls, df_candidates: pl.DataFrame, df_liquidity: Optional[pl.DataFrame] = None) -> PreFilterResult:
+        # Polars で流動性指標を結合後、辞書走査で厳格かつ明確な理由を付与
+        records = df.to_dicts()
+        for row in records:
+            price = row.get("price")
+            equity_ratio = row.get("equity_ratio")
+            operating_cf = row.get("operating_cf")
+            sales = row.get("sales")
+            avg_tv = row.get("avg_trading_value_20d")
+            zero_days = row.get("zero_volume_days_5d")
+            latest_trade_date = row.get("latest_trade_date")
+            is_recent_trade = row.get("is_recent_trade")
+            sector = str(row.get("sector", "Other"))
+
+            # ① データ鮮度不足判定（最新市場日より大幅に古い取引停止銘柄）
+            if is_recent_trade is False and latest_trade_date is not None:
+                rejected_rows.append({**row, "filter_reason": "データ鮮度不足 (取引停止)", "filter_detail": f"最終取引日 ({latest_trade_date}) が直近5営業日範囲外"})
+                continue
+
+            # ② 売買不能判定（直近5営業日出来高ゼロ）
+            if zero_days is not None and zero_days > 0:
+                rejected_rows.append({**row, "filter_reason": "商い不成立", "filter_detail": f"直近5営業日以内に出来高ゼロ日あり ({zero_days}日)"})
+                continue
+
+            # ③ 極小流動性トラップ判定（20日平均売買代金 < 3,000万円）
+            if avg_tv is not None and avg_tv < min_tv_20d:
+                rejected_rows.append({**row, "filter_reason": "極小流動性トラップ", "filter_detail": f"20日平均売買代金不足 ({avg_tv/10000:,.0f}万円 < 3,000万円)"})
+                continue
+
+            # ④ 超低位ボロ株判定（株価 < 50円）
+            if price is not None and price < min_price:
+                rejected_rows.append({**row, "filter_reason": "超低位ボロ株", "filter_detail": f"株価基準未満 ({price:,.0f}円 < 50円)"})
+                continue
+
+            # ⑤ 重要指標未開示 / 算出不能判定（株価欠損、または自己資本比率未開示）
+            if price is None:
+                rejected_rows.append({**row, "filter_reason": "重要指標未開示/算出不能", "filter_detail": "市場価格データ欠損"})
+                continue
+            if equity_ratio is None:
+                rejected_rows.append({**row, "filter_reason": "重要指標未開示/算出不能", "filter_detail": "自己資本比率等の財務諸表データ未開示または欠損"})
+                continue
+
+            # ⑥ 構造的破綻（債務超過判定）
+            if equity_ratio is not None and equity_ratio <= min_eq_ratio:
+                rejected_rows.append({**row, "filter_reason": "構造的破綻 (債務超過)", "filter_detail": f"純資産マイナス / 自己資本比率 ({equity_ratio:.1f}% <= 0.0%)"})
+                continue
+
+            # ⑦ 致命的キャッシュ枯渇判定（営業CFマージン < -10% ※金融・保険業免除）
+            if sector not in cls.CF_EXEMPT_SECTORS and operating_cf is not None and sales and sales > 0:
+                if (operating_cf / sales) < min_op_cf_margin:
+                    rejected_rows.append({**row, "filter_reason": "致命的キャッシュ枯渇", "filter_detail": "営業CFマージン大幅赤字"})
+                    continue
+
+            passed_rows.append(row)
+
+        return PreFilterResult(passed_df=pl.DataFrame(passed_rows), rejected_df=pl.DataFrame(rejected_rows))
 ```
 
-> 💡 **（注）無配銘柄の除外ポリシーについて**  
-> 本システムは中長期の堅実なバリュー・クオリティ・株主還元を主眼としたクオンツモデルのため、初期スクリーニング段階で無配銘柄を足切るポリシーを採用しています。事業再投資を最優先するグロース成長株などをターゲットとする場合は、運用の目的に応じてこの `is_no_dividend` マスクを解除または緩和パラメータとして調整可能です。
+> 💡 **（注）売買代金の二重掛けバグの解消と流動性判定の厳格化**  
+> 直近のリファクタリング検証時（2026年9月）に、すでに円単位として集計されていた売買代金に対して再度株価を掛け算してしまい、1日50万円しか商いのない極小銘柄が過大評価されて足切りをすり抜ける重大な不具合が発生していました。最新アーキテクチャでは、データソースからのマッピング（`volume`株数と`trading_value`円）をSSOT（単一の信頼できる情報源）として厳密に分離し、二重掛けを完全に根絶しています。
 
-### 2. 欠損率0.00%の契約保証
-第2層および第3層を通過したデータフレームに対して、下流システムに渡す直前でアサーションを実行します。
-万が一にも欠損値（null/NaN）が1セルでも残存している場合、パイプラインは即座に停止し、不正なデータの下流流出を物理的に遮断します。
+### 2. 第3層ゲートキーパー：判定上限キャップによる多層防御
+第1層ではあえて無配株や営業赤字を落とさず、成長期待のあるグロース銘柄の評価余地を残しています。
+その代わり、第3層ゲートキーパーにおいて「実績赤字企業」や「営業赤字だが特益で純利益だけ黒字に見える企業」を検知し、スコアが高得点であっても判定（Verdict）を最大 `WATCH` に制限して買い推奨を禁止します。
+
+```python:src/calc/quant_evaluator.py
+# 核心ロジック：第3層 ゲートキーパー（Verdict キャップ制限）
+@classmethod
+def _determine_verdict(cls, score: float, roe: Optional[float], macd_status: str, ma_div: Optional[float], op_income: Optional[float] = None, operating_margin: Optional[float] = None) -> str:
+    # 基礎配点による暫定判定
+    if score >= 80.0: verdict = "STRONG_BUY"
+    elif score >= 65.0: verdict = "BUY"
+    elif score >= 50.0: verdict = "WATCH"
+    else: verdict = "PASS"
+
+    # ゲートキーパー 1: 実績赤字（ROE < 0）銘柄のキャップ制限
+    # 予想が黒字転換であっても、実績赤字の銘柄は BUY / STRONG_BUY を禁止し最大 WATCH に制限
+    if roe is not None and roe < 0 and verdict in ["STRONG_BUY", "BUY"]:
+        verdict = "WATCH"
+
+    # ゲートキーパー 2: 本業赤字・一過性特益トラップのキャップ制限
+    # 営業利益が赤字かつ純利益が黒字の銘柄は、見かけの低PER・高ROEであるため最大 WATCH に制限
+    is_op_loss = (operating_margin is not None and operating_margin <= 0) or (op_income is not None and op_income <= 0)
+    if is_op_loss and verdict in ["STRONG_BUY", "BUY"]:
+        verdict = "WATCH"
+
+    # ゲートキーパー 3: テクニカル・下降トレンド制限
+    if "Bearish" in macd_status:
+        if verdict == "STRONG_BUY":
+            verdict = "BUY"
+        if ma_div is not None and ma_div < -10.0 and verdict == "BUY":
+            verdict = "WATCH"
+
+    return verdict
+```
+
+### 3. 判定必須キーの欠損ゼロを物理保証するデータ契約（Data Contract）
+第2層および第3層を通過したデータフレームに対し、下流のCSV出力直前でアサーションを実行します。
+投資判断に不可欠な必須キー（`code`, `price`, `verdict`）に1セルでも null が残存している場合、パイプラインは即座に `AssertionError` を送出して物理停止し、不正データの下流流出を遮断します。
+なお、PERやPBR等の算出不能指標（赤字企業など）については null のまま放置せず、安全にフォーマットされた値（`-` 表記）として出力されます。
+
+```python:src/orchestration/phases/integration.py
+# 核心ロジック：判定必須キーの欠損ゼロを物理保証するデータ契約検証
+def _verify_data_contract(df: pl.DataFrame) -> None:
+    essential_cols = ["code", "price", "verdict"]
+    for col_name in essential_cols:
+        if col_name in df.columns:
+            null_count = df.filter(pl.col(col_name).is_null()).height
+            if null_count > 0:
+                raise AssertionError(
+                    f"Data Contract Violation: Essential column '{col_name}' contains {null_count} null values."
+                )
+```
+
+これにより、ClaudeやChatGPT等の外部LLMにCSVを直接アップロードして分析させる個人投資家や開発者にとっても、AIが欠損を誤解して幻覚（ハルシネーション）を起こすリスクを物理的に防止できます。
 
 ---
 
@@ -190,16 +288,15 @@ def apply_pre_filter(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
 「意味整合性の保証」を最上位基準とした結果、分析基盤およびAIエージェントの挙動に以下の本質的な帰結が得られました。
 
 ### 整合性の帰結
-- **地雷銘柄の完全排除**: 債務超過や継続企業疑義の銘柄がランキング上位に浮上する現象が根絶された
-- **AIエージェントのハルシネーションゼロ**: `daily_report.csv` に欠損率0.00%の契約が適用されたことで、LLMが推論を捏造する余地が物理的になくなり、極めて正確なファンダメンタルズ分析を生成可能となった
-- **透明な母集団分離**: 今回の実測において、東証全銘柄（3,920社）は以下のように厳格に二分された
-  - **評価可能銘柄（`daily_report.csv`）**: **1,434 社**（欠損率 0.00%）
-  - **除外対象銘柄（`uncalculable_stocks.csv`）**: **1,323 社**（全件に除外理由を付与）
-  - ※残り1,163社はETF・REIT・優先株等の純粋株式以外の除外対象
+- **地雷銘柄の排除**: 債務超過や大幅キャッシュ枯渇、極小商いの銘柄が第1層で確実に足切られ、不適切な銘柄がランキング上位に浮上する現象を防止
+- **AIエージェントのハルシネーション防止**: `daily_report.csv` に必須列欠損ゼロの契約が適用され、算出不能指標も `-` で安全に整形されたことで、LLMが欠損を誤解して推論を捏造する余地を物理的に排除
+- **透明な母集団分離**: 今回の実測において、東証全銘柄（全3,920社）は以下のように厳格に二分された
+  - **評価可能銘柄（`daily_report.csv`）**: **2,120 社**（判定必須列の欠損ゼロ保証）
+  - **除外対象銘柄（`uncalculable_stocks.csv`）**: **1,800 社**（極小商い・債務超過に加え、株価未取得等の市場データ取得不能104社を含む全件に明確な除外理由と詳細を付与）
 
-### 計算性能の帰結（3.8秒の衝撃）
+### 計算性能の帰結（0.15秒 / 147ミリ秒への高速化）
 前作（第4弾）では単純な並べ替えに約4秒を要していました。
-今回、厳格な3層防御とAI向け2ファイル分離を導入したにもかかわらず、Polarsのベクトル演算により、**東証全3,920社の処理所要時間は「3.8秒」で完走**しました。
+今回、厳格な3層防御とAI向け2ファイル分離を導入したにもかかわらず、Polarsによる時系列指標集計と、辞書走査により最適化された `QuantEvaluator` により、**東証全3,920社のスクリーニング所要時間は「0.15秒（トリム平均 147 ms）」で完走**しました（前作比 約 25 倍 高速化）。
 
 ```text
 =====================================================================================
@@ -207,13 +304,16 @@ def apply_pre_filter(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
 =====================================================================================
 項目                         | 前回Qiita記事 (第4弾)       | 今回実測 (3層防御アーキテクチャ)
 -------------------------------------------------------------------------------------
-処理所要時間                 | 約 4.0 秒                   | 3.8 秒 (ほぼ同等)
+処理所要時間                 | 約 4.0 秒                   | 0.15 秒 (147 ms / トリム平均) 【約25倍高速化】
 防御レイヤー数               | 0 層 (単純ソート)           | 3 層 (Pre-Filter ➔ 配点 ➔ Gatekeeper)
-地雷銘柄の排除率             | 0.0 % (混入事故あり)        | 100.0 % (債務超過・赤字を完全遮断)
-出力ファイル構造             | 1 ファイル (欠損混在)       | 2 ファイル完全物理分離
-下流AIエージェント欠損率     | 欠損・例外値が混在          | 0.00 % (契約による完全保証)
+地雷銘柄の排除率             | 0.0 % (混入事故あり)        | 構造的欠陥を完全足切り (債務超過・極小商いを遮断、実績赤字は判定制限)
+出力ファイル構造             | 1 ファイル (欠損混在)       | 2 ファイル完全物理分離 (適格 2,120社 / 除外 1,800社)
+下流AIエージェント欠損率     | 欠損・例外値が混在          | 必須列 0.00 % (契約による完全保証)
 =====================================================================================
 ```
+
+> 💡 **（注）5回測定トリム平均による客観的保証**  
+> 性能評価にあたっては、単発実行時の揺らぎを排除するため5回連続測定を実施し、最速値と最遅値を除外した中央3回のトリム平均（Trimmed Mean）を算出しています。その結果、分類・評価フェーズは **最速 131 ms 〜 最遅 195 ms、平均 147 ms** と極めて安定してミリ秒台で完走することが実証されています。
 
 処理速度を犠牲にすることなく、データの意味的整合性を極限まで高める設計が確立されました。
 
@@ -224,7 +324,7 @@ def apply_pre_filter(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
 前編・後編を通じたパイプラインの再構成により、以下の原則が実証されました。
 
 1. **「最適化は目的ではなく結果である」**:  
-   速度を求めて設計したのではなく、時系列整合性と意味整合性を守るために境界を再定義した結果、全体パイプラインは4分台（平常時1分43秒）、分析は3.8秒という極限の速度が副次的に手に入った。
+   速度を求めて設計したのではなく、時系列整合性と意味整合性を守るために境界を再定義した結果、全体パイプラインは5分08秒（平常同期時 約1分40秒）、評価・分類層は0.15秒という極限の速度が副次的に手に入った。
 2. **「AIエージェントの性能は入力データの意味的純度で決まる」**:  
    プロンプトエンジニアリングでAIを制御しようとする前に、データパイプライン側で物理的な契約を結び、純度100%のデータを渡すことこそが最強のAI協調設計である。
 

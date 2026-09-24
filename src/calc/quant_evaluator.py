@@ -1,14 +1,14 @@
-"""クオンツ＆AIエージェント評価モジュール (QuantAgentEvaluator)
+"""クオンツ評価モジュール (QuantEvaluator)
 
-個別銘柄カルテ (StockDossier) に対し、多変量連続グラデーション（リニア傾斜配点）による
-クオンツスコアリング、投資判定 (Verdict)、Thesis、およびリスク要因を算出する。
+個別銘柄データに対し、多変量連続グラデーション（リニア傾斜配点）による
+クオンツスコアリングおよび投資判定 (Verdict) を算出する。
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
-class QuantAgentEvaluator:
-    """多変量連続グラデーション（リニア傾斜配点）に基づく本格クオンツ＆AIエージェント評価エンジン。"""
+class QuantEvaluator:
+    """多変量連続グラデーション（リニア傾斜配点）に基づく本格クオンツ評価エンジン。"""
 
     DEAD_STOCK_SCORE = 45.0
     DEAD_STOCK_VERDICT = "PASS"
@@ -134,7 +134,7 @@ class QuantAgentEvaluator:
 
     @classmethod
     def _score_rsi(cls, rsi: Optional[float]) -> float:
-        """RSI スコアリング: 最大7点"""
+        """RSI スコアリング: 最大7点 (境界ジャンプなしの滑らかなグラデーション)"""
         if rsi is None:
             return 0.0
         if rsi <= 25.0:
@@ -145,24 +145,34 @@ class QuantAgentEvaluator:
             return 4.0 + (50.0 - rsi) * (1.5 / 15.0)
         if rsi <= 65.0:
             return 2.5 + (65.0 - rsi) * (1.5 / 15.0)
-        if rsi < 75.0:
+        if rsi <= 75.0:
             return 2.5 * (75.0 - rsi) / 10.0
-        return -3.0
+        # 75.0超は過熱ペナルティ (75.0の0点から90.0の-3点まで滑らかに減点)
+        return max(-3.0, -(rsi - 75.0) * (3.0 / 15.0))
 
     @classmethod
     def _score_ma_div(cls, ma_div: Optional[float]) -> float:
-        """25日移動平均乖離率 スコアリング: 最大5点"""
+        """25日移動平均乖離率 スコアリング: 最大5点 (境界ジャンプなしの滑らかなグラデーション)"""
         if ma_div is None:
             return 0.0
-        if ma_div < -20.0:
-            return -min(3.0, (-20.0 - ma_div) * 0.1)
+        if ma_div < -25.0:
+            # -25%未満の大暴落ペナルティ (-25%の0点から-40%の-3点まで滑らかに減点)
+            return -min(3.0, (-25.0 - ma_div) * 0.2)
+        if ma_div < -15.0:
+            # -25%から-15%にかけて反発期待と暴落警戒のグラデーション (0点〜5点)
+            return 5.0 - (-15.0 - ma_div) * (5.0 / 10.0)
         if ma_div <= -5.0:
-            return 3.0 + (-5.0 - ma_div) * (2.0 / 15.0)
+            # -15%で5点満点、-5%で3点
+            return 3.0 + (-5.0 - ma_div) * (2.0 / 10.0)
         if ma_div <= 5.0:
             return 3.0
-        if ma_div <= 20.0:
-            return 3.0 - (ma_div - 5.0) * (1.0 / 15.0)
-        return -4.0
+        if ma_div <= 15.0:
+            return 3.0 - (ma_div - 5.0) * (1.0 / 10.0)
+        if ma_div <= 25.0:
+            # 15%の2点から25%の0点まで滑らかに低下
+            return 2.0 - (ma_div - 15.0) * (2.0 / 10.0)
+        # 25%超の高値掴み過熱ペナルティ (25%の0点から35%の-4点まで滑らかに減点)
+        return -min(4.0, (ma_div - 25.0) * 0.4)
 
     @classmethod
     def _determine_verdict(
@@ -215,8 +225,8 @@ class QuantAgentEvaluator:
         return verdict
 
     @classmethod
-    def evaluate(cls, dossier: Dict[str, Any]) -> Tuple[float, str, str, List[str]]:
-        """銘柄カルテ (StockDossier) からスコア・判定を算出する。"""
+    def evaluate(cls, dossier: Dict[str, Any]) -> Tuple[float, str]:
+        """銘柄データからスコア・判定を算出する。"""
         f = dossier.get("fundamentals", {})
         t = dossier.get("technicals", {})
 
@@ -236,7 +246,7 @@ class QuantAgentEvaluator:
 
         # 1. 死に株・商い停止判定
         if cls._is_dead_stock(rsi, ma_div):
-            return cls.DEAD_STOCK_SCORE, cls.DEAD_STOCK_VERDICT, "", []
+            return cls.DEAD_STOCK_SCORE, cls.DEAD_STOCK_VERDICT
 
         # 2. 各カテゴリのスコア計算
         raw_score = (
@@ -267,4 +277,4 @@ class QuantAgentEvaluator:
             operating_margin=op_margin,
         )
 
-        return score, verdict, "", []
+        return score, verdict

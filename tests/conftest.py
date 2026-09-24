@@ -46,10 +46,7 @@ def clean_database(db_conn):
     tables = [
         "stocks",
         "daily_metrics",
-        "analysis_results",
         "fundamentals",
-        "rank_history",
-        "sentinel_alerts",
     ]
     for table in tables:
         try:

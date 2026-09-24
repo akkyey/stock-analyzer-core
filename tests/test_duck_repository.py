@@ -57,5 +57,4 @@ def test_save_empty_df(db_conn):
     repo.save_stocks(pl.DataFrame())
     repo.save_metrics(pl.DataFrame())
     repo.save_fundamentals(pl.DataFrame())
-    repo.save_analysis_results(pl.DataFrame())
     # エラーが発生しなければ OK

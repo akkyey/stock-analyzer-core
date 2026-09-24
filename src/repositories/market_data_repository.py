@@ -85,7 +85,8 @@ class MarketDataRepository:
                 code,
                 entry_date as Date,
                 price as Close,
-                trading_value as Volume
+                volume as Volume,
+                trading_value
             FROM daily_metrics 
             WHERE entry_date >= ?
             ORDER BY code, entry_date
@@ -109,7 +110,7 @@ class MarketDataRepository:
                     .str.to_datetime("%Y-%m-%d", strict=False),
                 ]
             ).select(
-                ["code", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+                ["code", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "trading_value"]
             )
         except Exception as e:
             self.logger.error(f"Error fetching historical records: {e}")

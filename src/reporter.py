@@ -61,17 +61,9 @@ class StockReporter:
         # スコア降順にソート
         rows.sort(key=lambda x: x["Score"], reverse=True)
 
-        # 順位 (Rank) の付与と Fundamental スコアの整形
+        # 順位 (Rank) の付与
         for i, r in enumerate(rows, start=1):
             r["Rank"] = i
-            raw = r.get("Fundamental_Raw")
-            if raw is not None:
-                r["Fundamental"] = round(float(raw), 2)
-            else:
-                r["Fundamental"] = "-"
-
-            if "Fundamental_Raw" in r:
-                del r["Fundamental_Raw"]
 
         # 件数制限
         output_rows = rows[:limit] if limit is not None else rows
@@ -219,15 +211,12 @@ class StockReporter:
         latest_row = code_info["latest"]
         common = latest_row.get("master_data") or latest_row
         code = latest_row.get("code") or common.get("code")
-        strategy = latest_row.get("strategy_name") or "-"
+        verdict = latest_row.get("verdict") or common.get("verdict") or "-"
 
         score_val = latest_row.get("quant_score")
         sort_score = round(score_val, 2) if (score_val is not None) else 0.0
 
         now_str = get_current_time().strftime("%Y-%m-%d %H:%M:%S")
-        fund_raw = self._calculate_fundamental_score(latest_row)
-        fund_raw = max(0.0, fund_raw)
-
         metrics = self._resolve_metrics_with_fallback(latest_row, common)
 
         return {
@@ -238,10 +227,8 @@ class StockReporter:
             "Market": _s(common.get("market")),
             "Market_Cap_Src": metrics["market_cap"][1],
             "Market_Cap": metrics["market_cap"][0],
-            "Strategy": strategy,
+            "Verdict": verdict,
             "Score": sort_score,
-            "Fundamental_Raw": fund_raw,
-            "Fundamental": f"{fund_raw:.1f}" if fund_raw is not None else "-",
             "PER_Src": metrics["per"][1],
             "PER": metrics["per"][0],
             "PBR_Src": metrics["pbr"][1],
@@ -266,14 +253,6 @@ class StockReporter:
             ),
             "Report_Timestamp": now_str,
         }
-
-    def _calculate_fundamental_score(self, item: dict) -> float:
-        """Calculate raw fundamental score from breakdown."""
-        base = safe_float_or_none(item.get("score_base")) or 0.0
-        val = safe_float_or_none(item.get("score_value")) or 0.0
-        gro = safe_float_or_none(item.get("score_growth")) or 0.0
-        qly = safe_float_or_none(item.get("score_quality")) or 0.0
-        return base + val + gro + qly
 
     def _format_rsi(self, common_data: dict[str, Any]) -> str:
         """RSI整形"""

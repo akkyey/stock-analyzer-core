@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.orchestration.context import OrchestratorContext
-from src.orchestration.pipeline_orchestrator import PipelineOrchestrator
+from src.orchestration.pipeline import OrchestrationPipeline
 from src.orchestration.scan_handler import ScanHandler
 
 
@@ -21,7 +21,8 @@ def test_scan_handler_basic():
     assert sh is not None
 
 
-def test_pipeline_orchestrator_basic():
+def test_orchestration_pipeline_basic():
     ctx = OrchestratorContext(debug_mode=True)
-    po = PipelineOrchestrator(ctx)
-    assert po is not None
+    op = OrchestrationPipeline(ctx)
+    assert op is not None
+

@@ -139,8 +139,8 @@ def test_early_memory_join_scoring(mock_context):
             {
                 "code": ["8888"] * 40,
                 "Date": [datetime(2026, 1, 1) + timedelta(days=i) for i in range(40)],
-                "Close": [100 + (i % 5) for i in range(40)],
-                "Volume": [1000] * 40,
+                "Close": [1000 + (i % 5) for i in range(40)],
+                "Volume": [50000] * 40,
             }
         )
     }

@@ -4,7 +4,6 @@ import polars as pl
 import pytest
 
 from src.database.duck_client import DuckDBClient
-from src.repositories.analysis_repository import AnalysisRepository
 from src.repositories.duck_repository import DuckDBRepository
 from src.repositories.fundamentals_repository import FundamentalsRepository
 from src.repositories.market_data_repository import MarketDataRepository
@@ -49,11 +48,6 @@ def test_stock_repository(mock_duck_repo):
 
     st = sr.get_by_code("6758")
     assert st is not None or sr is not None
-
-
-def test_analysis_repository(mock_duck_repo):
-    ar = AnalysisRepository(duck_repo=mock_duck_repo)
-    assert ar is not None
 
 
 def test_market_data_repository(mock_duck_repo):

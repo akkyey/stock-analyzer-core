@@ -1,53 +1,12 @@
-"""src/validation_engine.py, src/reporter.py の包括的テスト"""
+"""src/reporter.py の包括的テスト"""
 
 import os
-import time
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from src.reporter import StockReporter
-from src.validation_engine import ValidationEngine
-
-# --- ValidationEngine Tests ---
-
-
-def test_validation_engine_basic():
-    ve = ValidationEngine(debug_mode=True)
-
-    policy_bank = ve.get_policy("銀行業")
-    assert isinstance(policy_bank, dict)
-
-    excludes = ve.get_ai_excludes("銀行業")
-    assert isinstance(excludes, list)
-
-    exemptions = ve.get_score_exemptions("銀行業")
-    assert isinstance(exemptions, list)
-
-
-def test_validation_engine_validate_polars():
-    import polars as pl
-
-    ve = ValidationEngine(debug_mode=True)
-
-    df_pl = pl.DataFrame(
-        {
-            "code": ["7203", "8306"],
-            "sector": ["輸送用機器", "銀行業"],
-            "price": [2500.0, 1000.0],
-            "per": [10.0, None],
-            "pbr": [1.0, 0.8],
-            "operating_cf": [100.0, 50.0],
-            "sales_growth": [0.05, 0.02],
-            "operating_margin": [0.10, 0.15],
-            "equity_ratio": [0.50, 0.08],
-        }
-    )
-
-    res = ve.validate_batch_polars(df_pl, strategy="value")
-    assert res is not None
-
 
 # --- StockReporter Tests ---
 

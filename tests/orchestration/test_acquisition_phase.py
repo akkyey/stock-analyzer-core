@@ -56,7 +56,7 @@ def test_acquisition_phase_execute_success(stub_context):
         assert len(all_data_map) == 2
         assert "1001" in all_data_map
         assert "1002" in all_data_map
-        assert isinstance(all_data_map["1001"], pd.DataFrame)
+        assert isinstance(all_data_map["1001"], (pd.DataFrame, pl.DataFrame))
         # カバレッジ確認（log_infoが呼ばれたか等）
         assert stub_context.logger.info.called
 

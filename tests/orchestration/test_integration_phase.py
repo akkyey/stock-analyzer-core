@@ -28,8 +28,8 @@ def test_integration_phase_execute_success(stub_context):
         patch("os.path.exists") as MockExists,
         patch("os.path.getsize") as MockSize,
         patch("src.colab_tools.ColabTools.upload_file_to_drive") as MockUpload,
-        patch(
-            "src.orchestration.report_helper._upload_summary_to_gspread"
+        patch.object(
+            IntegrationPhase, "_upload_summary_to_gspread"
         ) as MockGspread,
     ):
         MockExists.return_value = True
@@ -84,7 +84,7 @@ def test_integration_phase_upload_failure(stub_context):
             "src.colab_tools.ColabTools.upload_file_to_drive",
             side_effect=Exception("Upload Error"),
         ),
-        patch("src.orchestration.report_helper._upload_summary_to_gspread"),
+        patch.object(IntegrationPhase, "_upload_summary_to_gspread"),
     ):
         phase = IntegrationPhase(stub_context)
         # 内部で例外をキャッチしてエラーログを出すはず
@@ -96,3 +96,16 @@ def test_integration_phase_upload_failure(stub_context):
             stub_context.notifier.notify_success.called
             or stub_context.notifier.notify_error.called
         )
+
+
+def test_integration_phase_data_contract_violation(stub_context):
+    """異常系: 必須カラムに欠損値がある場合は AssertionError で即座に物理遮断されること"""
+    # price に null が混入したデータ
+    df_invalid = pl.DataFrame({
+        "code": ["1001", "1002"],
+        "price": [1500.0, None],
+        "verdict": ["BUY", "WATCH"]
+    })
+    phase = IntegrationPhase(stub_context)
+    with pytest.raises(AssertionError, match="Data Contract Violation"):
+        phase.execute(df_invalid)

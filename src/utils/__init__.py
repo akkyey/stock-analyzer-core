@@ -185,11 +185,11 @@ def save_dataframe_to_csv(
     path: str,
     encoding: str = "utf-8-sig",
     index: bool = False,
-    include_timestamp_header: bool = True,
+    include_timestamp_header: bool = False,
 ) -> bool:
     """
     DataFrame を CSV ファイルに保存する共通ヘルパー。
-    [v2026-09] 出力ファイルの冒頭に生成日時ヘッダー(# Generated At: YYYY-MM-DD HH:MM:SS)を自動注入。
+    標準的なCSVパーサー(Polars/Pandas)との100%互換性を維持するため、コメント行を挿入せずクリーンに出力する。
     """
     logger = getLogger(__name__)
     import csv

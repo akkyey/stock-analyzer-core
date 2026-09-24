@@ -35,3 +35,9 @@ class ModeHandler(ABC):
             str: モード名（'daily', 'weekly', 'monthly' 等）。
         """
         pass
+
+
+if __name__ == "__main__":
+    from src.__main__ import main
+
+    main()

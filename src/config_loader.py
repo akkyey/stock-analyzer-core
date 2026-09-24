@@ -1,5 +1,4 @@
 import os
-import re
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +40,6 @@ class ConfigLoader:
         # [Safety] If NOT production env, override critical paths to avoid polluting production
         if self.env != "production":
             self._apply_test_overrides()
-
-        # Macro sync before validation
-        self._sync_macro_context()
 
         # Pydantic Validation
         self.config_model = self.validate_config()
@@ -206,48 +202,9 @@ class ConfigLoader:
             print(f"❌ Config Validation Failed: {e}")
             raise ValueError(f"Invalid Configuration: {e}") from e
 
-    def _sync_macro_context(self) -> None:
-        """market_context.txt からマクロ環境設定を読み込み Config をオーバーライドする"""
-        config_dir = Path(self.config_path).parent
-        context_path = config_dir / "market_context.txt"
-        if not context_path.exists():
-            return
-
-        try:
-            with open(context_path, encoding="utf-8") as f:  # noqa: PTH123
-                content = f.read()
-
-            if (
-                "scoring_v2" not in self.raw_config
-                or self.raw_config["scoring_v2"] is None
-            ):
-                self.raw_config["scoring_v2"] = {}
-
-            if "macro" not in self.raw_config["scoring_v2"]:
-                self.raw_config["scoring_v2"]["macro"] = {}
-
-            macro_cfg = self.raw_config["scoring_v2"]["macro"]
-
-            match_sentiment = re.search(r"\[MACRO_SENTIMENT:([a-zA-Z0-9_]+)\]", content)
-            if match_sentiment:
-                val = match_sentiment.group(1).lower()
-                macro_cfg["sentiment"] = val
-
-            match_rate = re.search(r"\[INTEREST_RATE:([a-zA-Z0-9_]+)\]", content)
-            if match_rate:
-                val = match_rate.group(1).lower()
-                macro_cfg["interest_rate"] = val
-
-            match_sector = re.search(r"\[ACTIVE_SECTOR:([^\]]+)\]", content)
-            if match_sector:
-                val = match_sector.group(1).strip()
-                macro_cfg["active_sector"] = val
-
-        except Exception as e:
-            print(f"⚠️ Failed to sync macro context: {e}")
-
 
 # --- 旧コードとの互換性用 ---
 def load_config(config_path=None):
     loader = ConfigLoader(config_path)
     return loader.config
+

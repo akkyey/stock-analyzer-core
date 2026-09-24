@@ -100,7 +100,30 @@ class FinancialRepairService:
                 ]
             )
 
-        # [Step 5] 極端な境界値のクリッピング
+        # [Step 5] 比率項目の自動スケーリング (#4, 指摘4)
+        # 自己資本比率が実数（0.0〜1.0 未満）で表記されている場合のみ百分率（%）へ100倍スケーリングする
+        # ※ 1.0 は「1%」として扱うのが安全なため < 1.0 で判定する。
+        # ※ current_ratio, debt_equity_ratio などの倍率指標は 1.0 を超えるのが通常なため対象外とする。
+        from src.config_singleton import ConfigSingleton
+
+        threshold = ConfigSingleton.get(
+            "financial_repair.ratio_scaling_threshold", 1.0
+        )
+
+        if "equity_ratio" in cols:
+            df = df.with_columns(
+                [
+                    pl.when(
+                        (pl.col("equity_ratio").abs() > 0)
+                        & (pl.col("equity_ratio").abs() < threshold)
+                    )
+                    .then(pl.col("equity_ratio") * 100.0)
+                    .otherwise(pl.col("equity_ratio"))
+                    .alias("equity_ratio")
+                ]
+            )
+
+        # [Step 6] 極端な境界値のクリッピング（スケーリング後に適用）
         if "per" in cols:
             df = df.with_columns(
                 [
@@ -116,35 +139,6 @@ class FinancialRepairService:
                     pl.col("equity_ratio")
                     .clip(lower_bound=0.0, upper_bound=100.0)
                     .alias("equity_ratio")
-                ]
-            )
-
-        # [Step 6] 比率項目の自動スケーリング (#4)
-        # [v27.3] 閾値（デフォルト10.0）未満（実数表記）の場合、百分率へ 100倍スケーリングする
-        from src.config_singleton import ConfigSingleton
-
-        threshold = ConfigSingleton.get(
-            "financial_repair.ratio_scaling_threshold", 10.0
-        )
-
-        ratio_cols = [
-            c
-            for c in [
-                "current_ratio",
-                "quick_ratio",
-                "equity_ratio",
-                "debt_equity_ratio",
-            ]
-            if c in cols
-        ]
-        if ratio_cols:
-            df = df.with_columns(
-                [
-                    pl.when(pl.col(c).abs() < threshold)
-                    .then(pl.col(c) * 100.0)
-                    .otherwise(pl.col(c))
-                    .alias(c)
-                    for c in ratio_cols
                 ]
             )
 

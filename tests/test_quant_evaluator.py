@@ -1,8 +1,8 @@
-"""QuantAgentEvaluator の単体テスト (Phase 3 検証)"""
+"""QuantEvaluator の単体テスト (Phase 3 検証)"""
 
 import pytest
 
-from src.calc.quant_evaluator import QuantAgentEvaluator
+from src.calc.quant_evaluator import QuantEvaluator
 
 
 def test_dead_stock_penalty():
@@ -24,11 +24,9 @@ def test_dead_stock_penalty():
             "macd_status": "Neutral",
         },
     }
-    score, verdict, thesis, risks = QuantAgentEvaluator.evaluate(dossier)
+    score, verdict = QuantEvaluator.evaluate(dossier)
     assert score == 45.0
     assert verdict == "PASS"
-    assert thesis == ""
-    assert risks == []
 
 
 def test_macd_none_neutral():
@@ -50,7 +48,7 @@ def test_macd_none_neutral():
             "macd_status": "",
         },
     }
-    score, verdict, thesis, risks = QuantAgentEvaluator.evaluate(dossier)
+    score, verdict = QuantEvaluator.evaluate(dossier)
     assert score > 50.0  # スコアが健全に算出されること
 
 
@@ -78,9 +76,9 @@ def test_rsi_gap_smooth_transition():
         base_dossier, technicals=dict(base_dossier["technicals"], rsi_14=75.0)
     )
 
-    s65, _, _, _ = QuantAgentEvaluator.evaluate(dossier_65)
-    s70, _, _, _ = QuantAgentEvaluator.evaluate(dossier_70)
-    s75, _, _, _ = QuantAgentEvaluator.evaluate(dossier_75)
+    s65, _ = QuantEvaluator.evaluate(dossier_65)
+    s70, _ = QuantEvaluator.evaluate(dossier_70)
+    s75, _ = QuantEvaluator.evaluate(dossier_75)
 
     assert s65 > s70 > s75, f"RSIスコアのグラデーション期待値: {s65} > {s70} > {s75}"
 
@@ -109,8 +107,8 @@ def test_ma_divergence_crash_penalty():
             "macd_status": "Bearish",
         },
     }
-    s_norm, _, _, _ = QuantAgentEvaluator.evaluate(dossier_normal)
-    s_crash, _, _, _ = QuantAgentEvaluator.evaluate(dossier_crash)
+    s_norm, _ = QuantEvaluator.evaluate(dossier_normal)
+    s_crash, _ = QuantEvaluator.evaluate(dossier_crash)
 
     assert s_crash < s_norm
 
@@ -136,7 +134,7 @@ def test_one_off_profit_trap_suppression():
             "macd_status": "Bullish (Above Signal)",
         },
     }
-    score, verdict, _, _ = QuantAgentEvaluator.evaluate(dossier_trap)
+    score, verdict = QuantEvaluator.evaluate(dossier_trap)
     # 本来満点(12点)なら80点超STRONG_BUYになるが、PER0点抑制かつゲートキーパーによりWATCHに制限されること
     assert score < 80.0
     assert verdict == "WATCH"
@@ -162,20 +160,25 @@ def test_negative_roe_verdict_cap():
             "macd_status": "Bullish (Above Signal)",
         },
     }
-    score, verdict, _, _ = QuantAgentEvaluator.evaluate(dossier_neg_roe)
+    score, verdict = QuantEvaluator.evaluate(dossier_neg_roe)
     assert verdict in ["WATCH", "PASS"]
     assert verdict != "BUY"
     assert verdict != "STRONG_BUY"
 
     # 2. _determine_verdict ゲートキーパー単体での上限キャップ検証 (仮にスコアが75.0や85.0でもWATCHに落とされること)
     assert (
-        QuantAgentEvaluator._determine_verdict(
-            score=75.0, roe=-0.5, macd_status="Bullish", ma_div=0.0
+        QuantEvaluator._determine_verdict(
+            85.0,
+            roe=-5.0,
+            macd_status="Bullish",
+            ma_div=5.0,
+            op_income=1000.0,
+            net_profit=-500.0,
         )
         == "WATCH"
     )
     assert (
-        QuantAgentEvaluator._determine_verdict(
+        QuantEvaluator._determine_verdict(
             score=85.0, roe=-1.2, macd_status="Bullish", ma_div=0.0
         )
         == "WATCH"
@@ -201,7 +204,7 @@ def test_bearish_momentum_gatekeeper():
             "macd_status": "Bearish (Below Signal)",
         },
     }
-    _, verdict, _, _ = QuantAgentEvaluator.evaluate(dossier_bearish)
+    _, verdict = QuantEvaluator.evaluate(dossier_bearish)
     assert verdict != "STRONG_BUY"
 
     # さらに深い下落トレンド (-15%) の場合は WATCH へ制限
@@ -209,5 +212,33 @@ def test_bearish_momentum_gatekeeper():
         dossier_bearish,
         technicals=dict(dossier_bearish["technicals"], ma25_divergence=-15.0),
     )
-    _, verdict_deep, _, _ = QuantAgentEvaluator.evaluate(dossier_deep_bearish)
+    _, verdict_deep = QuantEvaluator.evaluate(dossier_deep_bearish)
     assert verdict_deep == "WATCH"
+
+
+def test_macd_zero_neutral_behavior():
+    """macd_hist が 0.0 のとき、Bearish ではなく Neutral として中立スコアが付与され、
+    深いマイナス乖離 (-12.0%) であっても Bearish による強制格下げを受けないこと"""
+    dossier_neutral = {
+        "name": "MACD中立株",
+        "code": "7777",
+        "fundamentals": {
+            "roe": 25.0,
+            "pbr": 1.0,
+            "per": 8.0,
+            "equity_ratio": 70.0,
+            "dividend_yield": 3.5,
+        },
+        "technicals": {
+            "rsi_14": 40.0,
+            "ma25_divergence": -12.0,
+            "macd_hist": 0.0,
+            "macd_status": "Neutral",
+        },
+    }
+    score, verdict = QuantEvaluator.evaluate(dossier_neutral)
+    # Neutral の場合は 3.0点の中立配点が付与され、Bearish（0〜2点）より高く評価される
+    assert QuantEvaluator._score_macd(0.0, "Neutral") == 3.0
+    # Bearish ゲートキーパーによる STRONG_BUY 禁止および強制 WATCH 降格を受けず、STRONG_BUY が正しく成立すること
+    assert verdict == "STRONG_BUY"
+

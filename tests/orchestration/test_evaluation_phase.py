@@ -30,50 +30,29 @@ def test_evaluation_phase_execute_push_flow(stub_context):
     }
 
     # マスタデータのモック設定
-    stub_context.duck_repo.load_stocks.return_value = (
-        DataGenerator.get_dummy_stocks_df()
+    stub_context.stock_repo.load_all.return_value = DataGenerator.get_dummy_stocks_df()
+    stub_context.funda_repo.load_all.return_value = pl.DataFrame(
+        {
+            "code": ["1001", "1002"],
+            "roe": [15.0, 8.0],
+            "per": [10.0, 20.0],
+            "pbr": [1.0, 1.5],
+            "equity_ratio": [60.0, 40.0],
+        }
     )
 
-    # Repo, Scorer 等の内部依存を一部パッチ
-    with (
-        patch("src.calc.engine.ScoringEngine") as MockEngine,
-        patch(
-            "src.repositories.fundamentals_repository.FundamentalsRepository"
-        ) as MockFunda,
-    ):
-        # ScoringEngine のモック (計算結果を模倣)
-        mock_engine_inst = MockEngine.return_value
+    # 実行
+    phase = EvaluationPhase(stub_context)
+    final_df = phase.execute(data_map=data_map)
 
-        # 簡易的な計算結果を返すモックを設定
-        def mock_calc_score(df, strategy_name):
-            # [v13] 属性維持契約を模倣: 入力 df にスコアとランクを付与して返す
-            return df.with_columns(
-                [
-                    pl.lit(80.0).alias("quant_score"),
-                    pl.lit(1).alias("rank"),
-                    pl.lit(strategy_name).alias("strategy_name"),
-                ]
-            )
-
-        mock_engine_inst.calculate_score.side_effect = mock_calc_score
-
-        # FundamentalsRepository (空を返す)
-        MockFunda.return_value.get_all_pl.return_value = pl.DataFrame()
-
-        # 実行
-        phase = EvaluationPhase(stub_context)
-        final_df = phase.execute(data_map=data_map)
-
-        # 検証
-        assert final_df is not None
-        assert not final_df.is_empty()
-        assert "quant_score" in final_df.columns
-        assert "sector" in final_df.columns  # マスタ結合の確認
-        assert "strategy_name" in final_df.columns
-        assert len(final_df) <= 50
-        assert hasattr(stub_context, "stock_dossiers")
-        assert len(stub_context.stock_dossiers) > 0
-        assert stub_context.stock_dossiers[0]["code"] in ["1001", "1002"]
+    # 検証
+    assert final_df is not None
+    assert not final_df.is_empty()
+    assert "quant_score" in final_df.columns
+    assert "verdict" in final_df.columns
+    assert "sector" in final_df.columns  # マスタ結合の確認
+    assert hasattr(stub_context, "uncalculable_df")
+    assert stub_context.evaluated_count > 0
 
 
 def test_evaluation_phase_no_data(stub_context):

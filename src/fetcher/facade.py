@@ -1,10 +1,8 @@
-import time
-from typing import Any, Dict, List
+from typing import Any
 
 import pandas as pd
 
 from .base import FetcherBase
-from .fundamentals_fetcher import FundamentalsFetcher
 from .jpx import JPXFetcher
 from .market_fetcher import MarketFetcher
 
@@ -12,14 +10,13 @@ from .market_fetcher import MarketFetcher
 class DataFetcher(FetcherBase):
     """
     Facade class for DataFetcher components.
-    [v1.0] Physical Separation: 分離された MarketFetcher と FundamentalsFetcher を統合的に管理。
+    [v1.0] Physical Separation: 分離された MarketFetcher と JPXFetcher を統合的に管理。
     """
 
     def __init__(self, config_source=None):
         super().__init__(config_source)
         self.jpx_fetcher = JPXFetcher(self.config)
         self.market_fetcher = MarketFetcher(self.config)
-        self.fundamentals_fetcher = FundamentalsFetcher(self.config)
 
     # ------------------------------------------------------------------
     # JPX Operations
@@ -99,96 +96,6 @@ class DataFetcher(FetcherBase):
         # 3. 取得結果をそのまま返す (dict[str, pd.DataFrame])
         # [v1.0] ScanHandler/PolarsProcessor は dict 形式を期待しているため、DataFrameへの変換は行わない。
         return all_batch_results
-
-    # ------------------------------------------------------------------
-    # Heavy Fundamentals Operations (EPS, PBR, etc.)
-    # ------------------------------------------------------------------
-    def fetch_fundamentals_data(
-        self, codes: list[str], resume: bool = True, context: Any = None
-    ) -> List[Dict[str, Any]]:
-        """休日バッチ・オンライン等で業績データを丁寧に取得する。
-        [v1.2] Producer-Consumer Pipeline: 取得(I/O)と管理(Main)を分離し、2多重で高速化。
-        JSONファイルに途中経過を保存し、次回起動時にレジューム（途中再開）する機能を持つ。
-        """
-        import json
-        import os
-
-        from src.config_singleton import ConfigSingleton
-
-        cfg = ConfigSingleton().get_config()
-        output_dir = cfg.get("paths", {}).get("output_dir", "data/output")
-        resume_file = os.path.join(output_dir, "fundamentals_resume.json")
-
-        results_map = {}
-        if resume and os.path.exists(resume_file):
-            try:
-                with open(resume_file, "r", encoding="utf-8") as f:
-                    results_map = json.load(f)
-                self.logger.info(
-                    f"🔄 Resumed from {len(results_map)} already fetched records."
-                )
-            except Exception as e:
-                self.logger.warning(f"⚠️ Failed to load resume file: {e}")
-
-        pending_codes = [c for c in codes if str(c) not in results_map]
-
-        if not pending_codes:
-            self.logger.info("✅ All fundamentals already fetched for the given list.")
-            return list(results_map.values())
-
-        self.logger.info(
-            f"🚀 [Pipeline] Fetching fundamentals for {len(pending_codes)} stocks (Sequential)..."
-        )
-
-        from tqdm import tqdm
-
-        pbar = tqdm(total=len(pending_codes), desc="Fetching Fundamentals")
-
-        t_fetch_start = time.time()
-        try:
-            for code in pending_codes:
-                try:
-                    res = self.fundamentals_fetcher.fetch_heavy_fundamentals(code)
-                    if res:
-                        results_map[str(code)] = res
-
-                    # 10軒ごとにレジューム保存
-                    if len(results_map) % 10 == 0:
-                        try:
-                            os.makedirs(output_dir, exist_ok=True)
-                            with open(resume_file, "w", encoding="utf-8") as f:
-                                json.dump(results_map, f, ensure_ascii=False, indent=2)
-                        except Exception as e:
-                            self.logger.warning(f"⚠️ Intermediate save failed: {e}")
-
-                except Exception as e:
-                    self.logger.warning(f"⚠️ Fetch failed for {code}: {e}")
-                    results_map[str(code)] = {
-                        "code": code,
-                        "fetch_status": "error_other",
-                    }
-
-                pbar.update(1)
-
-        except KeyboardInterrupt:
-            self.logger.warning("🛑 Interrupt received. Saving current progress...")
-        finally:
-            pbar.close()
-            # [v29.3] 統計情報の更新
-            fetch_elapsed = time.time() - t_fetch_start
-            if context and hasattr(context, "perf_stats"):
-                context.perf_stats["fetch_sec"] += fetch_elapsed
-
-        # 最終保存
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-            with open(resume_file, "w", encoding="utf-8") as f:
-                json.dump(results_map, f, ensure_ascii=False, indent=2)
-            self.logger.info(f"✅ Fetch completed ({len(results_map)} total stocks).")
-        except Exception as e:
-            self.logger.warning(f"⚠️ Final save failed: {e}")
-
-        return list(results_map.values())
 
     # ------------------------------------------------------------------
     # Common Utilities

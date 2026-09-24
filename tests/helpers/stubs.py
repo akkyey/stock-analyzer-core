@@ -24,9 +24,16 @@ class StubOrchestratorContext:
         self.config = config or {"strategies": {"Balanced Strategy": {}}}
         self.logger = MagicMock()
         self.duck_repo = StubDuckRepository()
+        self.funda_repo = MagicMock()
+        self.funda_repo.load_all.return_value = pl.DataFrame()
+        self.stock_repo = MagicMock()
+        self.stock_repo.load_all.return_value = pl.DataFrame()
         self.limit = None
         self.report_url = None
         self.temp_data_map = {}
+        self.uncalculable_df = None
+        self.excluded_count = 0
+        self.evaluated_count = 0
 
     def log_info(self, msg):
         self.logger.info(msg)
@@ -63,7 +70,7 @@ class DataGenerator:
                 "code": [code] * days,
                 "Date": pd.to_datetime(dates),
                 "Close": prices,
-                "Volume": [10000 + i * 100 for i in range(days)],
+                "Volume": [50000 + i * 100 for i in range(days)],
             }
         )
         return df

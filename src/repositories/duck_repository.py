@@ -20,7 +20,6 @@ class DuckDBRepository:
     - [x] `save_stocks` のテンプレート移行
     - [x] `save_metrics` のテンプレート移行
     - [x] `save_fundamentals` のテンプレート移行
-    - [x] `save_analysis_results` のテンプレート移行
     """
 
     def __init__(self, client: Optional[DuckDBClient] = None):
@@ -140,8 +139,13 @@ class DuckDBRepository:
                     volume_ratio DOUBLE,
                     trading_value DOUBLE,
                     -- テクニカル指標
+                    macd DOUBLE,
+                    macd_signal DOUBLE,
                     macd_hist DOUBLE,
+                    macd_status VARCHAR,
                     rsi_14 DOUBLE,
+                    ma25 DOUBLE,
+                    ma75 DOUBLE,
                     ma_divergence DOUBLE,
                     volatility DOUBLE,
                     bb_mid DOUBLE,
@@ -165,41 +169,15 @@ class DuckDBRepository:
                     -- 分析補助・メタデータ
                     quant_score DOUBLE,
                     trend_score INTEGER,
+                    trend_signal INTEGER,
+                    trend_up DOUBLE,
                     fetch_status VARCHAR,
                     repair_metadata TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (code, entry_date)
                 )
             """)
-            # AI分析結果
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS analysis_results (
-                    code VARCHAR,
-                    analyzed_at TIMESTAMP,
-                    strategy_name VARCHAR,
-                    quant_score DOUBLE,
-                    ai_sentiment TEXT,
-                    ai_reason TEXT,
-                    ai_detail TEXT,
-                    ai_risk TEXT,
-                    ai_horizon VARCHAR,
-                    snapshot_data TEXT,
-                    api_call_count INTEGER,
-                    row_hash VARCHAR, -- AIキャッシュ整合性に必須
-                    score_long DOUBLE,
-                    score_short DOUBLE,
-                    score_gap DOUBLE,
-                    active_style VARCHAR,
-                    score_value DOUBLE,
-                    score_growth DOUBLE,
-                    score_quality DOUBLE,
-                    score_trend DOUBLE,
-                    score_penalty DOUBLE,
-                    audit_version VARCHAR, -- リセット機能に必須
-                    PRIMARY KEY (code, analyzed_at)
-                )
-            """)
-            # 順序の作成（存在しない場合）
+            # アラート監視テーブル（シーケンス作成）
             conn.execute("CREATE SEQUENCE IF NOT EXISTS alert_id_seq")
 
             # Sentinel 通知履歴
@@ -250,29 +228,44 @@ class DuckDBRepository:
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS operating_income DOUBLE"
             )
 
-            # 順位履歴
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS rank_history (
-                    code VARCHAR,
-                    strategy_name VARCHAR,
-                    rank INTEGER,
-                    score DOUBLE,
-                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
             # [v27.2] 市場カレンダー・キャッシュ
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS market_calendar (
                     date DATE PRIMARY KEY
                 )
             """)
+            # stocks テーブルのスキーマ進化
+            conn.execute(
+                "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE"
+            )
+
+            # [v29.0] daily_metrics のスキーマ進化 (SSOT 同期)
+            for col_def in [
+                ("macd", "DOUBLE"),
+                ("macd_signal", "DOUBLE"),
+                ("macd_status", "VARCHAR"),
+                ("ma25", "DOUBLE"),
+                ("ma75", "DOUBLE"),
+                ("trend_signal", "INTEGER"),
+                ("trend_up", "DOUBLE"),
+            ]:
+                conn.execute(
+                    f"ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS {col_def[0]} {col_def[1]}"
+                )
 
     def get_all_codes(self) -> List[str]:
         """登録されている全銘柄コードを取得する。"""
         with self.client.get_connection() as conn:
-            res = conn.execute(
-                "SELECT code FROM stocks WHERE is_active = TRUE"
-            ).fetchall()
+            cols = [
+                r[1]
+                for r in conn.execute("PRAGMA table_info('stocks')").fetchall()
+            ]
+            if "is_active" in cols:
+                res = conn.execute(
+                    "SELECT code FROM stocks WHERE is_active = TRUE"
+                ).fetchall()
+            else:
+                res = conn.execute("SELECT code FROM stocks").fetchall()
             return [str(r[0]) for r in res]
 
     def get_metrics_count(self) -> int:
@@ -322,14 +315,6 @@ class DuckDBRepository:
         """全銘柄マスタを Polars DataFrame として取得する"""
         with self.client.get_connection() as conn:
             return conn.execute("SELECT * FROM stocks").pl()
-
-    def save_analysis_results(self, df: pl.DataFrame):
-        """分析結果を保存する。"""
-        if df.is_empty():
-            return
-        if "code" not in df.columns or "analyzed_at" not in df.columns:
-            raise ValueError("UPSERT requires 'code' and 'analyzed_at'.")
-        self._upsert_dataframe("analysis_results", df, ["code", "analyzed_at"])
 
     def save_alert(self, code: str, alert_type: str, message: str):
         """通知を保存する"""

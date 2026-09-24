@@ -45,9 +45,9 @@ class BasePhase(ABC):
         """ログ出力（WARNレベル）のヘルパーメソッド"""
         self.logger.warning(f"[{self.__class__.__name__}] {message}")
 
-    def log_error(self, message: str):
+    def log_error(self, message: str, exc_info: bool = False):
         """ログ出力（ERRORレベル）のヘルパーメソッド"""
-        self.logger.error(f"[{self.__class__.__name__}] {message}")
+        self.logger.error(f"[{self.__class__.__name__}] {message}", exc_info=exc_info)
 
     def _clean_columns(self, df: pl.DataFrame, targets: list[str]) -> pl.DataFrame:
         """指定されたカラムが存在する場合のみ削除するユーティリティ。

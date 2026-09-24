@@ -26,3 +26,13 @@ class DiscordNotifier:
     def send_alert(self, title: str, description: str, **kwargs: Any) -> bool:
         logger.warning(f"🚨 [Notification Alert Stub] {title}: {description}")
         return True
+
+    def notify_success(self, message: str = "", **kwargs: Any) -> bool:
+        msg = message or f"Success: {kwargs}"
+        logger.info(f"✅ [Notification Success] {msg}")
+        return True
+
+    def notify_error(self, message: str = "", **kwargs: Any) -> bool:
+        msg = message or f"Error: {kwargs}"
+        logger.error(f"❌ [Notification Error] {msg}")
+        return True

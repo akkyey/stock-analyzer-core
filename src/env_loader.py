@@ -71,7 +71,6 @@ def validate_required_env() -> None:
     import os
 
     required_vars = [
-        "GEMINI_API_KEY",
         "DISCORD_WEBHOOK_URL",
     ]
 
@@ -84,9 +83,8 @@ def validate_required_env() -> None:
     if missing:
         error_msg = (
             f"⚠️ 必須環境変数が設定されていません: {', '.join(missing)}\n"
-            "AI機能を利用する場合は .env ファイルまたは環境変数の設定を確認してください。"
+            "通知機能を利用する場合は .env ファイルまたは環境変数の設定を確認してください。"
         )
         logger.warning(error_msg)
-        # 実行を継続させるために raise は行わない
 
     logger.debug("✅ All required environment variables are set.")

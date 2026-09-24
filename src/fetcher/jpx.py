@@ -94,7 +94,7 @@ class JPXFetcher(FetcherBase):
 
             self.logger.warning("⚠️ Fallback enabled. Searching backup...")
             search_dir_path = jp_stock_path.parent
-            candidates = []
+            candidates: list[str] = []
 
             # Using Path.glob (PTH207)
             # patterns were strings, need to glob against the directory

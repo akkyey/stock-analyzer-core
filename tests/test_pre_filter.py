@@ -189,3 +189,137 @@ def test_aggregate_timeseries_metrics():
     row_1002 = res.filter(pl.col("code") == "1002")
     assert row_1002["zero_volume_days_5d"][0] == 0
     assert row_1002["avg_trading_value_20d"][0] == 15_000_000.0
+
+
+def test_aggregate_timeseries_metrics_no_price_double_multiplication():
+    """売買代金に株価が二重に掛けられず、薄商い銘柄（50万円/日）が正しく除外されること"""
+    # 50万円/日の薄商い銘柄（株価 500円）
+    df_ts = pl.DataFrame(
+        {
+            "code": ["9999"] * 5,
+            "entry_date": ["2026-03-27", "2026-03-26", "2026-03-25", "2026-03-24", "2026-03-23"],
+            "price": [500.0] * 5,
+            "trading_value": [500_000.0] * 5,  # 50万円
+        }
+    )
+    res = PreFilter.aggregate_timeseries_metrics(df_ts)
+    # 株価が二重に掛けられて 2.5億円 にならず、50万円（500_000.0）であること
+    assert res.filter(pl.col("code") == "9999")["avg_trading_value_20d"][0] == 500_000.0
+
+    df_cand = pl.DataFrame(
+        {
+            "code": ["9999"],
+            "name": ["薄商い株"],
+            "price": [500.0],
+            "equity_ratio": [60.0],
+            "sales": [5000.0],
+            "operating_cf": [200.0],
+        }
+    )
+    passed, rejected = PreFilter.apply_filter(df_cand, df_liquidity=res)
+    assert passed.is_empty()
+    assert len(rejected) == 1
+    assert rejected["filter_reason"][0] == "極小流動性トラップ"
+
+
+def test_pre_filter_no_code_right_column():
+    """PreFilter 適用後の適格群および除外群に code_right 列が一切混ざらないこと"""
+    df_cand = pl.DataFrame(
+        {
+            "code": ["1001", "1002"],
+            "name": ["A社", "B社"],
+            "price": [1000.0, 500.0],
+            "equity_ratio": [50.0, 40.0],
+            "sales": [2000.0, 1000.0],
+            "operating_cf": [100.0, 50.0],
+        }
+    )
+    df_liq = pl.DataFrame(
+        {
+            "code": ["1001", "1002", "1003"],
+            "avg_trading_value_20d": [50_000_000.0, 10_000_000.0, 5_000_000.0],
+            "zero_volume_days_5d": [0, 0, 3],
+        }
+    )
+    passed, rejected = PreFilter.apply_filter(df_cand, df_liquidity=df_liq)
+    assert "code_right" not in passed.columns
+    assert "code_right" not in rejected.columns
+
+
+def test_pre_filter_missing_fundamentals():
+    """自己資本比率等の財務データが欠損している銘柄が『重要指標未開示/算出不能』で隔離されることを検証"""
+    df = pl.DataFrame(
+        {
+            "code": ["1006"],
+            "name": ["財務未開示株"],
+            "sector": ["情報・通信業"],
+            "market": ["Growth"],
+            "price": [1200.0],
+            "equity_ratio": [None],  # 財務データ未開示
+            "sales": [None],
+            "operating_cf": [None],
+            "avg_trading_value_20d": [50_000_000.0],
+            "zero_volume_days_5d": [0],
+        }
+    )
+    result = PreFilter.evaluate(df)
+    assert result.passed_df.is_empty()
+    assert len(result.rejected_df) == 1
+    assert result.rejected_df["filter_reason"][0] == "重要指標未開示/算出不能"
+
+
+def test_pre_filter_stale_trade_date():
+    """最終取引日が直近5営業日より古い取引停止銘柄が『データ鮮度不足 (取引停止)』で隔離されることを検証"""
+    dates_active = ["2026-09-24", "2026-09-23", "2026-09-22", "2026-09-21", "2026-09-20"]
+    df_ts = pl.DataFrame(
+        {
+            "code": ["1001"] * 5 + ["1002"],
+            "entry_date": dates_active + ["2026-08-24"],  # 1002は1ヶ月前
+            "trading_value": [50_000_000.0] * 6,
+            "price": [1000.0] * 5 + [500.0],
+        }
+    )
+    res = PreFilter.aggregate_timeseries_metrics(df_ts)
+
+    df_cand = pl.DataFrame(
+        {
+            "code": ["1001", "1002"],
+            "name": ["稼働株", "停止株"],
+            "price": [1000.0, 500.0],
+            "equity_ratio": [50.0, 50.0],
+            "sales": [2000.0, 1000.0],
+            "operating_cf": [100.0, 50.0],
+        }
+    )
+    passed, rejected = PreFilter.apply_filter(df_cand, df_liquidity=res)
+    assert len(passed) == 1
+    assert passed["code"][0] == "1001"
+    rej_1002 = rejected.filter(pl.col("code") == "1002")
+    assert len(rej_1002) == 1
+    assert rej_1002["filter_reason"][0] == "データ鮮度不足 (取引停止)"
+
+
+def test_pre_filter_missing_market_price():
+    """株価データが存在しない銘柄が『市場データ取得不能』として隔離されることを検証"""
+    df = pl.DataFrame(
+        {
+            "code": ["3593"],
+            "name": ["ホギメディカル"],
+            "sector": ["繊維製品"],
+            "market": ["Prime"],
+            "price": [None],  # 株価欠損
+            "equity_ratio": [80.0],
+            "sales": [30000.0],
+            "operating_cf": [4000.0],
+            "avg_trading_value_20d": [None],
+            "zero_volume_days_5d": [None],
+        }
+    )
+    result = PreFilter.evaluate(df)
+    assert result.passed_df.is_empty()
+    assert len(result.rejected_df) == 1
+    assert result.rejected_df["filter_reason"][0] == "市場データ取得不能"
+    assert "市場価格データ欠損" in result.rejected_df["filter_detail"][0]
+
+
+

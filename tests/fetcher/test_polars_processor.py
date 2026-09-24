@@ -105,3 +105,18 @@ def test_polars_processor_datetime_fallback():
     assert not result.is_empty()
     # entry_date (元Date/index) が時系列型あるいは適切にパースされていること
     assert "entry_date" in result.columns
+
+
+def test_polars_processor_batch_exception_raises(monkeypatch):
+    """異常系: calc_from_polars で例外が発生した際、握りつぶして空DFを返さず例外を再送出すること (指摘8)"""
+    def _mock_calc_failure(*args, **kwargs):
+        raise RuntimeError("Fatal calculation failure inside vectorized engine")
+
+    monkeypatch.setattr(PolarsProcessor, "calc_from_polars", _mock_calc_failure)
+
+    hist_map = {
+        "1001": DataGenerator.generate_history("1001", 10),
+    }
+    with pytest.raises(RuntimeError, match="Fatal calculation failure inside vectorized engine"):
+        PolarsProcessor.calc_batch_technicals_vectorized(hist_map)
+

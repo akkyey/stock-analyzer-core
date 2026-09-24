@@ -71,21 +71,16 @@ class PreFilter:
                 }
             )
 
-        # 売買代金（円）の算出 (trading_value が株数の場合は price * trading_value)
-        if "price" in df_timeseries.columns:
-            df_calc = df_timeseries.with_columns(
-                pl.when(
-                    pl.col("trading_value").is_not_null()
-                    & pl.col("price").is_not_null()
-                )
-                .then(pl.col("trading_value") * pl.col("price"))
-                .otherwise(pl.col("trading_value").fill_null(0.0))
-                .alias("_trading_yen")
-            )
+        # 売買代金（円）の算出 (trading_value は既に円単位の売買代金。欠損時のみ volume * price)
+        tv_col = pl.col("trading_value") if "trading_value" in df_timeseries.columns else pl.lit(None).cast(pl.Float64)
+        if "volume" in df_timeseries.columns and "price" in df_timeseries.columns:
+            vp_fallback = (pl.col("volume") * pl.col("price")).cast(pl.Float64)
         else:
-            df_calc = df_timeseries.with_columns(
-                pl.col("trading_value").fill_null(0.0).alias("_trading_yen")
-            )
+            vp_fallback = pl.lit(0.0).cast(pl.Float64)
+
+        df_calc = df_timeseries.with_columns(
+            pl.coalesce([tv_col, vp_fallback]).fill_null(0.0).alias("_trading_yen")
+        )
 
         # 全日付を降順ソート
         all_dates = (
@@ -106,7 +101,7 @@ class PreFilter:
             if len(df_calc) >= 100 and len(all_dates) >= 2:
                 latest_date = all_dates[0]
                 latest_records = df_calc.filter(pl.col("entry_date") == latest_date)
-                valid_count = float((latest_records["trading_value"] > 0).sum())
+                valid_count = float((latest_records["_trading_yen"] > 0).sum())
                 fill_rate = valid_count * 100.0 / len(latest_records)
                 if fill_rate < 60.0:
                     valid_dates = all_dates[1:]
@@ -126,13 +121,15 @@ class PreFilter:
             )
         )
 
-        # 直近5営業日における出来高ゼロ日数のカウント (trading_value <= 0 または NULL)
+        # 直近5営業日における出来高ゼロ日数のカウント (trading_value <= 0 または volume <= 0 または NULL)
+        zero_cond = pl.col("_trading_yen") <= 0
+        if "volume" in df_calc.columns:
+            zero_cond = zero_cond | (pl.col("volume") <= 0) | pl.col("volume").is_null()
+
         df_5 = (
             df_calc.filter(pl.col("entry_date").is_in(dates_5))
             .with_columns(
-                pl.when(
-                    pl.col("trading_value").is_null() | (pl.col("trading_value") <= 0)
-                )
+                pl.when(zero_cond)
                 .then(1)
                 .otherwise(0)
                 .alias("_is_zero")
@@ -141,12 +138,30 @@ class PreFilter:
             .agg(pl.col("_is_zero").sum().alias("zero_volume_days_5d"))
         )
 
-        return df_20.join(df_5, on="code", how="full").with_columns(
-            [
-                pl.col("avg_trading_value_20d").fill_null(0.0),
-                pl.col("zero_volume_days_5d").fill_null(5),
-            ]
+        # 各銘柄の直近データ日付（データ鮮度判定用: 市場全体の直近5営業日以内に取引があるか）
+        market_recent_dates = [str(d) for d in all_dates[:5]]
+        df_latest_trade = (
+            df_calc.group_by("code")
+            .agg(pl.col("entry_date").cast(pl.String).max().alias("latest_trade_date"))
+            .with_columns(
+                pl.col("latest_trade_date").is_in(market_recent_dates).alias("is_recent_trade")
+            )
         )
+
+        df_res = (
+            df_20.join(df_5, on="code", how="full", coalesce=True)
+            .join(df_latest_trade, on="code", how="left")
+            .with_columns(
+                [
+                    pl.col("avg_trading_value_20d").fill_null(0.0),
+                    pl.col("zero_volume_days_5d").fill_null(5),
+                    pl.col("is_recent_trade").fill_null(False),
+                ]
+            )
+        )
+        if "code_right" in df_res.columns:
+            df_res = df_res.drop("code_right")
+        return df_res
 
     @classmethod
     def evaluate(
@@ -194,30 +209,30 @@ class PreFilter:
         if df_liquidity is not None and not df_liquidity.is_empty():
             cols_to_drop = [
                 c
-                for c in ["avg_trading_value_20d", "zero_volume_days_5d"]
+                for c in [
+                    "avg_trading_value_20d",
+                    "zero_volume_days_5d",
+                    "latest_trade_date",
+                    "is_recent_trade",
+                ]
                 if c in df.columns
             ]
             if cols_to_drop:
                 df = df.drop(cols_to_drop)
             df = df.join(df_liquidity, on="code", how="left")
+            if "code_right" in df.columns:
+                df = df.drop("code_right")
 
         # 存在しない場合のデフォルトカラム作成
         if "avg_trading_value_20d" not in df.columns:
-            if "trading_value" in df.columns and "price" in df.columns:
-                df = df.with_columns(
-                    (
-                        pl.col("trading_value").fill_null(0.0)
-                        * pl.col("price").fill_null(0.0)
-                    ).alias("avg_trading_value_20d")
-                )
-            elif "trading_value" in df.columns:
-                df = df.with_columns(
-                    pl.col("trading_value")
-                    .fill_null(0.0)
-                    .alias("avg_trading_value_20d")
-                )
-            else:
-                df = df.with_columns(pl.lit(0.0).alias("avg_trading_value_20d"))
+            tv_expr = pl.lit(0.0)
+            if "trading_value" in df.columns:
+                tv_expr = pl.col("trading_value").fill_null(0.0)
+            if "volume" in df.columns and "price" in df.columns:
+                vp_expr = pl.col("volume").fill_null(0.0) * pl.col("price").fill_null(0.0)
+                # trading_value が未設定(0またはnull)の場合は volume * price を採用
+                tv_expr = pl.when(tv_expr > 0.0).then(tv_expr).otherwise(vp_expr)
+            df = df.with_columns(tv_expr.alias("avg_trading_value_20d"))
 
         if "zero_volume_days_5d" not in df.columns:
             df = df.with_columns(pl.lit(0).alias("zero_volume_days_5d"))
@@ -234,9 +249,22 @@ class PreFilter:
             sales = row.get("sales")
             avg_tv = row.get("avg_trading_value_20d")
             zero_days = row.get("zero_volume_days_5d")
+            latest_trade_date = row.get("latest_trade_date")
+            is_recent_trade = row.get("is_recent_trade")
             sector = str(row.get("sector", "Other"))
 
-            # 1. 売買不能判定（直近5営業日出来高ゼロ）
+            # 1. データ鮮度不足判定（最新市場日より大幅に古い取引停止銘柄）
+            if is_recent_trade is False and latest_trade_date is not None:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "データ鮮度不足 (取引停止)",
+                        "filter_detail": f"最終取引日 ({latest_trade_date}) が直近5営業日範囲外",
+                    }
+                )
+                continue
+
+            # 2. 売買不能判定（直近5営業日出来高ゼロ）
             if zero_days is not None and zero_days > 0:
                 rejected_rows.append(
                     {
@@ -247,7 +275,7 @@ class PreFilter:
                 )
                 continue
 
-            # 2. 極小流動性トラップ判定（20日平均売買代金 < 3,000万円）
+            # 3. 極小流動性トラップ判定（20日平均売買代金 < 3,000万円）
             if avg_tv is not None and avg_tv < min_tv_20d:
                 tv_man = avg_tv / 10_000.0
                 limit_man = min_tv_20d / 10_000.0
@@ -260,7 +288,7 @@ class PreFilter:
                 )
                 continue
 
-            # 3. 超低位ボロ株判定（株価 < 50円）
+            # 4. 超低位ボロ株判定（株価 < 50円）
             if price is not None and price < min_price:
                 rejected_rows.append(
                     {
@@ -271,8 +299,30 @@ class PreFilter:
                 )
                 continue
 
-            # 4. 構造的破綻（債務超過判定）
-            if equity_ratio is not None and equity_ratio <= min_eq_ratio:
+            # 5. 株価データ欠損判定（市場データ取得不能）
+            if price is None:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "市場データ取得不能",
+                        "filter_detail": "市場価格データ欠損 (OHLCV未取得)",
+                    }
+                )
+                continue
+
+            # 6. 重要財務指標未開示 / 算出不能判定（自己資本比率等の必須財務データ欠損）
+            if equity_ratio is None:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "重要指標未開示/算出不能",
+                        "filter_detail": "自己資本比率等の財務諸表データ未開示または欠損",
+                    }
+                )
+                continue
+
+            # 7. 構造的破綻（債務超過判定）
+            if equity_ratio <= min_eq_ratio:
                 rejected_rows.append(
                     {
                         **row,
@@ -282,7 +332,7 @@ class PreFilter:
                 )
                 continue
 
-            # 5. 致命的キャッシュ枯渇判定（営業CFマージン < -10%）
+            # 8. 致命的キャッシュ枯渇判定（営業CFマージン < -10%）
             # 金融・保険セクターは構造上免除
             if sector not in cls.CF_EXEMPT_SECTORS:
                 if operating_cf is not None and sales is not None and sales > 0:
@@ -302,7 +352,48 @@ class PreFilter:
             # すべての足切りをクリアした銘柄
             passed_rows.append(row)
 
-        passed_df = pl.DataFrame(passed_rows) if passed_rows else df.clear()
-        rejected_df = pl.DataFrame(rejected_rows) if rejected_rows else pl.DataFrame()
+        if passed_rows:
+            passed_codes = [r["code"] for r in passed_rows]
+            passed_df = df.filter(pl.col("code").is_in(passed_codes))
+        else:
+            passed_df = df.clear()
+
+        if rejected_rows:
+            reason_df = pl.DataFrame(
+                [
+                    {
+                        "code": r["code"],
+                        "filter_reason": r["filter_reason"],
+                        "filter_detail": r["filter_detail"],
+                    }
+                    for r in rejected_rows
+                ],
+                schema={
+                    "code": pl.String,
+                    "filter_reason": pl.String,
+                    "filter_detail": pl.String,
+                },
+            )
+            rejected_df = df.join(reason_df, on="code", how="inner")
+        else:
+            rejected_df = pl.DataFrame(
+                schema={
+                    **df.schema,
+                    "filter_reason": pl.String,
+                    "filter_detail": pl.String,
+                }
+            )
 
         return PreFilterResult(passed_df=passed_df, rejected_df=rejected_df)
+
+    @classmethod
+    def apply_filter(
+        cls,
+        df_candidates: pl.DataFrame,
+        df_liquidity: Optional[pl.DataFrame] = None,
+        config: Optional[dict[str, Any]] = None,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """candidates に対し事前足切りを行い、(passed_df, rejected_df) を返すコンビニエンスメソッド。"""
+        res = cls.evaluate(df_candidates, df_liquidity, config)
+        return res.passed_df, res.rejected_df
+

@@ -68,67 +68,6 @@ class PolarsProcessor:
 
         return cleaned
 
-    @staticmethod
-    def pad_calendar(
-        df: pl.DataFrame, start_date: Any = None, end_date: Any = None
-    ) -> pl.DataFrame:
-        """指定された期間の営業日Spineを作成し、データを補完（ffill）する。"""
-        if df.is_empty():
-            return df
-
-        try:
-            import pandas_market_calendars as mcal
-
-            if start_date is None:
-                start_date = df.select(pl.col("entry_date").min()).to_series()[0]
-            if end_date is None:
-                end_date = df.select(pl.col("entry_date").max()).to_series()[0]
-
-            s_date = str(start_date)
-            e_date = str(end_date)
-
-            # 1. カレンダー・キャッシュの参照
-            from src.repositories.market_data_repository import MarketDataRepository
-
-            repo = MarketDataRepository()
-            calendar_dates = repo.get_calendar_dates(s_date, e_date)
-
-            if not calendar_dates:
-                # キャッシュミス：外部APIから取得
-                logger.info(
-                    f"Calendar cache miss for {s_date} to {e_date}. Fetching from mcal..."
-                )
-                tse = mcal.get_calendar("JPX")
-                schedule = tse.schedule(start_date=start_date, end_date=end_date)
-                calendar_dates = schedule.index.normalize().date.tolist()
-                # キャッシュ保存
-                repo.upsert_calendar_dates(calendar_dates)
-
-            trading_days = pl.DataFrame(
-                {"entry_date": pl.Series(calendar_dates, dtype=pl.Date)}
-            )
-
-            # 2. 全銘柄コードの取得
-            codes = df.select("code").unique()
-
-            # 3. Spine (code x trading_days) の生成とデータ結合
-            spine = trading_days.join(codes, how="cross")
-            df_padded = (
-                spine.join(df, on=["entry_date", "code"], how="left")
-                .sort(["code", "entry_date"])
-                .with_columns(
-                    [
-                        pl.all()
-                        .exclude(["entry_date", "code"])
-                        .forward_fill()
-                        .over("code")
-                    ]
-                )
-            )
-            return df_padded
-        except Exception as e:
-            logger.warning(f"⚠️ Calendar padding failed, returning original: {e}")
-            return df
 
     @staticmethod
     def _get_stability_count_expr(col: str = "price", window: int = 30) -> pl.Expr:
@@ -198,7 +137,7 @@ class PolarsProcessor:
 
     @staticmethod
     def calc_batch_technicals_vectorized(
-        hist_map: dict[str, pd.DataFrame],
+        hist_map: dict[str, pd.DataFrame | pl.DataFrame],
         latest_only: bool = True,
     ) -> pl.DataFrame:
         """複数の銘柄データを一括で Polars 演算し、最新レコードの集合を返す。
@@ -208,7 +147,6 @@ class PolarsProcessor:
         - [x] `save_stocks` のテンプレート移行
         - [x] `save_metrics` のテンプレート移行
         - [x] `save_fundamentals` のテンプレート移行
-        - [x] `save_analysis_results` のテンプレート移行
         - [x] **Task 2: PolarsProcessor のデータフロー刷新 (V6: Flow Refinement)**
         - [x] `calc_from_polars` 内の早期リターンを `df_pl.clear()` に修正
         - [x] 休日排除（Holiday Purge）ロジックの末尾移動
@@ -253,12 +191,13 @@ class PolarsProcessor:
                 if "code" not in part.columns:
                     raise ValueError("Column 'code' is missing")
 
+                part = part.with_columns([pl.lit(code).alias("code")])
+
                 # [v26.4] Ensure consistent types before concat
                 if "Volume" in part.columns:
                     part = part.with_columns(
                         [pl.col("Volume").cast(pl.Int64, strict=False).fill_null(0)]
                     )
-                part = part.with_columns([pl.lit(code).alias("code")])
                 df_parts.append(part)
 
             if not df_parts:
@@ -270,11 +209,9 @@ class PolarsProcessor:
 
             return PolarsProcessor.calc_from_polars(df_pl, latest_only)
 
-        except ValueError:
-            raise
         except Exception as e:
-            logger.warning(f"⚠️ Polars batch preparation failed: {e}")
-            return pl.DataFrame()
+            logger.error(f"❌ Polars batch preparation failed: {e}", exc_info=True)
+            raise
 
     # [v26.9] Technical/Output SSOT Schema for daily_metrics
     # プロセッサが保証する範囲を「テクニカル指標」と「実行メタデータ」に限定。
@@ -308,6 +245,7 @@ class PolarsProcessor:
         "trend_score": pl.Int32,
         "trend_signal": pl.Int32,
         "trend_up": pl.Float64,
+        "macd_status": pl.Utf8,
         "fetch_status": pl.Utf8,
         "repair_metadata": pl.Utf8,
     }
@@ -344,14 +282,25 @@ class PolarsProcessor:
                 raise ValueError("DataFrame must contain 'code' column.")
 
             # [v26.8] 名寄せ・正規化の早期実施 (Early Sanitization)
-            # 以降、Close と price 等の表記揺れによる脆さを排除する
-            df_pl = df_pl.rename(
-                {
-                    c: "price"
-                    for c in ["Close", "price", "Price"]
-                    if c in df_pl.columns and c != "price"
-                }
-            )
+            # 以降、表記揺れによる脆さを排除する
+            rename_map = {}
+            for c in ["Close", "Price"]:
+                if c in df_pl.columns and "price" not in df_pl.columns:
+                    rename_map[c] = "price"
+            for c in ["Volume"]:
+                if c in df_pl.columns and "volume" not in df_pl.columns:
+                    rename_map[c] = "volume"
+            for c in ["Open"]:
+                if c in df_pl.columns and "open" not in df_pl.columns:
+                    rename_map[c] = "open"
+            for c in ["High"]:
+                if c in df_pl.columns and "high" not in df_pl.columns:
+                    rename_map[c] = "high"
+            for c in ["Low"]:
+                if c in df_pl.columns and "low" not in df_pl.columns:
+                    rename_map[c] = "low"
+            if rename_map:
+                df_pl = df_pl.rename(rename_map)
 
             # 日付の正規化 (entry_date への統合)
             date_col = next(
@@ -417,10 +366,40 @@ class PolarsProcessor:
                         + (pl.col("rsi_14") > 50).fill_null(False).cast(pl.Int32)
                     ).alias("trend_score"),
                 ]
-            ).with_columns(
+            )
+
+            # trading_value の安全な算出式 (volume/price が欠落している場合に対応)
+            if "volume" in df_pl.columns and "price" in df_pl.columns:
+                vp_expr = (pl.col("volume") * pl.col("price")).cast(pl.Float64)
+            else:
+                vp_expr = pl.lit(None).cast(pl.Float64)
+
+            tv_init = (
+                pl.col("trading_value")
+                if "trading_value" in df_pl.columns
+                else vp_expr
+            )
+
+            df_pl = df_pl.with_columns(
                 [
                     pl.col("trend_score").alias("trend_signal"),
                     (pl.col("trend_score") >= 3).cast(pl.Float64).alias("trend_up"),
+                    pl.when(pl.col("macd_hist") > 0)
+                    .then(pl.lit("Bullish"))
+                    .when(pl.col("macd_hist") < 0)
+                    .then(pl.lit("Bearish"))
+                    .otherwise(pl.lit("Neutral"))
+                    .alias("macd_status"),
+                    tv_init.alias("trading_value"),
+                ]
+            ).with_columns(
+                [
+                    pl.coalesce(
+                        [
+                            pl.col("trading_value"),
+                            vp_expr,
+                        ]
+                    ).alias("trading_value"),
                 ]
             )
 
@@ -438,11 +417,8 @@ class PolarsProcessor:
             return PolarsProcessor._ensure_resilient_schema(df_pl)
 
         except Exception as e:
-            logger.error(f"⚠️ Polars calculation failed: {e}")
-            # エラー時も構造だけは正しい空の DataFrame を返して後続を助ける
-            return PolarsProcessor._ensure_resilient_schema(
-                pl.DataFrame(schema=PolarsProcessor.SSOT_SCHEMA)
-            )
+            logger.error(f"❌ Polars technicals calculation failed: {e}", exc_info=True)
+            raise
 
     @staticmethod
     def calc_technicals_vectorized(df_pandas: pd.DataFrame) -> dict[str, Any]:

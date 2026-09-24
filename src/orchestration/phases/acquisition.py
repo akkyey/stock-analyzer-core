@@ -8,6 +8,7 @@ import queue
 import threading
 from typing import Any, Dict, Optional
 
+import pandas as pd
 import polars as pl
 
 from src.orchestration.phases.base import BasePhase
@@ -32,8 +33,10 @@ class AcquisitionPhase(BasePhase):
         market_repo = MarketDataRepository()
 
         # [Phase 0/1] 財務データの正典同期 (Fundamental Truth Sync)
-        if self.context.config.get("fetcher", {}).get("enable_edinet_turbo", True):
-            self.log_info("⚡ Synchronizing Fundamentals from EDINET (Turbo)...")
+        fetcher_cfg = self.context.config.get("fetcher", {})
+        if fetcher_cfg.get("enable_edinet_turbo", True):
+            scan_days = fetcher_cfg.get("edinet_scan_days", 30)
+            self.log_info(f"⚡ Synchronizing Fundamentals from EDINET (Turbo, {scan_days} days)...")
             try:
                 edinet_fetcher = EdinetFetcher(self.context.config)
                 xbrl_parser = XbrlParser()
@@ -41,12 +44,12 @@ class AcquisitionPhase(BasePhase):
                     edinet_fetcher, xbrl_parser, self.context.config
                 )
 
-                # 直近 5 日分の書類を並列・差分スキャニング
-                turbo_mgr.run_turbo_acquisition(days=5)
+                # 過去 N 日分の書類を並列・差分スキャニング (二層キャッシュガード)
+                turbo_mgr.run_turbo_acquisition(days=scan_days)
 
-                # ブリッジによる DB 反映
+                # ブリッジによる DB 反映 (成果物キャッシュを保持して平常時の実通信を遮断)
                 bridge = EdinetBridge()
-                sync_count = bridge.bridge_all(purge_after=True)
+                sync_count = bridge.bridge_all(purge_after=False)
                 self.log_info(
                     f"✅ EDINET sync completed. {sync_count} documents integrated."
                 )
@@ -67,87 +70,154 @@ class AcquisitionPhase(BasePhase):
 
         # 3. Producer-Consumer パイプライン (Market Data 取得)
         result_queue: queue.Queue = queue.Queue(maxsize=200)
+        # 指摘10: ループ内の全行走査を回避するため、あらかじめcode別パーティション辞書を作成
+        if not df_db_hist_all.is_empty() and "code" in df_db_hist_all.columns:
+            db_hist_by_code = df_db_hist_all.partition_by("code", as_dict=True)
+        else:
+            db_hist_by_code = {}
+
         num_targets = len(target_codes)
+
+        # 指摘11: yfinance のレート制限回避と内部マルチスレッド (yf.download の threads=True) を
+        # 最大限活かすため、バッチ単位で同期的に直列取得（外部の ThreadPoolExecutor は不要）
+        stop_event = threading.Event()
 
         def _producer():
             """Hybrid Producer: 市場価格データのみを取得"""
             self.log_info("📡 Market Data Producer started...")
             try:
                 FETCH_BATCH_SIZE = 20  # OHLCVのみなのでバッチサイズ拡大
-                from concurrent.futures import ThreadPoolExecutor
 
                 batches = [
                     target_codes[i : i + FETCH_BATCH_SIZE]
                     for i in range(0, num_targets, FETCH_BATCH_SIZE)
                 ]
 
-                with ThreadPoolExecutor(max_workers=2):
-                    for i, b in enumerate(batches):
-                        # DB履歴が薄い場合は 1y、十分なら 2d (差分) を取得
-                        is_db_thin = df_db_hist_all.height < (len(target_codes) * 10)
-                        period_to_use = "1y" if is_db_thin else "2d"
+                for i, b in enumerate(batches):
+                    if stop_event.is_set():
+                        self.log_warn("Producer received stop signal. Aborting further fetches.")
+                        break
 
-                        try:
-                            # [v10] fetch_stock_data は内部で yf.download(threads=True) を呼ぶため、ここは軽量
-                            hist_map = fetcher.fetch_stock_data(
-                                b, period=period_to_use, context=self.context
-                            )
-                        except Exception as e:
-                            self.log_error(f"Batch {i + 1} failed: {e}")
-                            continue
+                    # DB履歴が薄い場合は 1y、十分なら 2d (差分) を取得
+                    is_db_thin = df_db_hist_all.height < (len(target_codes) * 10)
+                    period_to_use = "1y" if is_db_thin else "2d"
 
-                        if hist_map:
-                            for code, df_yf in hist_map.items():
-                                df_db = df_db_hist_all.filter(pl.col("code") == code)
+                    try:
+                        # [v10] fetch_stock_data は内部で yf.download(threads=True) を呼ぶため、ここは軽量
+                        hist_map = fetcher.fetch_stock_data(
+                            b, period=period_to_use, context=self.context
+                        )
+                    except Exception as e:
+                        self.log_error(f"Batch {i + 1} failed: {e}")
+                        continue
 
-                                if df_db.is_empty():
-                                    df_final_pd = df_yf
-                                else:
-                                    df_yf_pl = pl.from_pandas(df_yf.reset_index())
-                                    rename_map = {"index": "Date", "date": "Date"}
-                                    for old, new in rename_map.items():
-                                        if old in df_yf_pl.columns:
-                                            df_yf_pl = df_yf_pl.rename({old: new})
+                    if hist_map:
+                        for code, df_yf in hist_map.items():
+                            if stop_event.is_set():
+                                break
 
-                                    # 結合 & 重複排除
-                                    df_final_pl = (
-                                        pl.concat(
-                                            [
-                                                df_db,
-                                                df_yf_pl.with_columns(
-                                                    pl.col("Date").cast(pl.Datetime)
-                                                ),
-                                            ],
-                                            how="diagonal",
-                                        )
-                                        .unique("Date")
-                                        .sort("Date")
+                            df_db = db_hist_by_code.get((code,))
+
+                            # 指摘12: pandas への不要な往復変換を撤廃し Polars DataFrame のまま保持
+                            if isinstance(df_yf, pd.DataFrame):
+                                df_yf_pl = pl.from_pandas(df_yf.reset_index())
+                            else:
+                                df_yf_pl = df_yf
+
+                            rename_map = {"index": "Date", "date": "Date"}
+                            for old, new in rename_map.items():
+                                if old in df_yf_pl.columns:
+                                    df_yf_pl = df_yf_pl.rename({old: new})
+
+                            if df_db is None or df_db.is_empty():
+                                df_final_pl = df_yf_pl
+                            else:
+                                # 結合 & 重複排除 (指摘7: 型差異の吸収と keep="last")
+                                df_db_norm = df_db
+                                if "entry_date" in df_db_norm.columns and "Date" not in df_db_norm.columns:
+                                    df_db_norm = df_db_norm.rename({"entry_date": "Date"})
+                                if "Volume" in df_db_norm.columns:
+                                    df_db_norm = df_db_norm.with_columns(pl.col("Volume").cast(pl.Float64))
+
+                                df_yf_norm = df_yf_pl
+                                if "Volume" in df_yf_norm.columns:
+                                    df_yf_norm = df_yf_norm.with_columns(pl.col("Volume").cast(pl.Float64))
+
+                                df_final_pl = (
+                                    pl.concat(
+                                        [
+                                            df_db_norm.with_columns(
+                                                pl.col("Date").cast(pl.Datetime)
+                                            ),
+                                            df_yf_norm.with_columns(
+                                                pl.col("Date").cast(pl.Datetime)
+                                            ),
+                                        ],
+                                        how="diagonal_relaxed",
                                     )
-                                    df_final_pd = df_final_pl.to_pandas()
+                                    .unique("Date", keep="last")
+                                    .sort("Date")
+                                )
 
-                                result_queue.put((code, df_final_pd))
+                            # Consumer 停止時の永久ブロック防止のためタイムアウト付きで put
+                            while not stop_event.is_set():
+                                try:
+                                    result_queue.put((code, df_final_pl), timeout=2.0)
+                                    break
+                                except queue.Full:
+                                    continue
             except Exception as e:
                 self.log_error(f"Producer Fatal Error: {e}")
             finally:
-                result_queue.put(None)
+                try:
+                    result_queue.put(None, timeout=2.0)
+                except queue.Full:
+                    pass
 
-        threading.Thread(target=_producer, daemon=False).start()
+        # daemon=True にしてプロセス終了を妨げない設計にする
+        producer_thread = threading.Thread(target=_producer, daemon=True)
+        producer_thread.start()
 
-        # 4. Consumer 集約
+        # 4. Consumer 集約 (指摘7-3: タイムアウト耐性とプロデューサー生存確認)
         all_data_map: Dict[str, Any] = {}
         processed_count = 0
+        timeout_retries = 0
+        MAX_TIMEOUT_RETRIES = 3
+
         while True:
-            item = result_queue.get(timeout=120)
+            try:
+                item = result_queue.get(timeout=60)
+            except queue.Empty:
+                if producer_thread.is_alive():
+                    timeout_retries += 1
+                    self.log_info(
+                        f"Producer is still working. Waiting for items (retry {timeout_retries}/{MAX_TIMEOUT_RETRIES})..."
+                    )
+                    if timeout_retries < MAX_TIMEOUT_RETRIES:
+                        continue
+                    err_msg = "Producer timed out exceeding max retries. Proceeding with collected data."
+                    self.log_error(err_msg)
+                    if hasattr(self.context, "add_error"):
+                        self.context.add_error(err_msg)
+                    stop_event.set()  # Producer スレッドに停止シグナルを通知
+                    break
+                self.log_warn("Producer thread has finished. Completing consumption.")
+                stop_event.set()
+                break
+
             if item is None:
                 break
-            code, df_pd = item
-            all_data_map[code] = df_pd
+
+            timeout_retries = 0  # 正常受信時はリセット
+            code, df_data = item
+            all_data_map[code] = df_data
             processed_count += 1
             if processed_count % 100 == 0:
                 self.log_info(
                     f"Acquired market data for {processed_count}/{num_targets} stocks..."
                 )
 
+        stop_event.set()  # 正常終了時も確実にセット
         self.log_info(
             f"Data Acquisition completed. {len(all_data_map)} stocks ready for evaluation."
         )

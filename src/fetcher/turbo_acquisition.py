@@ -91,7 +91,7 @@ class TurboAcquisitionManager:
                         ] and d.get("secCode"):
                             # 証券コード 4桁化
                             d["clean_code"] = d.get("secCode")[:4]
-                            d["is_annual"] = doc_type == "120"
+                            d["is_annual"] = doc_type in ["120", "130"]
                             raw_docs.append(d)
                 except Exception as e:
                     self.logger.error(f"❌ Scan error: {e}")
@@ -101,7 +101,7 @@ class TurboAcquisitionManager:
     def _filter_annual_priority(
         self, docs: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """銘柄ごとに『本決算(有報)』を最優先で残し、最新のものを選択する"""
+        """銘柄ごとに『本決算(有報・訂正有報)』を最優先で残し、最新のものを選択する"""
         latest_docs = {}
         for doc in docs:
             code = doc["clean_code"]
@@ -113,10 +113,10 @@ class TurboAcquisitionManager:
                 continue
 
             current = latest_docs[code]
-            # 優先順位 1: 有報があるならそれを死守
+            # 優先順位 1: 有報・訂正有報があるなら四半報より優先
             if is_annual and not current["is_annual"]:
                 latest_docs[code] = doc
-            # 優先順位 2: 種別が同じならより新しいもの
+            # 優先順位 2: 種別区分が同じならより提出日時が新しいもの
             elif is_annual == current["is_annual"]:
                 if submit_time > current.get("submitDateTime", ""):
                     latest_docs[code] = doc
@@ -133,11 +133,19 @@ class TurboAcquisitionManager:
             doc_id = doc["docID"]
             result_file = os.path.join(self.results_dir, f"{code}.json")
 
-            # 既存成果物のチェック（レジューム用。ただし本番は再取得を考慮する場合あり）
+            # 二層キャッシュガード判定 (取得済み同一書類の実通信を100%遮断)
             if os.path.exists(result_file):
-                # 簡易的なロード
-                with open(result_file, "r") as f:
-                    return code, json.load(f)
+                try:
+                    with open(result_file, "r", encoding="utf-8") as f:
+                        cached_item = json.load(f)
+                    cached_doc_id = cached_item.get("doc_id")
+                    cached_submit = cached_item.get("submit_date", "")
+                    target_submit = doc.get("submitDateTime", "")
+
+                    if cached_doc_id == doc_id or (cached_submit and cached_submit >= target_submit):
+                        return code, cached_item
+                except Exception:
+                    pass
 
             try:
                 # 1. ダウンロード (I/O 制限)

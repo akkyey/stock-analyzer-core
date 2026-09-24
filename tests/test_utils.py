@@ -67,6 +67,13 @@ def test_ensure_dir_and_save_csv(tmp_path):
     save_dataframe_to_csv(df, str(csv_file))
     assert csv_file.exists()
 
+    # コメント行が挿入されず、Polars / Pandas で直接読めることの検証
+    import polars as pl
+
+    pl_df = pl.read_csv(str(csv_file))
+    assert pl_df.columns == ["col1", "col2"]
+    assert len(pl_df) == 2
+
 
 def test_safe_display_and_hash():
     assert safe_display_value(None, fallback="-") == "-"
