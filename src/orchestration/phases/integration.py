@@ -23,6 +23,17 @@ class IntegrationPhase(BasePhase):
             df = df.get("df_eval")
 
         if df is None or (isinstance(df, pl.DataFrame) and df.is_empty()):
+            uncalculable_df = getattr(self.context, "uncalculable_df", None)
+            if uncalculable_df is not None and isinstance(uncalculable_df, pl.DataFrame):
+                out_dir = self.context.reporter.output_dir
+                uncalc_path = out_dir / "uncalculable_stocks.csv"
+                try:
+                    uncalculable_df.write_csv(str(uncalc_path))
+                    self.log_info(
+                        f"Saved uncalculable stocks list: {uncalc_path} ({len(uncalculable_df)} records)"
+                    )
+                except Exception as e:
+                    self.log_warn(f"Failed to save uncalculable_stocks.csv: {e}")
             self.log_warn("No results to integrate. Reporting skipped.")
             return None
 

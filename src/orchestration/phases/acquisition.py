@@ -79,6 +79,31 @@ class AcquisitionPhase(BasePhase):
             except Exception as e:
                 self.log_error(f"❌ 銘柄マスタの初期登録に失敗しました: {e}")
 
+        # 1-2. 財務データの初期シード (未登録時はバンドルされたシードデータから自動投入)
+        from pathlib import Path
+        from src.repositories.fundamentals_repository import FundamentalsRepository
+
+        funda_repo = FundamentalsRepository(repo)
+        if funda_repo.get_count() == 0:
+            seed_parquet = (
+                Path(__file__).resolve().parent.parent.parent
+                / "resources"
+                / "fundamentals_seed.parquet"
+            )
+            if seed_parquet.exists():
+                self.log_info(
+                    "ℹ️ 財務データが未登録です。バンドルされたシードデータから初期登録を実行します..."
+                )
+                try:
+                    df_seed = pl.read_parquet(str(seed_parquet))
+                    repo.save_fundamentals(df_seed)
+                    print(
+                        f"   ✅ 財務データに {len(df_seed)} 銘柄を初期登録しました。",
+                        flush=True,
+                    )
+                except Exception as e:
+                    self.log_error(f"❌ 財務データの初期登録に失敗しました: {e}")
+
         if self.context.limit:
             target_codes = target_codes[: self.context.limit]
 
