@@ -58,8 +58,26 @@ class AcquisitionPhase(BasePhase):
             except Exception as e:
                 self.log_error(f"❌ EDINET sync failed (Skipped): {e}")
 
-        # 1. ターゲット銘柄の特定
+        # 1. ターゲット銘柄の特定 (未登録時は JPX から自動初期シード)
         target_codes = repo.get_all_codes()
+        if not target_codes:
+            self.log_info(
+                "ℹ️ 銘柄マスタが未登録です。JPX銘柄リストから初期登録を実行します..."
+            )
+            try:
+                jpx_df = fetcher.jpx_fetcher.fetch_jpx_list(fallback_on_error=True)
+                if not jpx_df.empty:
+                    df_pl = pl.from_pandas(
+                        jpx_df[["code", "name", "sector", "market"]]
+                    )
+                    repo.save_stocks(df_pl)
+                    target_codes = repo.get_all_codes()
+                    self.log_info(
+                        f"✅ 銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。"
+                    )
+            except Exception as e:
+                self.log_error(f"❌ 銘柄マスタの初期登録に失敗しました: {e}")
+
         if self.context.limit:
             target_codes = target_codes[: self.context.limit]
 

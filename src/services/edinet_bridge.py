@@ -17,7 +17,9 @@ class EdinetBridge:
     def __init__(self, repository: Optional[FundamentalsRepository] = None):
         self.logger = logging.getLogger(__name__)
         self.repository = repository or FundamentalsRepository()
-        self.results_dir = "data/tmp/edinet_results"
+        from src.utils.path_resolver import PathResolver
+
+        self.results_dir = str(PathResolver.get_tmp_dir() / "edinet_results")
 
     def bridge_all(self, purge_after: bool = False) -> int:
         """

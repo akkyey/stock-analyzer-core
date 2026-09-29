@@ -128,9 +128,17 @@ class JPXFetcher(FetcherBase):
     def load_local_data(self):
         """ローカルのJPXリストがあれば読み込む (キャッシュ利用)"""
         data_config = self.config.get("data", {})
-        jp_stock_path = Path(
-            data_config.get("jp_stock_list", "data/input/jp_stock_list.csv")
-        )
+        custom_path = data_config.get("jp_stock_list")
+        if custom_path and Path(custom_path).exists():
+            jp_stock_path = Path(custom_path)
+        elif Path("data/input/jp_stock_list.csv").exists():
+            jp_stock_path = Path("data/input/jp_stock_list.csv")
+        else:
+            bundled = Path(__file__).resolve().parent.parent / "resources" / "jp_stock_list.csv"
+            if bundled.exists():
+                jp_stock_path = bundled
+            else:
+                jp_stock_path = Path("data/input/jp_stock_list.csv")
 
         if jp_stock_path.exists():
             try:
