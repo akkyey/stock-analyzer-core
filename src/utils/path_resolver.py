@@ -57,4 +57,8 @@ class PathResolver:
     def get_duckdb_path(cls, base_dir: Optional[Path] = None) -> Path:
         """DuckDB データベースファイルパス"""
         b = base_dir or cls.get_base_dir()
-        return b / "stock_analyzer.duckdb"
+        cache_db = b / "cache" / "stock_analyzer.duckdb"
+        root_db = b / "stock_analyzer.duckdb"
+        if cache_db.exists() and not root_db.exists():
+            return cache_db
+        return root_db

@@ -47,6 +47,8 @@ class ColabSyncManager:
         """Google Drive 上に健全な既存 DB が存在するか確認し、初回実行（キャッシュなし）か否かを判定する"""
         filename = db_filename or cls.DB_FILENAME
         drive_db = drive_dir / "cache" / filename
+        if not drive_db.exists() and (drive_dir / filename).exists():
+            drive_db = drive_dir / filename
         return not cls.is_duckdb_healthy(drive_db)
 
     @classmethod
@@ -66,14 +68,24 @@ class ColabSyncManager:
         Returns:
             Path: 作業層上の準備完了した DB パス
         """
+        from src.utils.path_resolver import PathResolver
+
         filename = db_filename or cls.DB_FILENAME
         drive_db = drive_dir / "cache" / filename
         drive_bak = drive_dir / "cache" / f"{filename}.bak"
 
+        # Drive 直下のフォールバック確認
+        if not drive_db.exists() and (drive_dir / filename).exists():
+            drive_db = drive_dir / filename
+        if not drive_bak.exists() and (drive_dir / f"{filename}.bak").exists():
+            drive_bak = drive_dir / f"{filename}.bak"
+
+        working_db = PathResolver.get_duckdb_path(working_dir)
         working_cache = working_dir / "cache"
         working_cache.mkdir(parents=True, exist_ok=True)
-        working_db = working_cache / filename
+        working_cache_db = working_cache / filename
 
+        chosen = False
         # 第1段: メインDBの検証と採用
         if drive_db.exists():
             shutil.copy2(drive_db, working_db)
@@ -81,7 +93,7 @@ class ColabSyncManager:
                 logger.info(
                     f"✅ [Pull: 第1段] Google Drive から健全なメイン DB をロードしました: {working_db}"
                 )
-                return working_db
+                chosen = True
             else:
                 logger.warning(
                     "⚠️ [Pull] Drive 上のメイン DB が破損しているか不正です。バックアップからの復旧を試みます..."
@@ -90,25 +102,32 @@ class ColabSyncManager:
                     working_db.unlink(missing_ok=True)
 
         # 第2段: バックアップ (.bak) の検証と採用
-        if drive_bak.exists():
+        if not chosen and drive_bak.exists():
             shutil.copy2(drive_bak, working_db)
             if cls.is_duckdb_healthy(working_db):
                 logger.warning(
                     f"⚠️ [Pull: 第2段] メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました: {working_db}"
                 )
-                return working_db
+                chosen = True
             else:
                 logger.warning("⚠️ [Pull] バックアップ DB (.bak) も破損しています。")
                 if working_db.exists():
                     working_db.unlink(missing_ok=True)
 
         # 第3段: 新規初期化フォールバック
-        logger.warning(
-            f"ℹ️ [Pull: 第3段] 既存DB未存在または全破損のため、新規に空の DB を初期化します: {working_db}"
-        )
-        # 空ファイルではなく、DuckDB クライアントが初回アクセス時に自動初期化できるようにする
-        if working_db.exists():
-            working_db.unlink(missing_ok=True)
+        if not chosen:
+            logger.warning(
+                f"ℹ️ [Pull: 第3段] 既存DB未存在または全破損のため、新規に空の DB を初期化します: {working_db}"
+            )
+            if working_db.exists():
+                working_db.unlink(missing_ok=True)
+            if working_cache_db.exists():
+                working_cache_db.unlink(missing_ok=True)
+            return working_db
+
+        # working_db と working_cache_db の両方を同期（二重参照の完全安全化）
+        if working_db != working_cache_db and working_db.exists():
+            shutil.copy2(working_db, working_cache_db)
 
         return working_db
 
@@ -131,8 +150,13 @@ class ColabSyncManager:
         Returns:
             bool: 同期成功時 True
         """
+        from src.utils.path_resolver import PathResolver
+
         filename = db_filename or cls.DB_FILENAME
-        working_db = working_dir / "cache" / filename
+        working_db = PathResolver.get_duckdb_path(working_dir)
+        if not working_db.exists() or working_db.stat().st_size == 0:
+            working_db = working_dir / "cache" / filename
+
         drive_cache = drive_dir / "cache"
         drive_output = drive_dir / "output"
         drive_cache.mkdir(parents=True, exist_ok=True)
@@ -144,7 +168,7 @@ class ColabSyncManager:
 
         try:
             # 1. DB の同期
-            if working_db.exists():
+            if working_db.exists() and working_db.stat().st_size > 0:
                 # 作業層 DB の健全性を最終確認
                 if not cls.is_duckdb_healthy(working_db):
                     logger.error(
@@ -162,6 +186,11 @@ class ColabSyncManager:
                 # .tmp 経由のアトミック置換
                 shutil.copy2(working_db, drive_tmp)
                 os.replace(drive_tmp, drive_db)
+                # Drive 直下にも最新 DB を複製（直下参照互換性担保）
+                try:
+                    shutil.copy2(working_db, drive_dir / filename)
+                except Exception:
+                    pass
                 logger.info(
                     f"✅ [Push] 最新 DB をアトミックに Google Drive へ同期しました: {drive_db}"
                 )

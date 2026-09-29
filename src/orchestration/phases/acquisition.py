@@ -32,6 +32,52 @@ class AcquisitionPhase(BasePhase):
         fetcher = DataFetcher(self.context.config)
         market_repo = MarketDataRepository()
 
+        # 1. ターゲット銘柄の特定 (未登録時は JPX から自動初期シード)
+        target_codes = repo.get_all_codes()
+        if not target_codes:
+            self.log_info(
+                "ℹ️ 銘柄マスタが未登録です。JPX銘柄リストから初期登録を実行します..."
+            )
+            try:
+                jpx_df = fetcher.jpx_fetcher.fetch_jpx_list(fallback_on_error=True)
+                if not jpx_df.empty:
+                    df_pl = pl.from_pandas(
+                        jpx_df[["code", "name", "sector", "market"]]
+                    ).with_columns(pl.lit(True).alias("is_active"))
+                    repo.save_stocks(df_pl)
+                    target_codes = repo.get_all_codes()
+                    print(
+                        f"   ✅ 銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。",
+                        flush=True,
+                    )
+            except Exception as e:
+                self.log_error(f"❌ 銘柄マスタの初期登録に失敗しました: {e}")
+
+        # 1-2. 財務データの初期シード (全件ベースラインデータ未登録時はバンドルされたシードデータから自動投入)
+        from pathlib import Path
+        from src.repositories.fundamentals_repository import FundamentalsRepository
+
+        funda_repo = FundamentalsRepository(repo)
+        if funda_repo.get_count() < 3000:
+            seed_parquet = (
+                Path(__file__).resolve().parent.parent.parent
+                / "resources"
+                / "fundamentals_seed.parquet"
+            )
+            if seed_parquet.exists():
+                self.log_info(
+                    "ℹ️ 財務ベースラインデータが未登録/不足しています。バンドルされたシードデータから初期登録を実行します..."
+                )
+                try:
+                    df_seed = pl.read_parquet(str(seed_parquet))
+                    repo.save_fundamentals(df_seed)
+                    print(
+                        f"   ✅ 財務データに {len(df_seed)} 銘柄を初期登録しました。",
+                        flush=True,
+                    )
+                except Exception as e:
+                    self.log_error(f"❌ 財務データの初期登録に失敗しました: {e}")
+
         # [Phase 0/1] 財務データの正典同期 (Fundamental Truth Sync)
         fetcher_cfg = self.context.config.get("fetcher", {})
         if fetcher_cfg.get("enable_edinet_turbo", True):
@@ -57,52 +103,6 @@ class AcquisitionPhase(BasePhase):
                 )
             except Exception as e:
                 self.log_error(f"❌ EDINET sync failed (Skipped): {e}")
-
-        # 1. ターゲット銘柄の特定 (未登録時は JPX から自動初期シード)
-        target_codes = repo.get_all_codes()
-        if not target_codes:
-            self.log_info(
-                "ℹ️ 銘柄マスタが未登録です。JPX銘柄リストから初期登録を実行します..."
-            )
-            try:
-                jpx_df = fetcher.jpx_fetcher.fetch_jpx_list(fallback_on_error=True)
-                if not jpx_df.empty:
-                    df_pl = pl.from_pandas(
-                        jpx_df[["code", "name", "sector", "market"]]
-                    ).with_columns(pl.lit(True).alias("is_active"))
-                    repo.save_stocks(df_pl)
-                    target_codes = repo.get_all_codes()
-                    print(
-                        f"   ✅ 銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。",
-                        flush=True,
-                    )
-            except Exception as e:
-                self.log_error(f"❌ 銘柄マスタの初期登録に失敗しました: {e}")
-
-        # 1-2. 財務データの初期シード (未登録時はバンドルされたシードデータから自動投入)
-        from pathlib import Path
-        from src.repositories.fundamentals_repository import FundamentalsRepository
-
-        funda_repo = FundamentalsRepository(repo)
-        if funda_repo.get_count() == 0:
-            seed_parquet = (
-                Path(__file__).resolve().parent.parent.parent
-                / "resources"
-                / "fundamentals_seed.parquet"
-            )
-            if seed_parquet.exists():
-                self.log_info(
-                    "ℹ️ 財務データが未登録です。バンドルされたシードデータから初期登録を実行します..."
-                )
-                try:
-                    df_seed = pl.read_parquet(str(seed_parquet))
-                    repo.save_fundamentals(df_seed)
-                    print(
-                        f"   ✅ 財務データに {len(df_seed)} 銘柄を初期登録しました。",
-                        flush=True,
-                    )
-                except Exception as e:
-                    self.log_error(f"❌ 財務データの初期登録に失敗しました: {e}")
 
         if self.context.limit:
             target_codes = target_codes[: self.context.limit]
