@@ -15,8 +15,9 @@ import yfinance as yf
 
 from .base import FetcherBase
 
-# [v28.4] Level set to WARNING to catch rate limits without clogging logs with DEBUG
-logging.getLogger("yfinance").setLevel(logging.WARNING)
+# ユーザー体験向上のため、未上場・欠落銘柄の個別 404/Missing エラーを抑制
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
 
 class MarketFetcher(FetcherBase):

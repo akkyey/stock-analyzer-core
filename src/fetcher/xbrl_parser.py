@@ -32,7 +32,7 @@ class XbrlParser:
             # .xbrl ファイルを探す (PublicDoc/ 内にあることが多い)
             xbrl_files = [f for f in z.namelist() if f.endswith(".xbrl")]
             if not xbrl_files:
-                self.logger.warning(f"⚠️ No XBRL file found in {zip_path}")
+                self.logger.debug(f"ℹ️ No XBRL file found in {zip_path}")
                 return results
 
             # 最大のファイルを本番データとみなす (簡易判定)
