@@ -160,8 +160,13 @@ CSV ファイルを開かなくても、Colab 上で即座に本日の有望銘�
 ---
 
 ### 【Step 5】CSV 保存確認 & ローカルダウンロード
-- セルを実行すると、手元の PC のダウンロードフォルダに `daily_report.csv` が自動で保存されます。
+- セルを実行すると、手元の PC の「ダウンロード」フォルダに `daily_report.csv` が自動で保存されます。
 - 同時に Google Drive（`MyDrive/StockAnalyzer/output/daily_report.csv`）にも常に最新版が永続保存されています。
+
+> [!TIP]
+> **「ダウンロードを開始します」の後に画面で何も起こらないように見える場合**  
+> 近年の Google Chrome や Safari の仕様変更により、画面下部のダウンロードバーは廃止され、**画面右上のダウンロードトレイ（📥 アイコン）へ静かに直接保存される仕様**になっています。  
+> セルを実行した時点で手元 PC の「ダウンロード」フォルダ、または Google ドライブ（`MyDrive/StockAnalyzer/output/`）に確実にファイルが作成されていますので、Finder やエクスプローラーからご確認ください。
 
 ---
 
@@ -248,6 +253,23 @@ CSV ファイルを開かなくても、Colab 上で即座に本日の有望銘�
   システムは自動的にローカル CSV 出力（`daily_report.csv`）へフォールバックして処理を完全・正常に完了させています。  
   そのまま Step 4 へ進んでいただければ、適格銘柄の Top 10 ランキングが綺麗にテーブル表示され、CSV ダウンロードも問題なく行えます。
 
+### Q8. Step 4 で「ComputeError: could not parse - as dtype f64 at column PER」というエラーが出ます
+- **原因**: スクリーニング結果の CSV に未算出・未開示の指標（PER 等）が `"-"`（ハイフン）として出力されている場合、Polars の CSV 読み込みで型不整合としてエラーになります。
+- **対処法**: ノートブックの最新版では `pl.read_csv(daily_report_path, null_values=["-", "None", "null", ""])` が組み込まれており自動解決されます。もし修正前のセルを実行している場合は、該当行に `null_values=["-", "None", "null", ""]` を追加して再実行してください。Step 3 の再計算は不要で、即座にテーブルが表示されます。
+
+### Q9. Step 5 を実行してもダウンロードの画面（ポップアップ）が出ません / 完了したかわかりません
+- **原因**: 
+  1. Google Chrome 114 以降では、画面下部のダウンロードバーが廃止され、**画面右上のトレイ（📥 アイコン）に無音で即時保存**される仕様になっています。
+  2. ポップアップブロックや自動ダウンロード確認設定が有効になっている場合があります。
+- **確認・対処法**:
+  - **確認 1**: PC の「ダウンロード」フォルダを直接開いてみてください（すでに `daily_report.csv` が保存されています）。
+  - **確認 2**: Google ドライブ（`https://drive.google.com/`）の `StockAnalyzer/output/daily_report.csv` から直接開くことも可能です。
+  - **確認 3**: Colab 画面左端の 📁（フォルダ）➔ `working` ➔ `output` ➔ `daily_report.csv` を右クリックして「ダウンロード」することもできます。
+
+### Q10. Step 4 で「daily_report.csv が見つかりません」と表示され、全銘柄が足切り除外される場合
+- **原因**: 初期クリーン実行時に財務データのベースラインが未登録だった場合に発生します。
+- **対処法**: 本システムは、ベースラインデータ（東証全4,126社分）をバンドルした `fundamentals_seed.parquet` を備えており、Step 3 実行時に自動シードされます。最新のコードを取得（Step 1 の再実行）した上で Step 3 を実行してください。
+
 ---
 
 ## 7. 実行環境（Google Colab）におけるライブラリ仕様と制約事項
@@ -304,6 +326,24 @@ polars.exceptions.InvalidOperationError: window expression not allowed in aggreg
 ### 7-3. DuckDB と Google Drive のストレージ制約（Stage-and-Sync 設計）
 - **制約**: Google Drive の同期ドライブ（`/content/drive/MyDrive`）はネットワーク経由の FUSE マウントであるため、DuckDB のような高頻度ランダム I/O や排他的ファイルロックを伴うデータベースを直接配置すると、ロック競合エラーや激しい速度低下を招きます。
 - **設計解**: 内蔵の仮想ローカル SSD（`/content/working/`）上でデータベースの更新・クエリをミリ秒単位で高速実行し、完了後に `ColabSyncManager` を通じて Google Drive へアトミック Push する「Stage-and-Sync」アーキテクチャを採用しています。
+
+---
+
+### 7-4. 実地検証で確立された耐障害性・セーフティネット（Post-Mortem 反映）
+
+Google Colab 上でのゼロスタート実地検証を通じて、以下の 5 大耐障害性ガードが実装・検証されています：
+
+1. **財務シードの最優先自動投入（Baseline Guarantee）**:
+   - 初回クリーン実行時、EDINET 同期の前に必ず全上場企業 4,126 社分の財務ベースライン（`fundamentals_seed.parquet`）を自動投入し、自己資本比率等の欠損による全件足切りを 100% 防止。
+   - その上で直近の EDINET 新着決算が上書き（UPSERT）される黄金順序を確立。
+2. **DuckDB パス解決の完全二重化（Dual-Path Synchronization）**:
+   - 作業層のルート直下（`/content/working/`）と `cache/` ディレクトリの双方に DB を同期・複製配置し、どの呼び出し経路からも確実に最新データベースにアクセスできる透過的解決を実現。
+3. **CSV 読み込み時のハイフン欠損値安全化（Type-Safe Null Handling）**:
+   - Polars の CSV パーサーにおいて `null_values=["-", "None", "null", ""]` を明示指定し、未算出指標を含む行でも型不整合（ComputeError）を起こさずに自動で null 変換してテーブル描画。
+4. **ブラウザ UX の認知ギャップ解消（Silent Download Guidance）**:
+   - 最新ブラウザ（Chrome 等）のダウンロードバー廃止・右上トレイ保存の仕様に対応し、セル実行完了時に保存先フォルダや Drive への二重バックアップを即座に明示案内。
+5. **外部依存サービスのフォールバック保証（Graceful Degradation）**:
+   - Google スプレッドシート連携等の任意外部機能が未設定でも、パイプラインを中断させずにローカル CSV 出力へ自動フォールバックして正常完走を保証。
 
 ---
 
