@@ -36,11 +36,7 @@ class EvaluationPhase(BasePhase):
         self.log_info(
             f"Filtering down to latest entry_date per stock (from {len(processed_df)} records)..."
         )
-        latest_df = (
-            processed_df.sort(["code", "entry_date"])
-            .group_by("code")
-            .last()
-        )
+        latest_df = processed_df.sort(["code", "entry_date"]).group_by("code").last()
         self.log_info(f"Unique stocks for evaluation: {len(latest_df)}")
 
         # 4. 銘柄マスタ・財務データの結合 (Early Memory Join)
@@ -57,8 +53,12 @@ class EvaluationPhase(BasePhase):
             if not valid_metrics_df.is_empty():
                 self.context.duck_repo.save_metrics(valid_metrics_df)
         except Exception as e:
-            self.log_error(f"❌ Failed to persist metrics to DuckDB: {e}", exc_info=True)
-            raise RuntimeError(f"Database persistence failed in evaluation phase: {e}") from e
+            self.log_error(
+                f"❌ Failed to persist metrics to DuckDB: {e}", exc_info=True
+            )
+            raise RuntimeError(
+                f"Database persistence failed in evaluation phase: {e}"
+            ) from e
 
         # 7. [第1層] Pre-Filter (地雷株・流動性足切り)
         self.log_info("Applying Layer 1: Pre-Filter with liquidity metrics...")
@@ -98,6 +98,7 @@ class EvaluationPhase(BasePhase):
         scores: list[float] = []
         verdicts: list[str] = []
 
+        cfg = getattr(self.context, "config", None)
         for row in records:
             # 指摘1: ma25_divergence は ma_divergence / ma25_divergence の双方から取得
             ma_div = row.get("ma_divergence")
@@ -137,7 +138,7 @@ class EvaluationPhase(BasePhase):
                     "macd_status": macd_status,
                 },
             }
-            score, verdict = QuantEvaluator.evaluate(dossier)
+            score, verdict = QuantEvaluator.evaluate(dossier, config=cfg)
             scores.append(score)
             verdicts.append(verdict)
 
@@ -198,7 +199,9 @@ class EvaluationPhase(BasePhase):
             candidate_cols = ["code", "name", "sector", "market"]
             master_cols = [c for c in candidate_cols if c in stocks_df.columns]
             # df側のマスター列重複をドロップ
-            df_metrics = df.drop([c for c in master_cols if c in df.columns and c != "code"])
+            df_metrics = df.drop(
+                [c for c in master_cols if c in df.columns and c != "code"]
+            )
             # 銘柄マスタの全銘柄を保持するため、stocks_df を主として left join
             # （時系列データのない銘柄も price=None として保持され、PreFilter で『市場データ取得不能』として隔離回収される）
             df = stocks_df.select(master_cols).join(df_metrics, on="code", how="left")
@@ -232,4 +235,3 @@ class EvaluationPhase(BasePhase):
             df = df.drop(right_cols)
 
         return df
-

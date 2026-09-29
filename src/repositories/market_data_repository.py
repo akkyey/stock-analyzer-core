@@ -110,7 +110,17 @@ class MarketDataRepository:
                     .str.to_datetime("%Y-%m-%d", strict=False),
                 ]
             ).select(
-                ["code", "Date", "Open", "High", "Low", "Close", "Adj Close", "Volume", "trading_value"]
+                [
+                    "code",
+                    "Date",
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Adj Close",
+                    "Volume",
+                    "trading_value",
+                ]
             )
         except Exception as e:
             self.logger.error(f"Error fetching historical records: {e}")

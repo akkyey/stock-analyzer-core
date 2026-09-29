@@ -36,7 +36,9 @@ class AcquisitionPhase(BasePhase):
         fetcher_cfg = self.context.config.get("fetcher", {})
         if fetcher_cfg.get("enable_edinet_turbo", True):
             scan_days = fetcher_cfg.get("edinet_scan_days", 30)
-            self.log_info(f"⚡ Synchronizing Fundamentals from EDINET (Turbo, {scan_days} days)...")
+            self.log_info(
+                f"⚡ Synchronizing Fundamentals from EDINET (Turbo, {scan_days} days)..."
+            )
             try:
                 edinet_fetcher = EdinetFetcher(self.context.config)
                 xbrl_parser = XbrlParser()
@@ -95,7 +97,9 @@ class AcquisitionPhase(BasePhase):
 
                 for i, b in enumerate(batches):
                     if stop_event.is_set():
-                        self.log_warn("Producer received stop signal. Aborting further fetches.")
+                        self.log_warn(
+                            "Producer received stop signal. Aborting further fetches."
+                        )
                         break
 
                     # DB履歴が薄い場合は 1y、十分なら 2d (差分) を取得
@@ -134,14 +138,23 @@ class AcquisitionPhase(BasePhase):
                             else:
                                 # 結合 & 重複排除 (指摘7: 型差異の吸収と keep="last")
                                 df_db_norm = df_db
-                                if "entry_date" in df_db_norm.columns and "Date" not in df_db_norm.columns:
-                                    df_db_norm = df_db_norm.rename({"entry_date": "Date"})
+                                if (
+                                    "entry_date" in df_db_norm.columns
+                                    and "Date" not in df_db_norm.columns
+                                ):
+                                    df_db_norm = df_db_norm.rename(
+                                        {"entry_date": "Date"}
+                                    )
                                 if "Volume" in df_db_norm.columns:
-                                    df_db_norm = df_db_norm.with_columns(pl.col("Volume").cast(pl.Float64))
+                                    df_db_norm = df_db_norm.with_columns(
+                                        pl.col("Volume").cast(pl.Float64)
+                                    )
 
                                 df_yf_norm = df_yf_pl
                                 if "Volume" in df_yf_norm.columns:
-                                    df_yf_norm = df_yf_norm.with_columns(pl.col("Volume").cast(pl.Float64))
+                                    df_yf_norm = df_yf_norm.with_columns(
+                                        pl.col("Volume").cast(pl.Float64)
+                                    )
 
                                 df_final_pl = (
                                     pl.concat(

@@ -27,7 +27,7 @@ def test_save_and_load_metrics(db_conn):
     repo.save_metrics(df)
 
     # 十分大きな日数を指定して過去データを取得できるようにする
-    loaded = repo.load_metrics(["7203"], days=1000)
+    loaded = repo.load_metrics(["7203"], days=2000)
     assert len(loaded) == 1
     assert loaded["price"][0] == 2500.0
 

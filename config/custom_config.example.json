@@ -1,0 +1,31 @@
+{
+  "_comment_overview": "Stock Analyzer Core カスタマイズ設定テンプレート。Google Drive上の config/custom_config.json またはローカル環境で利用可能です。",
+  "hard_filters": {
+    "_comment_min_trading_value": "直近20営業日平均売買代金の足切り値（円）。デフォルト: 30,000,000 (3,000万円)",
+    "min_trading_value": 30000000.0,
+
+    "_comment_min_price": "最低株価（円）。超低位ボロ株を排除します。デフォルト: 50.0",
+    "min_price": 50.0,
+
+    "_comment_min_equity_ratio": "最低自己資本比率（%）。0.0 超で債務超過を排除します。デフォルト: 0.0",
+    "min_equity_ratio": 0.0,
+
+    "_comment_min_op_cf_margin": "最低営業キャッシュフローマージン（比率）。-0.10 で -10% 未満のキャッシュ枯渇株を排除（金融業除く）。デフォルト: -0.10",
+    "min_op_cf_margin": -0.10,
+
+    "_comment_target_markets": "対象市場リスト。null で全市場（PRO Market等を含む全件）。例: [\"Prime\"], [\"Standard\", \"Growth\"]",
+    "target_markets": null
+  },
+
+  "_comment_strategy_preset": "配点プリセット: 'balanced' (標準), 'dividend_focus' (高配当重視), 'deep_value' (割安重視), 'growth_quality' (高ROE成長重視)",
+  "strategy_preset": "balanced",
+
+  "_comment_scoring_multipliers": "各カテゴリの配点乗数。特定カテゴリのみピンポイントで上書き可能です（1.0 が基準等倍）。",
+  "scoring_multipliers": {
+    "profitability_multiplier": 1.0,
+    "value_multiplier": 1.0,
+    "safety_multiplier": 1.0,
+    "dividend_multiplier": 1.0,
+    "technical_multiplier": 1.0
+  }
+}

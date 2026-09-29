@@ -125,9 +125,7 @@ class FinancialRepairService:
         # ※ current_ratio, debt_equity_ratio などの倍率指標は 1.0 を超えるのが通常なため対象外とする。
         from src.config_singleton import ConfigSingleton
 
-        threshold = ConfigSingleton.get(
-            "financial_repair.ratio_scaling_threshold", 1.0
-        )
+        threshold = ConfigSingleton.get("financial_repair.ratio_scaling_threshold", 1.0)
 
         if "equity_ratio" in cols:
             df = df.with_columns(

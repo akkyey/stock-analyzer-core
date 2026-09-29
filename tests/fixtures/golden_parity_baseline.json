@@ -1,0 +1,98 @@
+{
+  "passed_count": 9,
+  "rejected_count": 6,
+  "evaluated_results": [
+    {
+      "code": "1001",
+      "name": "優良コア株",
+      "score": 71.9,
+      "verdict": "BUY"
+    },
+    {
+      "code": "1003",
+      "name": "割安バリュー",
+      "score": 71.5,
+      "verdict": "BUY"
+    },
+    {
+      "code": "1004",
+      "name": "高配当インフラ",
+      "score": 70.8,
+      "verdict": "BUY"
+    },
+    {
+      "code": "4002",
+      "name": "暴落警戒株",
+      "score": 66.7,
+      "verdict": "WATCH"
+    },
+    {
+      "code": "3005",
+      "name": "免除銀行株",
+      "score": 59.6,
+      "verdict": "WATCH"
+    },
+    {
+      "code": "2001",
+      "name": "特益見かけ黒字",
+      "score": 54.0,
+      "verdict": "WATCH"
+    },
+    {
+      "code": "1002",
+      "name": "急成長テック",
+      "score": 51.6,
+      "verdict": "WATCH"
+    },
+    {
+      "code": "4001",
+      "name": "死に株",
+      "score": 45.0,
+      "verdict": "PASS"
+    },
+    {
+      "code": "2002",
+      "name": "赤字転落株",
+      "score": 30.6,
+      "verdict": "PASS"
+    }
+  ],
+  "rejected_results": [
+    {
+      "code": "3001",
+      "name": "閑散銘柄",
+      "reason": "極小流動性トラップ",
+      "detail": "20日平均売買代金不足 (1,500万円 < 3,000万円)"
+    },
+    {
+      "code": "3002",
+      "name": "超低位ボロ株",
+      "reason": "超低位ボロ株",
+      "detail": "株価基準未満 (42円 < 50円)"
+    },
+    {
+      "code": "3003",
+      "name": "債務超過株",
+      "reason": "構造的破綻 (債務超過)",
+      "detail": "純資産マイナス (-1,000,000,000円)"
+    },
+    {
+      "code": "3004",
+      "name": "キャッシュ枯渇株",
+      "reason": "致命的キャッシュ枯渇",
+      "detail": "営業CFマージン大幅赤字 (-20.0% < -10.0%)"
+    },
+    {
+      "code": "3006",
+      "name": "商い不成立株",
+      "reason": "商い不成立",
+      "detail": "直近5営業日以内に出来高ゼロ日あり (1日)"
+    },
+    {
+      "code": "3007",
+      "name": "取引停止株",
+      "reason": "データ鮮度不足 (取引停止)",
+      "detail": "最終取引日 (2026-03-10) が直近5営業日範囲外"
+    }
+  ]
+}

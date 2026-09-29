@@ -40,7 +40,9 @@ def main() -> int:
     mode = args.positional_mode or args.mode
 
     if mode not in ["scan", "daily"]:
-        print(f"❌ 不明な実行モードです: {mode} (利用可能: scan, daily)", file=sys.stderr)
+        print(
+            f"❌ 不明な実行モードです: {mode} (利用可能: scan, daily)", file=sys.stderr
+        )
         return 1
 
     context = OrchestratorContext()

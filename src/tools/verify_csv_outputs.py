@@ -14,17 +14,21 @@ def main() -> None:
     print("\n--- 1. daily_report.csv ヘッダーおよび先頭行 ---")
     with open(daily_path, "r", encoding="utf-8-sig") as f:
         for i in range(4):
-            print(f"Line {i+1}: {f.readline().strip()}")
+            print(f"Line {i + 1}: {f.readline().strip()}")
 
     # 2. Polars によるパース
     print("\n--- 2. Polars によるパース検証 (null_values=['-']) ---")
     df_daily_pl = pl.read_csv(daily_path, null_values=["-"])
-    print(f"✅ Polars パース成功: {len(df_daily_pl):,} 行, {len(df_daily_pl.columns)} 列")
+    print(
+        f"✅ Polars パース成功: {len(df_daily_pl):,} 行, {len(df_daily_pl.columns)} 列"
+    )
 
     # 3. Pandas によるパース
     print("\n--- 3. Pandas によるパース検証 ---")
     df_daily_pd = pd.read_csv(daily_path)
-    print(f"✅ Pandas パース成功: {len(df_daily_pd):,} 行, {len(df_daily_pd.columns)} 列")
+    print(
+        f"✅ Pandas パース成功: {len(df_daily_pd):,} 行, {len(df_daily_pd.columns)} 列"
+    )
 
     # 4. 契約必須カラムの欠損値チェック
     print("\n--- 4. 契約必須カラム (Code, Verdict, Score) の検証 ---")
@@ -48,10 +52,12 @@ def main() -> None:
     print("\n--- 6. uncalculable_stocks.csv の検証 ---")
     with open(uncalc_path, "r", encoding="utf-8-sig") as f:
         for i in range(3):
-            print(f"Line {i+1}: {f.readline().strip()}")
+            print(f"Line {i + 1}: {f.readline().strip()}")
 
     df_uncalc_pl = pl.read_csv(uncalc_path)
-    print(f"✅ Polars パース成功: {len(df_uncalc_pl):,} 行, {len(df_uncalc_pl.columns)} 列")
+    print(
+        f"✅ Polars パース成功: {len(df_uncalc_pl):,} 行, {len(df_uncalc_pl.columns)} 列"
+    )
 
     print("\n--- 7. uncalculable_stocks.csv の除外理由内訳 ---")
     if "filter_reason" in df_uncalc_pl.columns:

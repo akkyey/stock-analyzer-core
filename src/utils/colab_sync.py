@@ -1,0 +1,201 @@
+"""Google Colab 二層ストレージ (Stage-and-Sync) 管理モジュール
+
+作業層 (ローカル超高速SSD) と 永続層 (Google Drive) のデータ同期を司る。
+- Pull Phase: 3段構えの自動復元検証 (メインDB -> .bak -> 新規初期化)
+- Push Phase: WALフラッシュ、.bak世代退避、.tmpアトミック置換、flush_and_unmount
+"""
+
+import logging
+import os
+import shutil
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class ColabSyncManager:
+    """Colab Stage-and-Sync ライフサイクルマネージャー"""
+
+    DB_FILENAME = "stock_analyzer.duckdb"
+    DAILY_REPORT_FILENAME = "daily_report.csv"
+    UNPROCESSED_FILENAME = "uncalculable_stocks.csv"
+
+    @classmethod
+    def is_duckdb_healthy(cls, db_path: Path) -> bool:
+        """DuckDB ファイルが正常にオープンでき、テーブルが読み書き可能か検証する"""
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            return False
+
+        try:
+            import duckdb
+
+            # 読み取り専用で接続テスト
+            conn = duckdb.connect(str(db_path), read_only=True)
+            # 基本的なカタログ整合性確認
+            conn.execute("SELECT count(*) FROM information_schema.tables").fetchall()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ DuckDB 健全性検証エラー ({db_path}): {e}")
+            return False
+
+    @classmethod
+    def pull_database(
+        cls,
+        drive_dir: Path,
+        working_dir: Path,
+        db_filename: Optional[str] = None,
+    ) -> Path:
+        """【Pull Phase】Google Drive から作業層 SSD へ 3段構えの復元検証を行い DB を配置する。
+
+        復元順序:
+        1. 第1段: Drive 上のメイン DB をコピーし、健全性を検証
+        2. 第2段: メイン破損時、Drive 上の .bak をコピーし、健全性を検証
+        3. 第3段: 両方破損または未存在時、新規初期化フォールバック
+
+        Returns:
+            Path: 作業層上の準備完了した DB パス
+        """
+        filename = db_filename or cls.DB_FILENAME
+        drive_db = drive_dir / "cache" / filename
+        drive_bak = drive_dir / "cache" / f"{filename}.bak"
+
+        working_cache = working_dir / "cache"
+        working_cache.mkdir(parents=True, exist_ok=True)
+        working_db = working_cache / filename
+
+        # 第1段: メインDBの検証と採用
+        if drive_db.exists():
+            shutil.copy2(drive_db, working_db)
+            if cls.is_duckdb_healthy(working_db):
+                logger.info(
+                    f"✅ [Pull: 第1段] Google Drive から健全なメイン DB をロードしました: {working_db}"
+                )
+                return working_db
+            else:
+                logger.warning(
+                    "⚠️ [Pull] Drive 上のメイン DB が破損しているか不正です。バックアップからの復旧を試みます..."
+                )
+                if working_db.exists():
+                    working_db.unlink(missing_ok=True)
+
+        # 第2段: バックアップ (.bak) の検証と採用
+        if drive_bak.exists():
+            shutil.copy2(drive_bak, working_db)
+            if cls.is_duckdb_healthy(working_db):
+                logger.warning(
+                    f"⚠️ [Pull: 第2段] メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました: {working_db}"
+                )
+                return working_db
+            else:
+                logger.warning("⚠️ [Pull] バックアップ DB (.bak) も破損しています。")
+                if working_db.exists():
+                    working_db.unlink(missing_ok=True)
+
+        # 第3段: 新規初期化フォールバック
+        logger.warning(
+            f"ℹ️ [Pull: 第3段] 既存DB未存在または全破損のため、新規に空の DB を初期化します: {working_db}"
+        )
+        # 空ファイルではなく、DuckDB クライアントが初回アクセス時に自動初期化できるようにする
+        if working_db.exists():
+            working_db.unlink(missing_ok=True)
+
+        return working_db
+
+    @classmethod
+    def push_artifacts(
+        cls,
+        working_dir: Path,
+        drive_dir: Path,
+        db_filename: Optional[str] = None,
+        flush_unmount: bool = True,
+    ) -> bool:
+        """【Push Phase】作業層 SSD の最新 DB および CSV レポートを Google Drive へ安全にアトミック同期する。
+
+        同期手順:
+        1. Drive 側で既存の健全 DB を .bak へコピー退避 (shutil.copy2)
+        2. 作業層の最新 DB を Drive の .tmp へ書き出し、os.replace でアトミック置換
+        3. 出力 CSV (daily_report.csv, uncalculable_stocks.csv) を同期
+        4. drive.flush_and_unmount() によるクラウド同期保証
+
+        Returns:
+            bool: 同期成功時 True
+        """
+        filename = db_filename or cls.DB_FILENAME
+        working_db = working_dir / "cache" / filename
+        drive_cache = drive_dir / "cache"
+        drive_output = drive_dir / "output"
+        drive_cache.mkdir(parents=True, exist_ok=True)
+        drive_output.mkdir(parents=True, exist_ok=True)
+
+        drive_db = drive_cache / filename
+        drive_bak = drive_cache / f"{filename}.bak"
+        drive_tmp = drive_cache / f"{filename}.tmp"
+
+        try:
+            # 1. DB の同期
+            if working_db.exists():
+                # 作業層 DB の健全性を最終確認
+                if not cls.is_duckdb_healthy(working_db):
+                    logger.error(
+                        f"❌ [Push] 作業層 DB が破損しているため、Drive への同期を中断しました: {working_db}"
+                    )
+                    return False
+
+                # 既存 Drive DB を .bak へ退避
+                if drive_db.exists():
+                    shutil.copy2(drive_db, drive_bak)
+                    logger.info(
+                        "🛡️ [Push] Drive 上の既存 DB を 1 世代バックアップ (.bak) に退避しました。"
+                    )
+
+                # .tmp 経由のアトミック置換
+                shutil.copy2(working_db, drive_tmp)
+                os.replace(drive_tmp, drive_db)
+                logger.info(
+                    f"✅ [Push] 最新 DB をアトミックに Google Drive へ同期しました: {drive_db}"
+                )
+
+            # 2. CSV レポートの同期
+            working_output = working_dir / "output"
+            for csv_name in [cls.DAILY_REPORT_FILENAME, cls.UNPROCESSED_FILENAME]:
+                w_csv = working_output / csv_name
+                if w_csv.exists():
+                    d_csv = drive_output / csv_name
+                    d_tmp = drive_output / f"{csv_name}.tmp"
+                    shutil.copy2(w_csv, d_tmp)
+                    os.replace(d_tmp, d_csv)
+                    logger.info(f"✅ [Push] レポート CSV を同期しました: {d_csv}")
+
+            # 3. Colab 環境でのフラッシュとアンマウント
+            if flush_unmount:
+                cls.flush_and_unmount_if_colab()
+
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"❌ [Push] Google Drive への同期中にエラーが発生しました: {e}",
+                exc_info=True,
+            )
+            return False
+
+    @classmethod
+    def flush_and_unmount_if_colab(cls) -> None:
+        """Colab 環境下であれば Google Drive の非同期フラッシュとアンマウントを実行する"""
+        try:
+            from google.colab import drive
+
+            logger.info(
+                "⏳ [Push] Google Drive のクラウド非同期同期をフラッシュ中 (flush_and_unmount)..."
+            )
+            drive.flush_and_unmount()
+            logger.info(
+                "✨ [Push] Google Drive への書き込みがクラウド側で安全に完了しました。"
+            )
+        except ImportError:
+            # ローカル環境等の場合は何もしない
+            pass
+        except Exception as e:
+            logger.warning(f"⚠️ drive.flush_and_unmount() 警告: {e}")

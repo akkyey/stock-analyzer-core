@@ -31,9 +31,12 @@ class TurboAcquisitionManager:
         self.max_workers = fetcher_cfg.get("edinet_workers", (os.cpu_count() or 4) + 2)
         self.scan_workers = fetcher_cfg.get("edinet_scan_workers", 10)
 
-        # 一時ディレクトリ設定
-        self.tmp_dir = "data/tmp/edinet_xbrl"
-        self.results_dir = "data/tmp/edinet_results"
+        # 一時ディレクトリ設定 (PathResolver 経由)
+        from src.utils.path_resolver import PathResolver
+
+        tmp_base = PathResolver.get_tmp_dir()
+        self.tmp_dir = str(tmp_base / "edinet_xbrl")
+        self.results_dir = str(tmp_base / "edinet_results")
         os.makedirs(self.tmp_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
 
@@ -142,7 +145,9 @@ class TurboAcquisitionManager:
                     cached_submit = cached_item.get("submit_date", "")
                     target_submit = doc.get("submitDateTime", "")
 
-                    if cached_doc_id == doc_id or (cached_submit and cached_submit >= target_submit):
+                    if cached_doc_id == doc_id or (
+                        cached_submit and cached_submit >= target_submit
+                    ):
                         return code, cached_item
                 except Exception:
                     pass

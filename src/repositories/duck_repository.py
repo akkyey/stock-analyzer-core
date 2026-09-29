@@ -257,8 +257,7 @@ class DuckDBRepository:
         """登録されている全銘柄コードを取得する。"""
         with self.client.get_connection() as conn:
             cols = [
-                r[1]
-                for r in conn.execute("PRAGMA table_info('stocks')").fetchall()
+                r[1] for r in conn.execute("PRAGMA table_info('stocks')").fetchall()
             ]
             if "is_active" in cols:
                 res = conn.execute(

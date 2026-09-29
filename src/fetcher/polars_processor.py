@@ -68,7 +68,6 @@ class PolarsProcessor:
 
         return cleaned
 
-
     @staticmethod
     def _get_stability_count_expr(col: str = "price", window: int = 30) -> pl.Expr:
         """指定されたカラムの有効データ数（非NULL）をカウントするエクスプレッションを返す。"""
@@ -375,9 +374,7 @@ class PolarsProcessor:
                 vp_expr = pl.lit(None).cast(pl.Float64)
 
             tv_init = (
-                pl.col("trading_value")
-                if "trading_value" in df_pl.columns
-                else vp_expr
+                pl.col("trading_value") if "trading_value" in df_pl.columns else vp_expr
             )
 
             df_pl = df_pl.with_columns(

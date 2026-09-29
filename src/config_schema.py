@@ -112,4 +112,3 @@ class ConfigModel(BaseModel):
     model_config = {
         "extra": "ignore",  # 未知のフィールドは無視
     }
-

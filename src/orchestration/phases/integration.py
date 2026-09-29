@@ -110,7 +110,9 @@ class IntegrationPhase(BasePhase):
                 self.log_info(f"🚀 Spreadsheet Updated Directly: {sheet_url}")
                 self.context.report_url = sheet_url
             else:
-                self.context.add_error("Spreadsheet export failed (Check log for details).")
+                self.context.add_error(
+                    "Spreadsheet export failed (Check log for details)."
+                )
         except Exception as e:
             self.log_error(f"❌ Spreadsheet upload failed: {e}")
             self.context.add_error(f"Spreadsheet upload failed: {e}")
@@ -175,5 +177,6 @@ class IntegrationPhase(BasePhase):
             err_msg = f"Data Contract Violation: Null values detected in essential columns: {invalid_cols}"
             self.log_error(err_msg)
             raise AssertionError(err_msg)
-        self.log_info(f"✅ Data contract verified: 0.00% missing values across essential columns ({essential_cols}).")
-
+        self.log_info(
+            f"✅ Data contract verified: 0.00% missing values across essential columns ({essential_cols})."
+        )

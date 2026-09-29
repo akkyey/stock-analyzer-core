@@ -207,4 +207,3 @@ class ConfigLoader:
 def load_config(config_path=None):
     loader = ConfigLoader(config_path)
     return loader.config
-

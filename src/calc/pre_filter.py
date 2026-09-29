@@ -16,10 +16,13 @@
   単一バリュエーション（高PER株）での事前足切りは絶対に行わない。
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +41,15 @@ class PreFilter:
     MIN_PRICE: float = 50.0  # 最低株価 50円
     MIN_EQUITY_RATIO: float = 0.0  # 自己資本比率 0%超（債務超過排除）
     MIN_OP_CF_MARGIN: float = -0.10  # 営業CFマージン -10%（致命的キャッシュ枯渇）
+
+    # 既知の hard_filters キー定義（タイポ・未知キー検知用）
+    KNOWN_HF_KEYS: set[str] = {
+        "min_trading_value",
+        "min_price",
+        "min_equity_ratio",
+        "min_op_cf_margin",
+        "target_markets",
+    }
 
     # 営業CFマージン評価の除外セクター（金融・保険など業態構造上の免除）
     CF_EXEMPT_SECTORS: set[str] = {
@@ -72,7 +84,11 @@ class PreFilter:
             )
 
         # 売買代金（円）の算出 (trading_value は既に円単位の売買代金。欠損時のみ volume * price)
-        tv_col = pl.col("trading_value") if "trading_value" in df_timeseries.columns else pl.lit(None).cast(pl.Float64)
+        tv_col = (
+            pl.col("trading_value")
+            if "trading_value" in df_timeseries.columns
+            else pl.lit(None).cast(pl.Float64)
+        )
         if "volume" in df_timeseries.columns and "price" in df_timeseries.columns:
             vp_fallback = (pl.col("volume") * pl.col("price")).cast(pl.Float64)
         else:
@@ -128,12 +144,7 @@ class PreFilter:
 
         df_5 = (
             df_calc.filter(pl.col("entry_date").is_in(dates_5))
-            .with_columns(
-                pl.when(zero_cond)
-                .then(1)
-                .otherwise(0)
-                .alias("_is_zero")
-            )
+            .with_columns(pl.when(zero_cond).then(1).otherwise(0).alias("_is_zero"))
             .group_by("code")
             .agg(pl.col("_is_zero").sum().alias("zero_volume_days_5d"))
         )
@@ -144,7 +155,9 @@ class PreFilter:
             df_calc.group_by("code")
             .agg(pl.col("entry_date").cast(pl.String).max().alias("latest_trade_date"))
             .with_columns(
-                pl.col("latest_trade_date").is_in(market_recent_dates).alias("is_recent_trade")
+                pl.col("latest_trade_date")
+                .is_in(market_recent_dates)
+                .alias("is_recent_trade")
             )
         )
 
@@ -193,16 +206,19 @@ class PreFilter:
             )
             return PreFilterResult(passed_df=df_candidates, rejected_df=empty_rejected)
 
-        # 設定値の反映
-        min_tv_20d = cls.MIN_TRADING_VALUE_20D
-        min_price = cls.MIN_PRICE
-        min_eq_ratio = cls.MIN_EQUITY_RATIO
-        min_op_cf_margin = cls.MIN_OP_CF_MARGIN
+        # 設定値の反映（親和的フォールバック・未知キー検知）
+        hf = (config or {}).get("hard_filters", {})
+        unknown_keys = set(hf.keys()) - cls.KNOWN_HF_KEYS
+        if unknown_keys:
+            logger.warning(
+                f"⚠️ hard_filters に未知の設定キーが含まれています (無視されます): {unknown_keys}"
+            )
 
-        if config and "hard_filters" in config:
-            hf = config["hard_filters"]
-            if "min_trading_value" in hf:
-                min_tv_20d = float(hf["min_trading_value"])
+        min_tv_20d = float(hf.get("min_trading_value", cls.MIN_TRADING_VALUE_20D))
+        min_price = float(hf.get("min_price", cls.MIN_PRICE))
+        min_eq_ratio = float(hf.get("min_equity_ratio", cls.MIN_EQUITY_RATIO))
+        min_op_cf_margin = float(hf.get("min_op_cf_margin", cls.MIN_OP_CF_MARGIN))
+        target_markets = hf.get("target_markets", None)
 
         # 流動性指標の結合
         df = df_candidates
@@ -229,7 +245,9 @@ class PreFilter:
             if "trading_value" in df.columns:
                 tv_expr = pl.col("trading_value").fill_null(0.0)
             if "volume" in df.columns and "price" in df.columns:
-                vp_expr = pl.col("volume").fill_null(0.0) * pl.col("price").fill_null(0.0)
+                vp_expr = pl.col("volume").fill_null(0.0) * pl.col("price").fill_null(
+                    0.0
+                )
                 # trading_value が未設定(0またはnull)の場合は volume * price を採用
                 tv_expr = pl.when(tv_expr > 0.0).then(tv_expr).otherwise(vp_expr)
             df = df.with_columns(tv_expr.alias("avg_trading_value_20d"))
@@ -376,6 +394,19 @@ class PreFilter:
                         )
                         continue
 
+            # 9. 対象外市場判定 (設定で target_markets が明示指定された場合のみ除外)
+            if target_markets is not None:
+                market = str(row.get("market", ""))
+                if market not in target_markets:
+                    rejected_rows.append(
+                        {
+                            **row,
+                            "filter_reason": "対象外市場",
+                            "filter_detail": f"指定対象市場 ({target_markets}) に含まれない市場 ({market})",
+                        }
+                    )
+                    continue
+
             # すべての足切りをクリアした銘柄
             passed_rows.append(row)
 
@@ -423,4 +454,3 @@ class PreFilter:
         """candidates に対し事前足切りを行い、(passed_df, rejected_df) を返すコンビニエンスメソッド。"""
         res = cls.evaluate(df_candidates, df_liquidity, config)
         return res.passed_df, res.rejected_df
-

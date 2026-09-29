@@ -61,9 +61,15 @@ class OrchestratorContext:
         }
 
         from src.reporter import StockReporter
+        from src.utils.path_resolver import PathResolver
 
         paths = self.config.get("paths") or {}
-        output_dir = paths.get("output_dir") or "data/output"
+        custom_out = paths.get("output_dir")
+        output_dir = (
+            str(PathResolver.get_output_dir())
+            if not custom_out or custom_out == "data/output"
+            else custom_out
+        )
         self.reporter = StockReporter(output_dir=output_dir)
         self._notifier: Any = None
 
@@ -150,4 +156,3 @@ class OrchestratorContext:
         if self.report_url:
             self.logger.info(f"  Report URL: {self.report_url}")
         self.logger.info("=" * 40)
-

@@ -16,4 +16,3 @@ GDRIVE_REPORTS_SUBFOLDER = "reports"
 
 # Default Log File
 DEFAULT_LOG_FILE = str(_PROJECT_ROOT / "stock_analyzer.log")
-

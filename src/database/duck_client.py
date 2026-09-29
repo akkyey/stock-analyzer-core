@@ -13,7 +13,6 @@ from typing import Optional
 import duckdb
 
 from src.config_singleton import ConfigSingleton
-from src.constants import _PROJECT_ROOT
 
 logger = getLogger(__name__)
 
@@ -46,8 +45,10 @@ class DuckDBClient:
             config = ConfigSingleton.get_config()
             paths = config.get("paths", {})
 
-            # [v15.0] Primary DuckDB Storage for stock-analyzer-core
-            default_path = str(_PROJECT_ROOT / "data" / "stock_analyzer.duckdb")
+            # [v15.0] Primary DuckDB Storage for stock-analyzer-core (PathResolver 経由)
+            from src.utils.path_resolver import PathResolver
+
+            default_path = str(PathResolver.get_duckdb_path())
             self.db_path = db_path or paths.get("duckdb_file") or default_path
 
             # ディレクトリの作成
