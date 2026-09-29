@@ -47,10 +47,13 @@ class DuckDBRepository:
             # 元の入力 DF に存在するカラムを保持（UPDATE対象を限定するため）
             input_cols = set(df.columns)
 
-            # 入力 DF に存在しないカラムを Null で補完（Repository 側の最終防衛線: INSERT用）
+            # 入力 DF に存在しないカラムを補完（stocks.is_active は True、その他は Null）
             for col in fixed_cols:
                 if col not in df.columns:
-                    df = df.with_columns(pl.lit(None).alias(col))
+                    if table_name == "stocks" and col == "is_active":
+                        df = df.with_columns(pl.lit(True).alias(col))
+                    else:
+                        df = df.with_columns(pl.lit(None).alias(col))
 
             # 保存対象カラムの文字列化
             col_str = ", ".join(fixed_cols)
@@ -238,6 +241,9 @@ class DuckDBRepository:
             conn.execute(
                 "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE"
             )
+            conn.execute(
+                "UPDATE stocks SET is_active = TRUE WHERE is_active IS NULL"
+            )
 
             # [v29.0] daily_metrics のスキーマ進化 (SSOT 同期)
             for col_def in [
@@ -261,7 +267,7 @@ class DuckDBRepository:
             ]
             if "is_active" in cols:
                 res = conn.execute(
-                    "SELECT code FROM stocks WHERE is_active = TRUE"
+                    "SELECT code FROM stocks WHERE is_active IS NOT FALSE"
                 ).fetchall()
             else:
                 res = conn.execute("SELECT code FROM stocks").fetchall()

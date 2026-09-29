@@ -69,11 +69,12 @@ class AcquisitionPhase(BasePhase):
                 if not jpx_df.empty:
                     df_pl = pl.from_pandas(
                         jpx_df[["code", "name", "sector", "market"]]
-                    )
+                    ).with_columns(pl.lit(True).alias("is_active"))
                     repo.save_stocks(df_pl)
                     target_codes = repo.get_all_codes()
-                    self.log_info(
-                        f"✅ 銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。"
+                    print(
+                        f"   ✅ 銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。",
+                        flush=True,
                     )
             except Exception as e:
                 self.log_error(f"❌ 銘柄マスタの初期登録に失敗しました: {e}")
@@ -81,8 +82,9 @@ class AcquisitionPhase(BasePhase):
         if self.context.limit:
             target_codes = target_codes[: self.context.limit]
 
-        self.log_info(
-            f"Targeting {len(target_codes)} stocks for market data acquisition."
+        print(
+            f"📡 全 {len(target_codes)} 銘柄の市場データ取得を開始します...",
+            flush=True,
         )
 
         # 2. DB から過去履歴を一括ロード (RSI等バッファ用)
@@ -243,13 +245,15 @@ class AcquisitionPhase(BasePhase):
             code, df_data = item
             all_data_map[code] = df_data
             processed_count += 1
-            if processed_count % 100 == 0:
-                self.log_info(
-                    f"Acquired market data for {processed_count}/{num_targets} stocks..."
+            if processed_count % 500 == 0 or processed_count == num_targets:
+                print(
+                    f"   📊 市場データ取得進行中: {processed_count}/{num_targets} 銘柄完了...",
+                    flush=True,
                 )
 
         stop_event.set()  # 正常終了時も確実にセット
-        self.log_info(
-            f"Data Acquisition completed. {len(all_data_map)} stocks ready for evaluation."
+        print(
+            f"✅ 市場データ取得完了: 全 {len(all_data_map)} 銘柄のデータを準備しました。",
+            flush=True,
         )
         return all_data_map
