@@ -41,6 +41,15 @@ class ColabSyncManager:
             return False
 
     @classmethod
+    def is_first_run(
+        cls, drive_dir: Path, db_filename: Optional[str] = None
+    ) -> bool:
+        """Google Drive 上に健全な既存 DB が存在するか確認し、初回実行（キャッシュなし）か否かを判定する"""
+        filename = db_filename or cls.DB_FILENAME
+        drive_db = drive_dir / "cache" / filename
+        return not cls.is_duckdb_healthy(drive_db)
+
+    @classmethod
     def pull_database(
         cls,
         drive_dir: Path,
