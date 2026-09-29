@@ -36,7 +36,9 @@ class EvaluationPhase(BasePhase):
         self.log_info(
             f"Filtering down to latest entry_date per stock (from {len(processed_df)} records)..."
         )
-        latest_df = processed_df.sort(["code", "entry_date"]).group_by("code").last()
+        latest_df = processed_df.sort(["code", "entry_date"]).unique(
+            subset=["code"], keep="last"
+        )
         self.log_info(f"Unique stocks for evaluation: {len(latest_df)}")
 
         # 4. 銘柄マスタ・財務データの結合 (Early Memory Join)

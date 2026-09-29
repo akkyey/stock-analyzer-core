@@ -328,7 +328,7 @@ class PolarsProcessor:
             if df_pl.is_empty():
                 return PolarsProcessor._ensure_resilient_schema(df_pl.clear())
 
-            # [SSOT] 基層指標の算出
+            # [SSOT] 基層指標の算出（ネストされたWindow式エラー防止のため段階的に算出）
             df_pl = (
                 df_pl.sort(["code", "entry_date"])
                 .with_columns(PolarsProcessor._get_bb_expr(window=25))
@@ -342,10 +342,51 @@ class PolarsProcessor:
                         (pl.col("ma25") - 2 * pl.col("std25")).alias("bb_m2sig"),
                     ]
                 )
-                .with_columns(
-                    PolarsProcessor._get_rsi_expr(window=14, stability_min=30)
-                )
-                .with_columns(PolarsProcessor._get_macd_expr())
+            )
+
+            # RSI: 段階的計算 (diff -> gain/loss -> ewm_mean -> rsi)
+            df_pl = df_pl.with_columns(
+                pl.col("price").diff().over("code").alias("_diff")
+            ).with_columns(
+                [
+                    pl.when(pl.col("_diff") > 0).then(pl.col("_diff")).otherwise(0.0).alias("_gain"),
+                    pl.when(pl.col("_diff") < 0).then(pl.col("_diff").abs()).otherwise(0.0).alias("_loss"),
+                    pl.col("price").is_not_null().cast(pl.Int32).rolling_sum(30).over("code").alias("_valid_cnt"),
+                ]
+            ).with_columns(
+                [
+                    pl.col("_gain").fill_null(0.0).ewm_mean(com=13, adjust=False).over("code").alias("_avg_gain"),
+                    pl.col("_loss").fill_null(0.0).ewm_mean(com=13, adjust=False).over("code").alias("_avg_loss"),
+                ]
+            ).with_columns(
+                [
+                    pl.when(pl.col("_valid_cnt").fill_null(0) < 30)
+                    .then(None)
+                    .when(pl.col("_avg_loss") == 0)
+                    .then(pl.when(pl.col("_avg_gain") == 0).then(50.0).otherwise(100.0))
+                    .otherwise(100.0 - (100.0 / (1.0 + (pl.col("_avg_gain") / pl.col("_avg_loss")))))
+                    .alias("rsi_14")
+                ]
+            )
+
+            # MACD: 段階的計算 (ema12/26 -> macd -> macd_signal -> macd_hist)
+            df_pl = df_pl.with_columns(
+                [
+                    pl.col("price").ewm_mean(span=12, adjust=False).over("code").alias("_ema12"),
+                    pl.col("price").ewm_mean(span=26, adjust=False).over("code").alias("_ema26"),
+                ]
+            ).with_columns(
+                [
+                    (pl.col("_ema12") - pl.col("_ema26")).alias("macd")
+                ]
+            ).with_columns(
+                [
+                    pl.col("macd").ewm_mean(span=9, adjust=False).over("code").alias("macd_signal")
+                ]
+            ).with_columns(
+                [
+                    (pl.col("macd") - pl.col("macd_signal")).alias("macd_hist")
+                ]
             )
 
             # トレンドスコア等の派生指標
@@ -408,7 +449,9 @@ class PolarsProcessor:
 
             # 最新レコードのみか、全履歴かを切り替え
             if latest_only:
-                df_pl = df_pl.group_by("code").last()
+                df_pl = df_pl.sort(["code", "entry_date"]).unique(
+                    subset=["code"], keep="last"
+                )
 
             # 最終的なスキーマ強制
             return PolarsProcessor._ensure_resilient_schema(df_pl)
