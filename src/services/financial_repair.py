@@ -22,6 +22,25 @@ class FinancialRepairService:
         cols = df.columns
 
         # [Step 1] 自己資本比率 (Equity Ratio) の精緻化
+        # 1-1. 総資産と純資産による直接計算 (最優先)
+        if "total_assets" in cols and "net_assets" in cols and "equity_ratio" in cols:
+            df = df.with_columns(
+                [
+                    pl.when(
+                        pl.col("equity_ratio").is_null()
+                        & pl.col("total_assets").is_not_null()
+                        & (pl.col("total_assets") > 0)
+                        & pl.col("net_assets").is_not_null()
+                    )
+                    .then((pl.col("net_assets") / pl.col("total_assets")) * 100.0)
+                    .otherwise(pl.col("equity_ratio"))
+                    .alias("equity_ratio")
+                ]
+            )
+
+        # 1-2. D/Eレシオからの恒等式逆算補完
+        # ※注: ここでのDEレシオは「有利子負債比率」ではなくEDINET原本の「総負債 ÷ 純資産」テーブル値を前提
+        # 恒等式: 自己資本比率 = 純資産 / 総資産 = 1 / (1 + 総負債/純資産) = 100 / (1 + DE/100)
         if "equity_ratio" in cols and "debt_equity_ratio" in cols:
             df = df.with_columns(
                 [

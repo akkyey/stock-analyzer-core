@@ -17,8 +17,13 @@ def stub_context():
 
 def test_integration_phase_execute_success(stub_context):
     """正常系: レポート生成と外部連携の呼び出しを確認"""
-    # 入力データ
-    df = pl.DataFrame({"code": ["1001"], "quant_score": [85.0]})
+    # 入力データ（必須契約列: code, price, verdict を含む）
+    df = pl.DataFrame({
+        "code": ["1001"],
+        "price": [1000.0],
+        "verdict": ["BUY"],
+        "quant_score": [85.0],
+    })
 
     # Reporter のモック設定
     stub_context.reporter.generate_reports.return_value = {"main_csv": "/tmp/dummy.csv"}
@@ -60,7 +65,12 @@ def test_integration_phase_no_data(stub_context):
 
 def test_integration_phase_with_data_map(stub_context):
     """正常系: data_map (dict) 形式での入力を正しく処理できること"""
-    df = pl.DataFrame({"code": ["1001"], "quant_score": [85.0]})
+    df = pl.DataFrame({
+        "code": ["1001"],
+        "price": [1000.0],
+        "verdict": ["BUY"],
+        "quant_score": [85.0],
+    })
     data_map = {"df_eval": df}
 
     stub_context.reporter.generate_reports.return_value = {}
@@ -74,7 +84,12 @@ def test_integration_phase_with_data_map(stub_context):
 
 def test_integration_phase_upload_failure(stub_context):
     """異常系: Google Drive へのアップロードが失敗した場合のエラーハンドリング"""
-    df = pl.DataFrame({"code": ["1001"], "quant_score": [85.0]})
+    df = pl.DataFrame({
+        "code": ["1001"],
+        "price": [1000.0],
+        "verdict": ["BUY"],
+        "quant_score": [85.0],
+    })
     stub_context.reporter.generate_reports.return_value = {"main_csv": "/tmp/dummy.csv"}
 
     with (
@@ -107,5 +122,16 @@ def test_integration_phase_data_contract_violation(stub_context):
         "verdict": ["BUY", "WATCH"]
     })
     phase = IntegrationPhase(stub_context)
-    with pytest.raises(AssertionError, match="Data Contract Violation"):
+    with pytest.raises(AssertionError, match="Data Contract Violation: Null values detected"):
         phase.execute(df_invalid)
+
+
+def test_data_contract_guard_raises_on_missing_column(stub_context):
+    """異常系: 必須列（price 列など）自体が存在しない DataFrame で AssertionError がスローされること"""
+    df_missing_col = pl.DataFrame({
+        "code": ["1001"],
+        "verdict": ["BUY"],
+    })
+    phase = IntegrationPhase(stub_context)
+    with pytest.raises(AssertionError, match="Missing required essential columns"):
+        phase.execute(df_missing_col)

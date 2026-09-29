@@ -237,6 +237,12 @@ class PreFilter:
         if "zero_volume_days_5d" not in df.columns:
             df = df.with_columns(pl.lit(0).alias("zero_volume_days_5d"))
 
+        if "latest_trade_date" not in df.columns:
+            df = df.with_columns(pl.lit("2026-03-27").alias("latest_trade_date"))
+
+        if "is_recent_trade" not in df.columns:
+            df = df.with_columns(pl.lit(True).alias("is_recent_trade"))
+
         passed_rows = []
         rejected_rows = []
 
@@ -253,53 +259,7 @@ class PreFilter:
             is_recent_trade = row.get("is_recent_trade")
             sector = str(row.get("sector", "Other"))
 
-            # 1. データ鮮度不足判定（最新市場日より大幅に古い取引停止銘柄）
-            if is_recent_trade is False and latest_trade_date is not None:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "データ鮮度不足 (取引停止)",
-                        "filter_detail": f"最終取引日 ({latest_trade_date}) が直近5営業日範囲外",
-                    }
-                )
-                continue
-
-            # 2. 売買不能判定（直近5営業日出来高ゼロ）
-            if zero_days is not None and zero_days > 0:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "商い不成立",
-                        "filter_detail": f"直近5営業日以内に出来高ゼロ日あり ({zero_days}日)",
-                    }
-                )
-                continue
-
-            # 3. 極小流動性トラップ判定（20日平均売買代金 < 3,000万円）
-            if avg_tv is not None and avg_tv < min_tv_20d:
-                tv_man = avg_tv / 10_000.0
-                limit_man = min_tv_20d / 10_000.0
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "極小流動性トラップ",
-                        "filter_detail": f"20日平均売買代金不足 ({tv_man:,.0f}万円 < {limit_man:,.0f}万円)",
-                    }
-                )
-                continue
-
-            # 4. 超低位ボロ株判定（株価 < 50円）
-            if price is not None and price < min_price:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "超低位ボロ株",
-                        "filter_detail": f"株価基準未満 ({price:,.0f}円 < {min_price:,.0f}円)",
-                    }
-                )
-                continue
-
-            # 5. 株価データ欠損判定（市場データ取得不能）
+            # 1. 株価データ欠損判定（市場データ取得不能: OHLCV未取得銘柄を最優先隔離）
             if price is None:
                 rejected_rows.append(
                     {
@@ -310,24 +270,91 @@ class PreFilter:
                 )
                 continue
 
-            # 6. 重要財務指標未開示 / 算出不能判定（自己資本比率等の必須財務データ欠損）
+            # 2. 取引日・市場データ欠損判定（最終取引日が存在しない、または取引停止）
+            if latest_trade_date is None or is_recent_trade is False:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "データ鮮度不足 (取引停止)",
+                        "filter_detail": (
+                            "最終取引日データ欠損"
+                            if latest_trade_date is None
+                            else f"最終取引日 ({latest_trade_date}) が直近5営業日範囲外"
+                        ),
+                    }
+                )
+                continue
+
+            # 3. 売買不能判定（直近5営業日出来高データ欠損、または出来高ゼロ日あり）
+            if zero_days is None or zero_days > 0:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "商い不成立",
+                        "filter_detail": (
+                            "出来高時系列データ欠損"
+                            if zero_days is None
+                            else f"直近5営業日以内に出来高ゼロ日あり ({zero_days}日)"
+                        ),
+                    }
+                )
+                continue
+
+            # 4. 極小流動性トラップ判定（売買代金欠損、または20日平均売買代金 < 3,000万円）
+            if avg_tv is None or avg_tv < min_tv_20d:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "極小流動性トラップ",
+                        "filter_detail": (
+                            "売買代金データ欠損/算出不能"
+                            if avg_tv is None
+                            else f"20日平均売買代金不足 ({avg_tv / 10_000.0:,.0f}万円 < {min_tv_20d / 10_000.0:,.0f}万円)"
+                        ),
+                    }
+                )
+                continue
+
+            # 5. 超低位ボロ株判定（株価 < 50円）
+            if price < min_price:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "超低位ボロ株",
+                        "filter_detail": f"株価基準未満 ({price:,.0f}円 < {min_price:,.0f}円)",
+                    }
+                )
+                continue
+
+            # 6. 構造的破綻（債務超過判定）: 純資産マイナス または 自己資本比率 <= 0
+            net_assets = row.get("net_assets")
+            is_insolvent = False
+            insolvency_detail = ""
+
+            if net_assets is not None and net_assets <= 0:
+                is_insolvent = True
+                insolvency_detail = f"純資産マイナス ({net_assets:,.0f}円)"
+            elif equity_ratio is not None and equity_ratio <= min_eq_ratio:
+                is_insolvent = True
+                insolvency_detail = f"自己資本比率マイナス/ゼロ ({equity_ratio:.1f}% <= {min_eq_ratio:.1f}%)"
+
+            if is_insolvent:
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "構造的破綻 (債務超過)",
+                        "filter_detail": insolvency_detail,
+                    }
+                )
+                continue
+
+            # 7. 重要財務指標未開示 / 算出不能判定（自己資本比率等の必須財務データ欠損）
             if equity_ratio is None:
                 rejected_rows.append(
                     {
                         **row,
                         "filter_reason": "重要指標未開示/算出不能",
                         "filter_detail": "自己資本比率等の財務諸表データ未開示または欠損",
-                    }
-                )
-                continue
-
-            # 7. 構造的破綻（債務超過判定）
-            if equity_ratio <= min_eq_ratio:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "構造的破綻 (債務超過)",
-                        "filter_detail": f"純資産マイナス / 自己資本比率 ({equity_ratio:.1f}% <= {min_eq_ratio:.1f}%)",
                     }
                 )
                 continue

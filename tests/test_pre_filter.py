@@ -322,4 +322,79 @@ def test_pre_filter_missing_market_price():
     assert "市場価格データ欠損" in result.rejected_df["filter_detail"][0]
 
 
+def test_pre_filter_rejects_missing_liquidity_data():
+    """売買代金や出来高データが欠損 (None) している銘柄がスルーされずに除外隔離されることを検証"""
+    # 出来高ゼロ日数が None のケース
+    df_missing_zero_days = pl.DataFrame(
+        {
+            "code": ["1010"],
+            "name": ["出来高欠損株"],
+            "sector": ["情報・通信業"],
+            "market": ["Standard"],
+            "price": [1000.0],
+            "equity_ratio": [50.0],
+            "sales": [1000.0],
+            "operating_cf": [100.0],
+            "avg_trading_value_20d": [50_000_000.0],
+            "zero_volume_days_5d": [None],
+            "latest_trade_date": ["2026-09-24"],
+            "is_recent_trade": [True],
+        }
+    )
+    res1 = PreFilter.evaluate(df_missing_zero_days)
+    assert res1.passed_df.is_empty()
+    assert len(res1.rejected_df) == 1
+    assert res1.rejected_df["filter_reason"][0] == "商い不成立"
+    assert "出来高時系列データ欠損" in res1.rejected_df["filter_detail"][0]
+
+    # 売買代金が None のケース
+    df_missing_tv = pl.DataFrame(
+        {
+            "code": ["1011"],
+            "name": ["売買代金欠損株"],
+            "sector": ["情報・通信業"],
+            "market": ["Standard"],
+            "price": [1000.0],
+            "equity_ratio": [50.0],
+            "sales": [1000.0],
+            "operating_cf": [100.0],
+            "avg_trading_value_20d": [None],
+            "zero_volume_days_5d": [0],
+            "latest_trade_date": ["2026-09-24"],
+            "is_recent_trade": [True],
+        }
+    )
+    res2 = PreFilter.evaluate(df_missing_tv)
+    assert res2.passed_df.is_empty()
+    assert len(res2.rejected_df) == 1
+    assert res2.rejected_df["filter_reason"][0] == "極小流動性トラップ"
+    assert "売買代金データ欠損" in res2.rejected_df["filter_detail"][0]
+
+
+def test_pre_filter_insolvency_priority_over_unopened():
+    """自己資本比率が未開示(None)でも純資産がマイナスの銘柄は未開示ではなく債務超過として優先分類されること"""
+    df_insolvent = pl.DataFrame(
+        {
+            "code": ["1020"],
+            "name": ["隠れ債務超過株"],
+            "sector": ["製造業"],
+            "market": ["Standard"],
+            "price": [300.0],
+            "equity_ratio": [None],  # 自己資本比率は未開示
+            "net_assets": [-500_000_000.0],  # 純資産はマイナス5億円
+            "sales": [1000.0],
+            "operating_cf": [100.0],
+            "avg_trading_value_20d": [50_000_000.0],
+            "zero_volume_days_5d": [0],
+            "latest_trade_date": ["2026-09-24"],
+            "is_recent_trade": [True],
+        }
+    )
+    result = PreFilter.evaluate(df_insolvent)
+    assert result.passed_df.is_empty()
+    assert len(result.rejected_df) == 1
+    assert result.rejected_df["filter_reason"][0] == "構造的破綻 (債務超過)"
+    assert "純資産マイナス" in result.rejected_df["filter_detail"][0]
+
+
 

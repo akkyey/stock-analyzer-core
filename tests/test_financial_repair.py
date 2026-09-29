@@ -78,3 +78,22 @@ def test_financial_repair_turnaround_detection():
     # 通常黒字銘柄
     assert repaired["is_turnaround"][1] == 0
     assert repaired["turnaround_status"][1] == "normal"
+
+
+def test_financial_repair_direct_equity_ratio_calculation():
+    """自己資本比率が未設定でも、total_assetsとnet_assetsから直接計算補完されること"""
+    df = pl.DataFrame(
+        {
+            "code": ["1001", "1002"],
+            "equity_ratio": [None, 30.0],
+            "total_assets": [10_000_000_000.0, 50_000_000_000.0],
+            "net_assets": [4_000_000_000.0, 15_000_000_000.0],
+        }
+    )
+
+    repaired = FinancialRepairService.repair(df)
+    # 40億 / 100億 * 100 = 40.0%
+    assert repaired["equity_ratio"][0] == 40.0
+    # 既存の 30.0% はそのまま維持
+    assert repaired["equity_ratio"][1] == 30.0
+

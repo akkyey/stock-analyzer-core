@@ -160,16 +160,20 @@ class IntegrationPhase(BasePhase):
             return
 
         essential_cols = ["code", "price", "verdict"]
-        cols = df.columns
-        check_cols = [c for c in essential_cols if c in cols]
+        cols = set(df.columns)
+        missing_cols = set(essential_cols) - cols
 
-        if check_cols:
-            null_exprs = [pl.col(c).is_null().sum().alias(c) for c in check_cols]
-            null_counts = df.select(null_exprs).to_dicts()[0]
-            invalid_cols = {col: count for col, count in null_counts.items() if count > 0}
-            if invalid_cols:
-                err_msg = f"Data Contract Violation: Null values detected in essential columns: {invalid_cols}"
-                self.log_error(err_msg)
-                raise AssertionError(err_msg)
-            self.log_info(f"✅ Data contract verified: 0.00% missing values across essential columns ({check_cols}).")
+        if missing_cols:
+            err_msg = f"Data Contract Violation: Missing required essential columns in DataFrame: {sorted(missing_cols)}"
+            self.log_error(err_msg)
+            raise AssertionError(err_msg)
+
+        null_exprs = [pl.col(c).is_null().sum().alias(c) for c in essential_cols]
+        null_counts = df.select(null_exprs).to_dicts()[0]
+        invalid_cols = {col: count for col, count in null_counts.items() if count > 0}
+        if invalid_cols:
+            err_msg = f"Data Contract Violation: Null values detected in essential columns: {invalid_cols}"
+            self.log_error(err_msg)
+            raise AssertionError(err_msg)
+        self.log_info(f"✅ Data contract verified: 0.00% missing values across essential columns ({essential_cols}).")
 
