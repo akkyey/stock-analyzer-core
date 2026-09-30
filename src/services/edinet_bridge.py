@@ -49,7 +49,7 @@ class EdinetBridge:
                 data["code"] = code
 
                 # スキーマに合わせたマッピング
-                # parser からは net_profit, prev_net_profit, shares_outstanding, total_assets, net_assets などが来ている
+                # parser からは net_profit, prev_net_profit, shares_outstanding, total_assets, net_assets, eps, bps, dps などが来ている
                 record = {
                     "code": code,
                     "net_profit": data.get("net_profit"),
@@ -59,6 +59,9 @@ class EdinetBridge:
                     "operating_income": data.get("operating_income"),
                     "total_assets": data.get("total_assets"),
                     "net_assets": data.get("net_assets"),
+                    "eps": data.get("eps"),
+                    "bps": data.get("bps"),
+                    "dps": data.get("dps"),
                 }
 
                 # operating_margin の計算 (パルサー側でやっていない場合の補填)

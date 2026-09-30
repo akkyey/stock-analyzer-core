@@ -27,5 +27,8 @@
     "safety_multiplier": 1.0,
     "dividend_multiplier": 1.0,
     "technical_multiplier": 1.0
-  }
+  },
+
+  "_comment_verdict_mode": "判定表記モード: 'grade' (客観的格付け Grade S/A/B/C: デフォルト・金商法配慮), 'legacy' (Qiita Part 2 互換 STRONG_BUY/BUY/WATCH/PASS)",
+  "verdict_mode": "grade"
 }

@@ -248,9 +248,13 @@ class DuckDBRepository:
                     doc_type VARCHAR,
                     submit_date VARCHAR,
                     is_annual BOOLEAN DEFAULT FALSE,
+                    status VARCHAR DEFAULT 'success',
                     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            conn.execute(
+                "ALTER TABLE edinet_documents ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'success'"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_edinet_docs_code ON edinet_documents(code)"
             )
@@ -392,16 +396,17 @@ class DuckDBRepository:
         doc_type: Optional[str] = None,
         submit_date: Optional[str] = None,
         is_annual: bool = False,
+        status: str = "success",
     ) -> None:
-        """EDINET 書類の処理完了を記録する"""
+        """EDINET 書類の処理ステータスを記録する (success, parse_failed, error 等)"""
         try:
             with self.client.get_connection() as conn:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO edinet_documents (doc_id, code, doc_type, submit_date, is_annual, processed_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    INSERT OR REPLACE INTO edinet_documents (doc_id, code, doc_type, submit_date, is_annual, status, processed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
-                    [doc_id, code, doc_type, submit_date, is_annual],
+                    [doc_id, code, doc_type, submit_date, is_annual, status],
                 )
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to record EDINET doc {doc_id}: {e}")

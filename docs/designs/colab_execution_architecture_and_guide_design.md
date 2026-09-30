@@ -48,15 +48,15 @@ Colab のランタイムと Google Drive 連携においては、一般的なロ
 flowchart TD
     subgraph Persistent_Layer ["【永続層】Google Drive (/content/drive/MyDrive/StockAnalyzer/)"]
         direction TB
-        P_DB[("edinet_metadata.sqlite<br>(軽量メタデータ単一DB: 数MB)")]
+        P_DB[("stock_analyzer.duckdb<br>(財務・開示メタデータ単一DB: 数MB〜数十MB)")]
         P_Out["最終レポート CSV<br>(daily_report.csv / uncalculable_stocks.csv)"]
     end
 
     subgraph Working_Layer ["【作業層】Colab 内蔵 超高速SSD (/content/working/)"]
         direction TB
-        W_Pull["1. 起動時 Pull<br>(Drive から SQLite をローカルSSDへコピー & 健全性検証)"]
-        W_Exec["2. パイプライン実行<br>・SQLite 更新トランザクション<br>・生ZIP DL ➔ パース ➔ 即時 unlink<br>・Polars メモリ集計 & 3層スクリーニング"]
-        W_Push["3. 終了時 Push<br>(Drive へアトミック同期 & flush_and_unmount)"]
+        W_Pull["1. 起動時 Pull<br>(Drive から DuckDB をローカルSSDへコピー & 健全性検証)"]
+        W_Exec["2. パイプライン実行<br>・DuckDB 更新 (edinet_documents テーブル管理)<br>・生ZIP DL ➔ パース ➔ 即時 unlink<br>・Polars メモリ集計 & 3層スクリーニング"]
+        W_Push["3. 終了時 Push<br>(CHECKPOINT 実行 ➔ Drive へアトミック同期 & flush_and_unmount)"]
         W_Pull --> W_Exec --> W_Push
     end
 
@@ -69,26 +69,26 @@ flowchart TD
 
 | 領域 | パス | 格納対象 | 特徴・管理方針 |
 | :--- | :--- | :--- | :--- |
-| **作業層**<br>(Local SSD) | `/content/working/` | ・実行用 SQLite DB<br>・ダウンロードした生 ZIP<br>・Polars 中間テーブル | **Colab 内蔵 高速ローカル SSD**。<br>すべての高頻度 I/O はここで行い、生 ZIP はパース直後に即時削除（`unlink`）してディスクを圧迫させない。セッション切断で破棄される前提の一時領域。 |
-| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/` | ・`cache/edinet_metadata.sqlite`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB（数MB）と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB を消費させない（数十MB未満）。 |
+| **作業層**<br>(Local SSD) | `/content/working/` | ・実行用 DuckDB (`cache/stock_analyzer.duckdb`)<br>・ダウンロードした生 ZIP<br>・Polars 中間テーブル | **Colab 内蔵 高速ローカル SSD**。<br>すべての高頻度 I/O はここで行い、生 ZIP はパース直後に即時削除（`unlink`）してディスクを圧迫させない。セッション切断で破棄される前提の一時領域。 |
+| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/` | ・`cache/stock_analyzer.duckdb`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB を消費させない（数十MB未満）。 |
 
 ### 3.2 同期ライフサイクル（Stage-and-Sync 規約）
 1. **[Pull Phase: 実行開始時 & 整合性検証（3段構えの復元）]**:
-   - Google Drive 上に `cache/edinet_metadata.sqlite` が存在するか確認。
+   - Google Drive 上に `cache/stock_analyzer.duckdb` が存在するか確認。
    - **整合性検証と 3 段構えの自動復旧**:
-     - **第1段（メインDB検証）**: Drive 上にメイン DB が存在する場合、作業層（`/content/working/cache/`）へコピーし、`PRAGMA quick_check` を実行。結果が `ok` であればそのまま採用。
-     - **第2段（.bak 検証と復元）**: メイン DB が存在しない、または `quick_check` で破損が検知された場合、Drive 上のバックアップ `cache/edinet_metadata.sqlite.bak` を作業層へコピーし、**この `.bak` に対しても `PRAGMA quick_check` を実行**。健全であれば警告ログ（`⚠️ メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました`）を出力して採用。
-     - **第3段（新規初期化フォールバック）**: メイン DB・バックアップともに未存在、または**両方とも破損している場合**は、破損ファイルを破棄して新規 SQLite DB を初期化作成（`⚠️ バックアップDBも破損または未存在のため、DBを新規初期化します`）。
+     - **第1段（メインDB検証）**: Drive 上にメイン DB が存在する場合、作業層（`/content/working/cache/`）へコピーし、主要テーブル（`stocks` 等）の読み込み検証を実行。正常であればそのまま採用。
+     - **第2段（.bak 検証と復元）**: メイン DB が存在しない、または検証で破損が検知された場合、Drive 上のバックアップ `cache/stock_analyzer.duckdb.bak` を作業層へコピーし、**この `.bak` に対しても健全性検証を実行**。健全であれば警告ログ（`⚠️ メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました`）を出力して採用。
+     - **第3段（新規初期化フォールバック）**: メイン DB・バックアップともに未存在、または**両方とも破損している場合**は、破損ファイルを破棄して初期シードから新規 DuckDB を初期化作成（`⚠️ バックアップDBも破損または未存在のため、DBを新規初期化します`）。
 2. **[Execution Phase: パイプライン実行中]**:
    - パイプライン本体には作業層のローカルパス（`/content/working/`）のみを環境変数 `STOCK_ANALYZER_BASE_DIR` として渡す（※Google Driveのパスは絶対に渡さない）。
-   - すべての SQLite トランザクション、ZIP 展開、Polars 集計はローカル SSD の爆速 I/O で完結。
+   - すべての DuckDB トランザクション、ZIP 展開、Polars 集計はローカル SSD の爆速 I/O で完結。
 3. **[Push Phase: 実行完了時・アトミック同期・フラッシュ & バックアップ]**:
-   - 正常終了時のみ、更新された `edinet_metadata.sqlite` および生成された CSV を Google Drive 側へ安全に同期する。
-   - **SQLite WAL モード対策**:
-     - SQLite を WAL（Write-Ahead Logging）モードで運用している場合、コピー前に `PRAGMA wal_checkpoint(TRUNCATE)` を明示的に実行するか、全コネクションを完全に `close()` して `-wal` / `-shm` ファイルの変更を作業層のメインDBにフラッシュ（結合）した上でコピーを行う。
+   - 正常終了時のみ、更新された `stock_analyzer.duckdb` および生成された CSV を Google Drive 側へ安全に同期する。
+   - **DuckDB CHECKPOINT 対策**:
+     - コピー前に `CHECKPOINT` クエリを明示的に実行し、WAL の変更を確実にメインDBファイルへ完全にフラッシュ結合させた上でコピーを行う。
    - **安全な世代退避とアトミック書き込み**:
-     - 既存の健全 DB を上書き・移動するのではなく、Drive 上で `cache/edinet_metadata.sqlite.bak` へ**コピー（`shutil.copy2`）して 1 世代分退避**（置き換え処理中の無保護な隙間時間をゼロにする）。
-     - 作業層の最新 DB を Drive 上の `.tmp` ファイル（`edinet_metadata.sqlite.tmp`）に書き出した上で、`os.replace` によりアトミックに本番ファイルへ置き換える。
+     - 既存の健全 DB を上書き・移動するのではなく、Drive 上で `cache/stock_analyzer.duckdb.bak` へ**コピー（`shutil.copy2`）して 1 世代分退避**（置き換え処理中の無保護な隙間時間をゼロにする）。
+     - 作業層の最新 DB を Drive 上の `.tmp` ファイル（`stock_analyzer.duckdb.tmp`）に書き出した上で、`os.replace` によりアトミックに本番ファイルへ置き換える（Drive 直下への不要な重複コピーは行わない）。
    - **非同期アップロードの完了保証（フラッシュと副作用への配慮）**:
      - FUSE 経由の書き込みはバックグラウンドで非同期にクラウドへ同期されるため、Push 完了直後に `from google.colab import drive; drive.flush_and_unmount()` を呼び出し、Google Drive クラウド側へのアップロード完了を確実に待機・保証する。
      - **アンマウントに伴う重要規約**: `flush_and_unmount()` 実行後は `/content/drive` へのアクセスが遮断される。そのため、**後続の Step 4（プレビュー）および Step 5（ダウンロード）は必ずローカル作業層（`/content/working/output/`）を参照する**設計とする。
@@ -173,11 +173,11 @@ os.environ["EDINET_API_KEY"] = edinet_api_key
 
       drive.mount("/content/drive")
   ```
-- 作業層（`/content/working/`）上でパイプラインを実行。すべての SQLite 書き込み・生 ZIP 展開パース・Polars 演算を超高速 SSD 上で完結させる。
-  - 初回実行時：過去30日分の初期スキャン（約 3〜5 分）
-  - 2回目以降：ローカル差分キャッシュ活用（約 1 分 40 秒）
+- 作業層（`/content/working/`）上でパイプラインを実行。すべての DuckDB 書き込み・生 ZIP 展開パース・Polars 演算を超高速 SSD 上で完結させる。
+  - 初回実行時：東証全3,920社の市場データ初期取得・スクリーニング（約 8〜10 分）
+  - 2回目以降：Google Drive 差分キャッシュ活用（約 1 分 40 秒 ※専用環境実測目安）
 - **Stage-and-Sync (Push)**:
-  - SQLite コネクションを close / checkpoint フラッシュ。
+  - DuckDB `CHECKPOINT` を実行し WAL を完全フラッシュ。
   - Drive 上の既存 DB を `.bak` へコピー退避（`shutil.copy2`）した上で、`.tmp` 経由でアトミックに最新 DB と CSV 2 ファイルを Google Drive へ同期。
   - 転送直後に `drive.flush_and_unmount()` を呼び出し、Google Drive の非同期クラウド同期完了を確実に待機・保証。
 - 完了時に処理時間を明示し、読者に「速さ」を実感させる演出。

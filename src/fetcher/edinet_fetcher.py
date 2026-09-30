@@ -60,6 +60,61 @@ class EdinetFetcher:
 
         return headers, params
 
+    @staticmethod
+    def _validate_auth_response(
+        status_code: int,
+        data: Optional[Dict[str, Any]] = None,
+        text: Optional[str] = None,
+    ) -> None:
+        """EDINET API の認証エラーを厳密に判定し、検知時は EdinetAuthenticationError を発生させる。
+
+        EDINET API v2 は無効な API キーに対して HTTP 200 で
+        {"StatusCode": 401, "message": "Access denied due to invalid subscription key..."}
+        を返すため、HTTP ステータスコードだけでなくレスポンスボディのトップレベル StatusCode / statusCode も検証する。
+        """
+        if status_code in (401, 403):
+            raise EdinetAuthenticationError(
+                f"EDINET APIキーの認証に失敗しました (HTTP {status_code})。APIキーを確認してください。"
+            )
+
+        if data and isinstance(data, dict):
+            # 1. トップレベル StatusCode / statusCode (EDINET v2 API の実応答)
+            body_code = data.get("StatusCode") or data.get("statusCode")
+            if str(body_code) in ("401", "403"):
+                msg = data.get("message", "Invalid subscription key")
+                raise EdinetAuthenticationError(
+                    f"EDINET APIキーの認証に失敗しました (StatusCode {body_code}: {msg})。APIキーを確認してください。"
+                )
+
+            # 2. metadata.status
+            meta_status = (
+                data.get("metadata", {}).get("status")
+                if isinstance(data.get("metadata"), dict)
+                else None
+            )
+            if str(meta_status) in ("401", "403"):
+                raise EdinetAuthenticationError(
+                    f"EDINET APIキーの認証に失敗しました (metadata status {meta_status})。APIキーを確認してください。"
+                )
+
+            # 3. message 内の認証拒否キーワード
+            msg_str = str(data.get("message", "")).lower()
+            if "access denied" in msg_str or "invalid subscription key" in msg_str:
+                raise EdinetAuthenticationError(
+                    f"EDINET APIキーの認証に失敗しました ({data.get('message')})。APIキーを確認してください。"
+                )
+
+        if text:
+            text_lower = text.lower()
+            if (
+                "access denied due to invalid subscription key" in text_lower
+                or '"statuscode": 401' in text_lower
+                or '"statuscode": 403' in text_lower
+            ):
+                raise EdinetAuthenticationError(
+                    "EDINET APIキーの認証に失敗しました (レスポンスに認証拒否が含まれています)。APIキーを確認してください。"
+                )
+
     def fetch_documents_by_date(self, date_str: str) -> Dict[str, Any]:
         """指定日の書類一覧を取得する (v2 API)"""
         url = f"{self.BASE_URL}/documents.json"
@@ -68,17 +123,10 @@ class EdinetFetcher:
         self.logger.info(f"🌐 Fetching EDINET documents for {date_str}...")
         try:
             response = requests.get(url, params=params, headers=headers, timeout=30)
-            if response.status_code in (401, 403):
-                raise EdinetAuthenticationError(
-                    f"EDINET APIキーの認証に失敗しました (HTTP {response.status_code})。APIキーを確認してください。"
-                )
+            self._validate_auth_response(response.status_code, text=response.text)
             response.raise_for_status()
             data = cast(Dict[str, Any], response.json())
-            status = data.get("metadata", {}).get("status")
-            if str(status) in ("401", "403"):
-                raise EdinetAuthenticationError(
-                    f"EDINET APIキーの認証に失敗しました (metadata status {status})。APIキーを確認してください。"
-                )
+            self._validate_auth_response(response.status_code, data=data)
             return data
         except EdinetAuthenticationError:
             raise
@@ -136,13 +184,48 @@ class EdinetFetcher:
                 raise EdinetAuthenticationError(
                     f"EDINET APIキーの認証に失敗しました (HTTP {response.status_code})。APIキーを確認してください。"
                 )
+
+            # Content-Type が JSON の場合（HTTP 200 で返されるエラー JSON を検知）
+            content_type = response.headers.get("Content-Type", "")
+            if "application/json" in content_type or "text/json" in content_type:
+                try:
+                    data = response.json()
+                    self._validate_auth_response(response.status_code, data=data)
+                except EdinetAuthenticationError:
+                    raise
+                except Exception:
+                    pass
+
             response.raise_for_status()
 
             os.makedirs(save_dir, exist_ok=True)
             file_path = os.path.join(save_dir, f"{doc_id}.zip")
             with open(file_path, "wb") as f:
+                first_chunk = True
                 for chunk in response.iter_content(chunk_size=8192):
+                    if first_chunk:
+                        first_chunk = False
+                        # ストリーミング開始部分が JSON エラー文字列である場合の検知
+                        stripped = chunk.strip()
+                        if stripped.startswith(b'{"StatusCode"') or stripped.startswith(b'{"statusCode"'):
+                            try:
+                                import json
+                                data = json.loads(chunk.decode("utf-8", errors="ignore"))
+                                self._validate_auth_response(response.status_code, data=data)
+                            except EdinetAuthenticationError:
+                                raise
+                            except Exception:
+                                pass
                     f.write(chunk)
+
+            # ファイルサイズが小さく、有効な ZIP ヘッダー (PK\x03\x04) でない場合も検証
+            if os.path.exists(file_path) and os.path.getsize(file_path) < 1024:
+                with open(file_path, "rb") as test_f:
+                    header_bytes = test_f.read(4)
+                if header_bytes != b"PK\x03\x04":
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as err_f:
+                        content_str = err_f.read()
+                    self._validate_auth_response(response.status_code, text=content_str)
 
             return file_path
         except EdinetAuthenticationError:

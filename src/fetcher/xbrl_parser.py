@@ -8,7 +8,7 @@ import lxml.etree as et
 class XbrlParser:
     """EDINET XBRL パーサー (Enhanced for Turbo Fidelity)"""
 
-    # 主要なタクソノミ名前空間とタグ名のマッピング (J-GAAP想定)
+    # 主要なタクソノミ名前空間とタグ名のマッピング (J-GAAP および IFRS 想定)
     TAGS = {
         "sales": ["NetSales", "OperatingRevenue", "Revenue"],
         "operating_income": ["OperatingIncome", "OperatingProfit"],
@@ -19,7 +19,32 @@ class XbrlParser:
         ],
         "total_assets": ["TotalAssets", "Assets"],
         "net_assets": ["NetAssets", "Equity"],
-        "shares_outstanding": ["OrdinarySharesNumber"],  # PER修復用
+        "shares_outstanding": [
+            "TotalNumberOfIssuedSharesCommonStockSummaryOfBusinessResults",
+            "TotalNumberOfIssuedSharesSummaryOfBusinessResults",
+            "NumberOfIssuedSharesAsOfFiscalYearEnd",
+            "TotalNumberOfIssuedShares",
+            "IssuedShares",
+            "NumberOfIssuedSharesAtEndPeriodTreasurySharesDeducted",
+            "NumberOfSharesIssued",
+            "OrdinarySharesNumber",
+            "AverageNumberOfShares",
+        ],
+        "eps": [
+            "BasicEarningsLossPerShareSummaryOfBusinessResults",
+            "BasicEarningsLossPerShare",
+        ],
+        "bps": [
+            "NetAssetsPerShareSummaryOfBusinessResults",
+            "NetAssetsPerShare",
+            "BookValuePerShare",
+            "EquityAttributableToOwnersOfParentPerShare",
+            "EquityPerShare",
+        ],
+        "dps": [
+            "DividendPaidPerShareSummaryOfBusinessResults",
+            "CashDividendsPerShare",
+        ],
     }
 
     def __init__(self):

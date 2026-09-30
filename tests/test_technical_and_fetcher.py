@@ -141,11 +141,40 @@ def test_mask_api_key_and_authentication_error(monkeypatch):
     with patch("requests.get") as mock_get:
         mock_resp = MagicMock()
         mock_resp.status_code = 401
+        mock_resp.text = '{"metadata": {"status": "401", "message": "Unauthorized"}}'
         mock_resp.json.return_value = {"metadata": {"status": "401", "message": "Unauthorized"}}
         mock_get.return_value = mock_resp
 
         with pytest.raises(EdinetAuthenticationError, match="認証に失敗しました"):
             ef.fetch_documents_by_date("2026-06-25")
+
+    # 3. EDINET API v2 の実応答: HTTP 200 かつ top-level StatusCode: 401 で EdinetAuthenticationError が送出されること
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = '{"StatusCode": 401, "message": "Access denied due to invalid subscription key. Make sure to provide a valid key for an active subscription."}'
+        mock_resp.json.return_value = {
+            "StatusCode": 401,
+            "message": "Access denied due to invalid subscription key. Make sure to provide a valid key for an active subscription."
+        }
+        mock_get.return_value = mock_resp
+
+        with pytest.raises(EdinetAuthenticationError, match="認証に失敗しました"):
+            ef.fetch_documents_by_date("2026-06-25")
+
+    # 4. download_xbrl における HTTP 200 エラー JSON レスポンスの検知
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.json.return_value = {
+            "StatusCode": 401,
+            "message": "Access denied due to invalid subscription key."
+        }
+        mock_get.return_value = mock_resp
+
+        with pytest.raises(EdinetAuthenticationError, match="認証に失敗しました"):
+            ef.download_xbrl("S100TEST", "/tmp/dummy_save_dir")
 
 
 

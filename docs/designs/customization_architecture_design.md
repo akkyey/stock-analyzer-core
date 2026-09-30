@@ -8,7 +8,8 @@
 
 ### 遵守すべき 4 大原則
 1. **Zero-Break Principle（既存動作の 100% 保証）**:
-   設定を一切与えない場合（`config=None`）および全乗数が 1.0 の場合、従来の Qiita 前後編記事とまったく同一の出力（売買代金 3,000万円、株価 50円、同一のスコアリング結果および Verdict）が返る。
+   設定を一切与えない場合（`config=None`）および全乗数が 1.0 の場合、従来の Qiita 前後編記事とまったく同一の数値計算・足切り基準・配点結果（売買代金 3,000万円、株価 50円、同一のスコア結果）が返る。
+   判定名（Verdict）については、金融商品取引法上のコンプライアンス（投資助言規制配慮）に基づき、標準出力を客観的グレード `Grade S / Grade A / Grade B / Grade C` としつつ、設定で `{"verdict_mode": "legacy"}` を指定することで Qiita 記事と同一の判定文字列 (`STRONG_BUY / BUY / WATCH / PASS`) を完全再現可能とする。
 2. **Interface Preservation（既存シグネチャの温存）**:
    内部コア `PreFilter.evaluate(df_candidates, df_liquidity, config)` およびコンビニエンスラッパー `PreFilter.apply_filter(df_candidates, df_liquidity, config)` の既存インターフェースを変更せず、引数 `config` の内部キーを拡張する形で設計する。
 3. **Layered Fallback（多層フォールバック機構）**:
@@ -275,13 +276,13 @@ if total_weighted_max <= 0:
 * **カスタム乗数適用時の加重平均正規化式**:
   各カテゴリの基礎スコアを $S_i$、基礎最大配点を $M_i$（収益:30, 割安:25, 安全:15, 配当:10, テク:20）、乗数を $w_i$ としたとき：
   $$\text{Normalized Raw Score} = \frac{\sum (S_i \times w_i)}{\sum (M_i \times w_i)} \times 100.0$$
-  $$\text{Quant Score (Agent\_Score カラム)} = \text{round}(\min(98.0, \max(15.0, \text{Normalized Raw Score})), 1)$$
-  ※出力 CSV のカラム名は前作とのスキーマ互換維持のため `Agent_Score` を継続使用する。
+  $$\text{Quant Score (Score カラム)} = \text{round}(\min(98.0, \max(15.0, \text{Normalized Raw Score})), 1)$$
+  ※出力 CSV のカラム名は `Score`（旧スキーマとの互換性維持のため、内部で `Agent_Score` としても透過的にアクセス可能）。
 
 > [!IMPORTANT]
-> **得点分布シフトと BUY 件数の変動（読者向け解説の要点）**:  
+> **得点分布シフトと Grade A（適格群）件数の変動（読者向け解説の要点）**:  
 > 加重平均正規化によって保たれるのは**スコアの尺度（0〜100点スケール）**であり、全銘柄の「得点分布」は重み付けによってダイナミックに変化する。  
-> 例えば `dividend_focus`（高配当重視）では、利回り 5.0% 以上の満点に達する銘柄が市場全体でも少数であるため、全体平均スコアが下がり、結果として BUY 件数（65.0点以上）が標準の `balanced` より減少する傾向がある。これはバグではなく「高配当基準による厳格なスクリーニング効果」であり、読者向けドキュメントにも明記して問い合わせを防止する。
+> 例えば `dividend_focus`（高配当重視）では、利回り 5.0% 以上の満点に達する銘柄が市場全体でも少数であるため、全体平均スコアが下がり、結果として Grade A 以上（適格群: 65.0点以上、レガシー表記 BUY）の件数が標準の `balanced` より減少する傾向がある。これはバグではなく「高配当基準による厳格なスクリーニング効果」であり、読者向けドキュメントにも明記して問い合わせを防止する。
 
 ---
 
@@ -381,6 +382,8 @@ if not use_custom_json:
         "strategy_preset": strategy_preset,
         # 特定カテゴリのみピンポイントで上書きしたい場合は辞書で指定可能 (例: {"dividend_multiplier": 3.0})
         "scoring_multipliers": {},
+        # 判定表記モード: "grade" (デフォルト: Grade S/A/B/C) または "legacy" (Qiita互換: STRONG_BUY/BUY/WATCH/PASS)
+        "verdict_mode": "grade",
     }
 ```
 
@@ -398,4 +401,4 @@ if not use_custom_json:
 ### 5.2 拡張機能の検証
 1. **足切り緩和の検証**: `min_trading_value` を 1,000万円 に緩和した際、通過銘柄数が約 2,120社 から増加し、除外理由「極小流動性トラップ」の件数が正しく減少することを確認。
 2. **戦略プロファイルの有効性検証**: `dividend_focus` プリセットを選択した際、上位 10 銘柄の平均配当利回りが標準プリセットに比べて有意に上昇することを確認。
-3. **プリセット別 Verdict 件数分布の測定**: 各プリセット（`balanced`, `dividend_focus`, `deep_value`, `growth_quality`）において、BUY / STRONG_BUY 件数およびスコア平均値のシフトを測定し、各戦略の特性が正しく反映されていることを確認。
+3. **プリセット別 Verdict 件数分布の測定**: 各プリセット（`balanced`, `dividend_focus`, `deep_value`, `growth_quality`）において、Grade S / Grade A 件数（レガシーでの STRONG_BUY / BUY 件数）およびスコア平均値のシフトを測定し、各戦略の特性が正しく反映されていることを確認。

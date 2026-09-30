@@ -204,6 +204,19 @@ class TurboAcquisitionManager:
                     with open(result_file, "w") as f:
                         json.dump(item, f, indent=2, ensure_ascii=False)
                     return code, item
+                else:
+                    # パース失敗または財務項目未検出時も記録して次回以降の無駄な通信を防止
+                    try:
+                        duck_repo.record_edinet_document(
+                            doc_id=doc_id,
+                            code=code,
+                            doc_type=doc.get("docTypeCode"),
+                            submit_date=doc.get("submitDateTime", ""),
+                            is_annual=doc.get("is_annual", False),
+                            status="parse_failed",
+                        )
+                    except Exception:
+                        pass
 
             except EdinetAuthenticationError:
                 raise
@@ -211,6 +224,17 @@ class TurboAcquisitionManager:
                 self.logger.error(
                     f"❌ Pipeline failed for {code}: {mask_api_key(str(e))}"
                 )
+                try:
+                    duck_repo.record_edinet_document(
+                        doc_id=doc_id,
+                        code=code,
+                        doc_type=doc.get("docTypeCode"),
+                        submit_date=doc.get("submitDateTime", ""),
+                        is_annual=doc.get("is_annual", False),
+                        status="error",
+                    )
+                except Exception:
+                    pass
             return None
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:

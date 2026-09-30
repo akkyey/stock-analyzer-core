@@ -21,7 +21,10 @@ class StubOrchestratorContext:
     """オーケストレーション層のユニットテスト用スタブコンテキスト"""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.config = config or {"strategies": {"Balanced Strategy": {}}}
+        self.config = config or {
+            "strategies": {"Balanced Strategy": {}},
+            "fetcher": {"enable_edinet_turbo": False},
+        }
         self.logger = MagicMock()
         self.duck_repo = StubDuckRepository()
         self.funda_repo = MagicMock()

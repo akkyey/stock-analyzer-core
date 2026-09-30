@@ -200,11 +200,6 @@ class ColabSyncManager:
                 # .tmp 経由のアトミック置換
                 shutil.copy2(working_db, drive_tmp)
                 os.replace(drive_tmp, drive_db)
-                # Drive 直下にも最新 DB を複製（直下参照互換性担保）
-                try:
-                    shutil.copy2(working_db, drive_dir / filename)
-                except Exception:
-                    pass
                 logger.info(
                     f"✅ [Push] 最新 DB をアトミックに Google Drive へ同期しました: {drive_db}"
                 )
