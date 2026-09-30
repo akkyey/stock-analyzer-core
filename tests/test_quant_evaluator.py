@@ -26,7 +26,7 @@ def test_dead_stock_penalty():
     }
     score, verdict = QuantEvaluator.evaluate(dossier)
     assert score == 45.0
-    assert verdict == "PASS"
+    assert verdict in ["Grade C", "PASS"]
 
 
 def test_macd_none_neutral():
@@ -135,13 +135,13 @@ def test_one_off_profit_trap_suppression():
         },
     }
     score, verdict = QuantEvaluator.evaluate(dossier_trap)
-    # 本来満点(12点)なら80点超STRONG_BUYになるが、PER0点抑制かつゲートキーパーによりWATCHに制限されること
+    # 本来満点(12点)なら80点超STRONG_BUYになるが、PER0点抑制かつゲートキーパーによりGrade B / WATCHに制限されること
     assert score < 80.0
-    assert verdict == "WATCH"
+    assert verdict in ["Grade B", "WATCH"]
 
 
 def test_negative_roe_verdict_cap():
-    """実績ROEがマイナスの銘柄は、高スコアであっても Verdict が最大 WATCH に制限されること"""
+    """実績ROEがマイナスの銘柄は、高スコアであっても Verdict が最大 Grade B / WATCH に制限されること"""
     # 1. 総合評価関数 evaluate での検証
     dossier_neg_roe = {
         "name": "赤字回復過渡期銘柄",
@@ -161,11 +161,10 @@ def test_negative_roe_verdict_cap():
         },
     }
     score, verdict = QuantEvaluator.evaluate(dossier_neg_roe)
-    assert verdict in ["WATCH", "PASS"]
-    assert verdict != "BUY"
-    assert verdict != "STRONG_BUY"
+    assert verdict in ["Grade B", "Grade C", "WATCH", "PASS"]
+    assert verdict not in ["Grade A", "Grade S", "BUY", "STRONG_BUY"]
 
-    # 2. _determine_verdict ゲートキーパー単体での上限キャップ検証 (仮にスコアが75.0や85.0でもWATCHに落とされること)
+    # 2. _determine_verdict ゲートキーパー単体での上限キャップ検証 (仮にスコアが75.0や85.0でもGrade B / WATCHに落とされること)
     assert (
         QuantEvaluator._determine_verdict(
             85.0,
@@ -175,18 +174,18 @@ def test_negative_roe_verdict_cap():
             op_income=1000.0,
             net_profit=-500.0,
         )
-        == "WATCH"
+        in ["Grade B", "WATCH"]
     )
     assert (
         QuantEvaluator._determine_verdict(
             score=85.0, roe=-1.2, macd_status="Bullish", ma_div=0.0
         )
-        == "WATCH"
+        in ["Grade B", "WATCH"]
     )
 
 
 def test_bearish_momentum_gatekeeper():
-    """MACDが Bearish の銘柄は STRONG_BUY を禁止し、さらに-10%超の下降トレンドは WATCH に制限されること"""
+    """MACDが Bearish の銘柄は Grade S / STRONG_BUY を禁止し、さらに-10%超の下降トレンドは Grade B / WATCH に制限されること"""
     dossier_bearish = {
         "name": "モメンタム下落株",
         "code": "415A",
@@ -205,15 +204,15 @@ def test_bearish_momentum_gatekeeper():
         },
     }
     _, verdict = QuantEvaluator.evaluate(dossier_bearish)
-    assert verdict != "STRONG_BUY"
+    assert verdict not in ["Grade S", "STRONG_BUY"]
 
-    # さらに深い下落トレンド (-15%) の場合は WATCH へ制限
+    # さらに深い下落トレンド (-15%) の場合は Grade B / WATCH へ制限
     dossier_deep_bearish = dict(
         dossier_bearish,
         technicals=dict(dossier_bearish["technicals"], ma25_divergence=-15.0),
     )
     _, verdict_deep = QuantEvaluator.evaluate(dossier_deep_bearish)
-    assert verdict_deep == "WATCH"
+    assert verdict_deep in ["Grade B", "WATCH"]
 
 
 def test_macd_zero_neutral_behavior():
@@ -239,8 +238,8 @@ def test_macd_zero_neutral_behavior():
     score, verdict = QuantEvaluator.evaluate(dossier_neutral)
     # Neutral の場合は 3.0点の中立配点が付与され、Bearish（0〜2点）より高く評価される
     assert QuantEvaluator._score_macd(0.0, "Neutral") == 3.0
-    # Bearish ゲートキーパーによる STRONG_BUY 禁止および強制 WATCH 降格を受けず、STRONG_BUY が正しく成立すること
-    assert verdict == "STRONG_BUY"
+    # Bearish ゲートキーパーによる最高評価禁止および強制格下げを受けず、Grade S / STRONG_BUY が正しく成立すること
+    assert verdict in ["Grade S", "STRONG_BUY"]
 
 
 def test_verdict_mode_grade_support():

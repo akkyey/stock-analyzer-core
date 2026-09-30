@@ -237,7 +237,7 @@ class QuantEvaluator:
         op_income: Optional[float] = None,
         net_profit: Optional[float] = None,
         operating_margin: Optional[float] = None,
-        verdict_mode: str = "legacy",
+        verdict_mode: str = "grade",
     ) -> str:
         """総合スコアおよびモメンタム・健全性ゲートキーパーに基づく格付けの決定。
 
@@ -418,7 +418,7 @@ class QuantEvaluator:
         score = round(min(cls.MAX_SCORE, max(cls.MIN_SCORE, raw_score)), 1)
 
         # 5. 判定 (Verdict) の決定（ゲートキーパー適用）
-        verdict_mode = (config or {}).get("verdict_mode", "legacy")
+        verdict_mode = (config or {}).get("verdict_mode", "grade")
         verdict = cls._determine_verdict(
             score,
             roe=roe,

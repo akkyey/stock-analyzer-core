@@ -127,11 +127,10 @@ def test_evaluation_phase_with_real_polars_processor():
     uncalc_codes = context.uncalculable_df["code"].to_list()
     assert "8165" in uncalc_codes
 
-    # (B) 銘柄 B (9999) は深い下落トレンドのため、スコアにかかわらず最大 WATCH に制限されていること (ゲートキーパー3)
+    # (B) 銘柄 B (9999) は深い下落トレンドのため、スコアにかかわらず最大 Grade B / WATCH に制限されていること (ゲートキーパー3)
     b_row = result_df.filter(pl.col("code") == "9999").to_dicts()[0]
-    assert b_row["verdict"] in ["WATCH", "PASS"]
-    assert b_row["verdict"] != "STRONG_BUY"
-    assert b_row["verdict"] != "BUY"
+    assert b_row["verdict"] in ["Grade B", "Grade C", "WATCH", "PASS"]
+    assert b_row["verdict"] not in ["Grade S", "Grade A", "STRONG_BUY", "BUY"]
 
     # (C) 銘柄 A (8306) は自己資本比率 5.0% が維持され、乖離率配点も加算されて高いスコア・判定を得ていること
     a_row = result_df.filter(pl.col("code") == "8306").to_dicts()[0]

@@ -6,43 +6,43 @@
       "code": "1001",
       "name": "優良コア株",
       "score": 71.9,
-      "verdict": "BUY"
+      "verdict": "Grade A"
     },
     {
       "code": "1003",
       "name": "割安バリュー",
       "score": 71.5,
-      "verdict": "BUY"
+      "verdict": "Grade A"
     },
     {
       "code": "1004",
       "name": "高配当インフラ",
       "score": 70.8,
-      "verdict": "BUY"
+      "verdict": "Grade A"
     },
     {
       "code": "4002",
       "name": "暴落警戒株",
       "score": 66.7,
-      "verdict": "WATCH"
+      "verdict": "Grade B"
     },
     {
       "code": "3005",
       "name": "免除銀行株",
       "score": 59.6,
-      "verdict": "WATCH"
+      "verdict": "Grade B"
     },
     {
       "code": "2001",
       "name": "特益見かけ黒字",
       "score": 54.0,
-      "verdict": "WATCH"
+      "verdict": "Grade B"
     },
     {
       "code": "1002",
       "name": "急成長テック",
       "score": 51.6,
-      "verdict": "WATCH"
+      "verdict": "Grade B"
     },
     {
       "code": "4001",
@@ -54,7 +54,7 @@
       "code": "2002",
       "name": "赤字転落株",
       "score": 30.6,
-      "verdict": "PASS"
+      "verdict": "Grade C"
     }
   ],
   "rejected_results": [
