@@ -2,8 +2,9 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/akkyey/stock-analyzer-core/blob/main/notebooks/stock_analyzer_colab.ipynb)
 
-**stock-analyzer-core** は、全上場日本株（約 4,000 銘柄）を対象に、高速なデータ処理と堅牢な防衛ロジックを両立する **超高速クオンツ分析・多層評価エンジン** です。
+**stock-analyzer-core** は、全上場日本株（約 4,000 銘柄）を対象に、高速なデータ処理と堅牢な防衛ロジックを両立する **超高速クオンツ分析・多層評価エンジン** です。Google Colab の無料枠で手軽にブラウザ上から実行できます。
 
 ---
 
@@ -55,7 +56,27 @@
 
 ## 🚀 クイックスタート
 
-### 1. インストール
+### 1. Google Colab で実行（推奨・環境構築不要）
+
+ブラウザだけで全 4,000 銘柄のスクリーニングを実行できます。以下のバッジからノートブックを開いて、Step 0 から順に再生ボタン（▶）を押すだけで完走します。
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/akkyey/stock-analyzer-core/blob/main/notebooks/stock_analyzer_colab.ipynb)
+
+- **詳細マニュアル**: [docs/guides/colab_user_execution_guide.md](docs/guides/colab_user_execution_guide.md)
+
+#### 📁 Google Drive 上の保存先と構成
+Colab 実行時、結果やキャッシュは Google Drive 内に安全に自動永続化されます（デフォルト: `マイドライブ/StockAnalyzer/`）：
+```text
+Google Drive/
+└── StockAnalyzer/                     # 保存先フォルダ（カスタマイズ可能）
+    ├── output/daily_report.csv        # 本日のスクリーニング合格銘柄一覧
+    ├── output/uncalculable_stocks.csv # 足切り除外銘柄一覧（理由付き）
+    ├── cache/stock_analyzer.duckdb    # 差分更新用キャッシュDB（2回目以降を爆速化）
+    └── config/custom_config.json      # 独自カスタマイズ設定（任意）
+```
+- **保存先の変更方法**: Step 0 のセル上部にある入力フォーム **`drive_folder_name`** にフォルダ名（例: `MyStock`）や相対パス（例: `Portfolio/Japan`）、共有ドライブ（例: `/content/drive/Shareddrives/...`）を入力するだけで自由に変更可能です。
+
+### 2. ローカル環境でのインストール・実行
 
 ```bash
 git clone https://github.com/akkyey/stock-analyzer-core.git
@@ -66,20 +87,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. 環境設定
+### 3. 環境設定
 
 ```bash
 cp .env.example .env
 # 必要に応じて .env 内の認証情報を設定
 ```
 
-### 3. 単体テストの実行
+### 4. 単体テストの実行
 
 ```bash
 pytest
 ```
 
-### 4. パイプライン実行（全銘柄スキャン）
+### 5. パイプライン実行（全銘柄スキャン）
 
 ```bash
 # 推奨: パッケージエントリポイントからの実行

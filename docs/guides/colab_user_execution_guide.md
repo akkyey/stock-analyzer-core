@@ -62,12 +62,46 @@ flowchart TD
 ### 【Step 0】Google Drive マウント & キャッシュ初期化
 - **実行内容**:
   - セルを実行すると、「Google ドライブへの接続を許可しますか？」というポップアップが表示されます。**「Google ドライブに接続」** をクリックして許可してください。
-  - セル上部の入力フォーム **`drive_folder_name`** で Google Drive 上の保存先フォルダを自由にカスタマイズ可能です（デフォルト: `StockAnalyzer`）：
-    - **フォルダ名のみ指定**: `StockAnalyzer` や `MyAnalysis` 等（マイドライブ直下の `MyDrive/<フォルダ名>/` に自動展開）
-    - **階層パス指定**: `Portfolio/Japan` 等（マイドライブ配下の階層フォルダ）
-    - **共有ドライブ指定**: `/content/drive/Shareddrives/TeamFolder/StockAnalyzer`（Google Workspace の共有ドライブへの直接保存）
-  - 指定したフォルダ配下に `cache/`、`output/`、`config/` ディレクトリが自動作成されます。
-  - 前回のキャッシュ DB がある場合は、Colab 内蔵の超高速ローカル SSD（`/content/working/`）へ自動で引き継がれます。
+  - セル上部の入力フォーム **`drive_folder_name`** で Google Drive 上の保存先フォルダを自由に設定可能です（デフォルト: `StockAnalyzer`）。
+  - 前回のキャッシュ DB がある場合は、Colab 内蔵の超高速ローカル SSD（`/content/working/`）へ自動で引き継がれます（Stage-and-Sync 規約）。
+
+#### 📁 Google Drive 上の格納場所とファイル構成
+指定したフォルダ（デフォルト: `マイドライブ/StockAnalyzer/`）の配下に以下のファイル群が自動保存・管理されます：
+
+```text
+Google Drive（マイドライブ または 共有ドライブ）
+└── <設定したフォルダ名>/               # デフォルト: StockAnalyzer
+    ├── cache/
+    │   ├── stock_analyzer.duckdb      # 財務・開示・株価キャッシュDB（次回以降を1分台にするキーファイル）
+    │   └── stock_analyzer.duckdb.bak  # 前世代の自動バックアップDB（破損防止用）
+    ├── output/
+    │   ├── daily_report.csv           # 【最重要】本日のクオンツ評価合格銘柄ランキング（スコア・判定付き）
+    │   └── uncalculable_stocks.csv    # 除外銘柄一覧（極小流動性・債務超過等の除外理由付き）
+    └── config/
+        └── custom_config.json         # 【任意】ユーザー独自設定ファイル（配置した場合に自動読込）
+```
+
+| 格納パス（デフォルト例） | ファイル名 | 内容・役割 |
+| :--- | :--- | :--- |
+| `StockAnalyzer/output/` | `daily_report.csv` | **本日のスクリーニング分析結果**（Top ランキング・指標一覧）。Step 5 で PC にダウンロードされるファイルと同一です。 |
+| `StockAnalyzer/output/` | `uncalculable_stocks.csv` | 第1層足切り等で見送りとなった銘柄一覧と除外理由（透明性担保）。 |
+| `StockAnalyzer/cache/` | `stock_analyzer.duckdb` | EDINET 開示書類・過去株価のメタデータ DB。2回目以降の高速実行に不可欠です。 |
+| `StockAnalyzer/cache/` | `stock_analyzer.duckdb.bak` | 更新直前の前世代 DB バックアップ。不意の通信断でも安全に復元可能。 |
+| `StockAnalyzer/config/` | `custom_config.json` | 読者が足切り基準や戦略乗数を独自保存したい場合の配置場所（任意）。 |
+
+#### ⚙️ 保存先フォルダの設定方法
+保存先は以下の 3 つの方法でカスタマイズできます：
+
+1. **【GUI フォームで指定（最も簡単・推奨）】**:
+   - Step 0 のセル上部にある入力フォーム `drive_folder_name` に直接入力してセルを実行します。
+   - **フォルダ名のみ指定**: `StockAnalyzer` や `MyAnalysis` 等 ➔ マイドライブ直下（`/content/drive/MyDrive/<フォルダ名>`）に展開。
+   - **階層パス指定**: `Portfolio/Japan` 等 ➔ マイドライブ配下の階層フォルダ（`/content/drive/MyDrive/Portfolio/Japan`）。
+   - **共有ドライブ指定**: `/content/drive/Shareddrives/TeamFolder/StockAnalyzer` ➔ Google Workspace などの共有ドライブへ直接保存。
+2. **【カスタム設定ファイルで指定】**:
+   - `custom_config.json` 内の `gdrive.drive_dir` にパスを指定可能。
+3. **【環境変数で指定】**:
+   - `STOCK_ANALYZER_DRIVE_DIR` にパスを設定することで、スクリプト実行時にも動的反映されます。
+
 - **安心設計**:
   - Google Drive に保存されるのは数MBのデータベースと結果 CSV のみです。無料の 15GB 枠を圧迫することは一切ありません。
 
@@ -273,6 +307,13 @@ CSV ファイルを開かなくても、Colab 上で即座に本日の有望銘�
 ### Q10. Step 4 で「daily_report.csv が見つかりません」と表示され、全銘柄が足切り除外される場合
 - **原因**: 初期クリーン実行時に財務データのベースラインが未登録だった場合に発生します。
 - **対処法**: 本システムは、財務確定Factベースラインデータ（東証全3,920社分）をバンドルした `fundamentals_seed.parquet` を備えており、Step 3 実行時に自動シードされます。最新のコードを取得（Step 1 の再実行）した上で Step 3 を実行してください。
+
+### Q11. Google Drive の保存先フォルダを変更したい・共有ドライブに保存したい
+- **回答**: **【Step 0】の入力フォーム `drive_folder_name`** で自由に変更できます。
+  1. マイドライブ直下の別フォルダにする場合：`MyStockAnalysis` などのフォルダ名を入力します（`MyDrive/MyStockAnalysis/` に保存されます）。
+  2. 階層フォルダにする場合：`Portfolio/Japan` などと入力します。
+  3. Google Workspace などの共有ドライブに保存する場合：`/content/drive/Shareddrives/<共有ドライブ名>/<フォルダ名>` とフルパスを入力します。
+  - 変更後は、Step 0 から順にセルを実行してください。以降のすべてのステップ（Step 1〜Step 5）で新しい保存先が自動的に引き継がれます。
 
 ---
 
