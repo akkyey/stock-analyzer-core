@@ -406,3 +406,26 @@ Google Colab 上でのゼロスタート実地検証を通じて、以下の 5 �
 本ツールおよびマニュアルは、公開データの自動処理技術の学習・研究を目的としたものであり、投資助言や特定の有価証券の売買を推奨するものではありません。  
 算出されるスコアおよび Verdict は機械的な計算結果であり、将来の運用成果を保証するものではありません。実際の投資判断および売買は、必ずご自身の責任において行ってください。また、本ツールの利用により生じたいかなる損害についても、著者は一切の責任を負いかねます。
 
+---
+
+## 9. ライセンス & 著作権（License & Copyright）
+
+本ツール、Colab ノートブック、および付随するプログラムコード一式は、[MIT License](https://opensource.org/licenses/MIT) の下で公開・提供されています。
+
+```text
+Copyright (c) 2026 akkyey
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+```
+
+読者・利用者は、上記著作権表示および許諾条項を保持する限り、商用・非商用を問わず自由にご自身の分析・開発環境に合わせて改変・利用・拡張いただけます。
+
+

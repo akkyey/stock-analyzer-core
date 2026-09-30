@@ -116,4 +116,4 @@ python3 -m src.orchestration.mode_handler --mode scan
 
 ## 📄 ライセンス
 
-本プロジェクトは [MIT License](LICENSE) の下で公開されています。
+本プロジェクトおよび配布ノートブックは、[MIT License](LICENSE)（Copyright (c) 2026 akkyey）の下で公開されています。商用・非商用を問わず自由にご利用・改変いただけます。
