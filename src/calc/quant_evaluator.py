@@ -231,61 +231,105 @@ class QuantEvaluator:
     def _determine_verdict(
         cls,
         score: float,
-        roe: Optional[float],
-        macd_status: str,
-        ma_div: Optional[float],
+        roe: Optional[float] = None,
+        macd_status: str = "",
+        ma_div: Optional[float] = None,
         op_income: Optional[float] = None,
         net_profit: Optional[float] = None,
         operating_margin: Optional[float] = None,
+        verdict_mode: str = "legacy",
     ) -> str:
-        """総合スコアおよびモメンタム・健全性ゲートキーパーに基づく投資判断 (Verdict) の決定"""
+        """総合スコアおよびモメンタム・健全性ゲートキーパーに基づく格付けの決定。
+
+        verdict_mode="legacy": STRONG_BUY / BUY / WATCH / PASS (Qiita Part 2 準拠)
+        verdict_mode="grade": Grade S / Grade A / Grade B / Grade C (客観的格付け)
+        """
+        is_grade = (verdict_mode == "grade")
+
         # ベース判定
         if score >= 80.0:
-            verdict = "STRONG_BUY"
+            verdict = "Grade S" if is_grade else "STRONG_BUY"
         elif score >= 65.0:
-            verdict = "BUY"
+            verdict = "Grade A" if is_grade else "BUY"
         elif score >= 50.0:
-            verdict = "WATCH"
+            verdict = "Grade B" if is_grade else "WATCH"
         else:
-            verdict = "PASS"
+            verdict = "Grade C" if is_grade else "PASS"
 
         # ゲートキーパー 1: 実績赤字（ROE < 0）銘柄のキャップ制限
-        # 会社予想で黒字転換見込み（PER算出可能）であっても、実績赤字の銘柄は BUY / STRONG_BUY を禁止し最大 WATCH に制限
-        if roe is not None and roe < 0 and verdict in ["STRONG_BUY", "BUY"]:
-            verdict = "WATCH"
+        if roe is not None and roe < 0 and verdict in ["Grade S", "Grade A", "STRONG_BUY", "BUY"]:
+            verdict = "Grade B" if is_grade else "WATCH"
 
         # ゲートキーパー 2: 本業赤字・一過性特益トラップのキャップ制限
-        # 営業利益率または営業利益が赤字かつ純利益が黒字（または低PER割安に見える）銘柄は、
-        # 特別利益による見かけの黒字・高ROEであるため BUY / STRONG_BUY を禁止し WATCH に制限
         is_op_loss = False
         if operating_margin is not None and operating_margin <= 0:
             is_op_loss = True
         elif op_income is not None and op_income <= 0:
             is_op_loss = True
 
-        if is_op_loss and verdict in ["STRONG_BUY", "BUY"]:
-            verdict = "WATCH"
+        if is_op_loss and verdict in ["Grade S", "Grade A", "STRONG_BUY", "BUY"]:
+            verdict = "Grade B" if is_grade else "WATCH"
 
         # ゲートキーパー 3: テクニカル・モメンタム足切り
-        # 下降トレンド中（Bearish）の銘柄は反発確認前の押し目リスクがあるため、STRONG_BUY を禁止（最大 BUY 止まり）
-        # さらに 25日乖離率が -10.0% を下回る深い下降トレンド中の場合は最大 WATCH に制限
+        # 下降トレンド中（Bearish）の銘柄は反発確認前のリスクがあるため、最高評価を禁止
+        # さらに 25日乖離率が -10.0% を下回る深い下降トレンド中の場合は最大 Grade B / WATCH に制限
         if "Bearish" in macd_status:
-            if verdict == "STRONG_BUY":
-                verdict = "BUY"
-            if ma_div is not None and ma_div < -10.0 and verdict == "BUY":
-                verdict = "WATCH"
+            if verdict in ["Grade S", "STRONG_BUY"]:
+                verdict = "Grade A" if is_grade else "BUY"
+            if ma_div is not None and ma_div < -10.0 and verdict in ["Grade A", "BUY"]:
+                verdict = "Grade B" if is_grade else "WATCH"
 
         return verdict
 
     @classmethod
+    def resolve_multipliers(
+        cls, config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, float]:
+        """設定から投資戦略プリセットと個別乗数を解決し、検証済みの有効乗数辞書を返す。"""
+        preset_name = (config or {}).get("strategy_preset", "balanced")
+        if preset_name not in cls.PRESET_STRATEGIES:
+            logger.warning(
+                f"⚠️ 未知のプリセット '{preset_name}' が指定されました。'balanced' を適用します。"
+            )
+            preset_name = "balanced"
+
+        base_multipliers = cls.PRESET_STRATEGIES[preset_name].copy()
+        custom_multipliers = (config or {}).get("scoring_multipliers", {})
+
+        # 未知キー検知
+        unknown_scoring_keys = set(custom_multipliers.keys()) - cls.KNOWN_SCORING_KEYS
+        if unknown_scoring_keys:
+            logger.warning(
+                f"⚠️ scoring_multipliers に未知のキーが含まれています (無視されます): {unknown_scoring_keys}"
+            )
+
+        effective_multipliers = {**base_multipliers, **custom_multipliers}
+
+        # 負値ガード
+        for k in cls.KNOWN_SCORING_KEYS:
+            val = float(effective_multipliers.get(k, 1.0))
+            if val < 0.0:
+                logger.warning(
+                    f"⚠️ 乗数 '{k}' に負の値 ({val}) が指定されたため、0.0 に補正しました。"
+                )
+                val = 0.0
+            effective_multipliers[k] = val
+
+        return effective_multipliers
+
+    @classmethod
     def evaluate(
-        cls, dossier: Dict[str, Any], config: Optional[Dict[str, Any]] = None
+        cls,
+        dossier: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
+        multipliers: Optional[Dict[str, float]] = None,
     ) -> Tuple[float, str]:
         """銘柄データからスコア・判定を算出する。
 
         Args:
             dossier (Dict[str, Any]): 銘柄の財務・テクニカル指標群
             config (Optional[Dict[str, Any]]): 投資スタイルプリセットおよび乗数設定
+            multipliers (Optional[Dict[str, float]]): 事前計算済みの有効乗数辞書 (ループ最適化用)
 
         Returns:
             Tuple[float, str]: (クオンツスコア [15.0, 98.0], 投資判断 Verdict)
@@ -336,35 +380,12 @@ class QuantEvaluator:
             + cls._score_ma_div(ma_div)
         )
 
-        # 3. 乗数設定の解決 (プリセット + 個別上書きの 2 段構えマージ)
-        preset_name = (config or {}).get("strategy_preset", "balanced")
-        if preset_name not in cls.PRESET_STRATEGIES:
-            logger.warning(
-                f"⚠️ 未知のプリセット '{preset_name}' が指定されました。'balanced' を適用します。"
-            )
-            preset_name = "balanced"
-
-        base_multipliers = cls.PRESET_STRATEGIES[preset_name].copy()
-        custom_multipliers = (config or {}).get("scoring_multipliers", {})
-
-        # 未知キー検知
-        unknown_scoring_keys = set(custom_multipliers.keys()) - cls.KNOWN_SCORING_KEYS
-        if unknown_scoring_keys:
-            logger.warning(
-                f"⚠️ scoring_multipliers に未知のキーが含まれています (無視されます): {unknown_scoring_keys}"
-            )
-
-        effective_multipliers = {**base_multipliers, **custom_multipliers}
-
-        # 負値ガード
-        for k in cls.KNOWN_SCORING_KEYS:
-            val = float(effective_multipliers.get(k, 1.0))
-            if val < 0.0:
-                logger.warning(
-                    f"⚠️ 乗数 '{k}' に負の値 ({val}) が指定されたため、0.0 に補正しました。"
-                )
-                val = 0.0
-            effective_multipliers[k] = val
+        # 3. 乗数設定の解決 (事前解決済み乗数があれば優先し、銘柄ごとの重複警告を根絶)
+        effective_multipliers = (
+            multipliers
+            if multipliers is not None
+            else cls.resolve_multipliers(config)
+        )
 
         # 4. スコア計算 (Zero-Break バイパス & 加重平均正規化)
         is_default_weights = all(
@@ -397,6 +418,7 @@ class QuantEvaluator:
         score = round(min(cls.MAX_SCORE, max(cls.MIN_SCORE, raw_score)), 1)
 
         # 5. 判定 (Verdict) の決定（ゲートキーパー適用）
+        verdict_mode = (config or {}).get("verdict_mode", "legacy")
         verdict = cls._determine_verdict(
             score,
             roe=roe,
@@ -405,6 +427,7 @@ class QuantEvaluator:
             op_income=op_income,
             net_profit=net_profit,
             operating_margin=op_margin,
+            verdict_mode=verdict_mode,
         )
 
         return score, verdict

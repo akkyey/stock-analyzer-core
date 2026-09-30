@@ -55,25 +55,108 @@ class FinancialRepairService:
                 ]
             )
 
-        # [Step 2] 精密 PER (Deep Repair #3) の推計
-        if all(c in cols for c in ["per", "price", "net_profit", "shares_outstanding"]):
-            df = df.with_columns(
-                [
+        # [Step 2] 動的 PER / PBR / 利回り / 時価総額 の算出 (当日株価 × 財務確定Fact)
+        # 当日株価 (price) が存在する場合、シードやDBの確定Factからリアルタイムに導出する
+        if "price" in cols:
+            # 2-1. EPS の補完 (net_profit / shares_outstanding)
+            if all(c in cols for c in ["net_profit", "shares_outstanding"]):
+                if "eps" not in cols:
+                    df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("eps"))
+                df = df.with_columns(
                     pl.when(
-                        (pl.col("per").is_null() | (pl.col("per") <= 0))
+                        pl.col("eps").is_null()
                         & pl.col("net_profit").is_not_null()
-                        & (pl.col("net_profit") > 0)
                         & pl.col("shares_outstanding").is_not_null()
                         & (pl.col("shares_outstanding") > 0)
                     )
-                    .then(
-                        pl.col("price")
-                        / (pl.col("net_profit") / pl.col("shares_outstanding"))
+                    .then(pl.col("net_profit") / pl.col("shares_outstanding"))
+                    .otherwise(pl.col("eps"))
+                    .alias("eps")
+                )
+
+            # 2-2. BPS の補完 (net_assets / shares_outstanding)
+            if all(c in cols for c in ["net_assets", "shares_outstanding"]):
+                if "bps" not in cols:
+                    df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("bps"))
+                df = df.with_columns(
+                    pl.when(
+                        pl.col("bps").is_null()
+                        & pl.col("net_assets").is_not_null()
+                        & pl.col("shares_outstanding").is_not_null()
+                        & (pl.col("shares_outstanding") > 0)
                     )
+                    .then(pl.col("net_assets") / pl.col("shares_outstanding"))
+                    .otherwise(pl.col("bps"))
+                    .alias("bps")
+                )
+
+            # 2-3. PER の動的算出: 当日株価 / EPS (EPS > 0 の黒字企業)
+            if "eps" in df.columns:
+                if "per" not in cols:
+                    df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("per"))
+                df = df.with_columns(
+                    pl.when(
+                        pl.col("eps").is_not_null()
+                        & (pl.col("eps") > 0)
+                        & pl.col("price").is_not_null()
+                        & (pl.col("price") > 0)
+                    )
+                    .then(pl.col("price") / pl.col("eps"))
                     .otherwise(pl.col("per"))
                     .alias("per")
-                ]
-            )
+                )
+
+            # 2-4. PBR の動的算出: 当日株価 / BPS (BPS > 0)
+            if "bps" in df.columns:
+                if "pbr" not in cols:
+                    df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("pbr"))
+                df = df.with_columns(
+                    pl.when(
+                        pl.col("bps").is_not_null()
+                        & (pl.col("bps") > 0)
+                        & pl.col("price").is_not_null()
+                        & (pl.col("price") > 0)
+                    )
+                    .then(pl.col("price") / pl.col("bps"))
+                    .otherwise(pl.col("pbr"))
+                    .alias("pbr")
+                )
+
+            # 2-5. 配当利回り (dividend_yield) の動的算出: (DPS / 当日株価) * 100
+            if "dps" in df.columns:
+                if "dividend_yield" not in cols:
+                    df = df.with_columns(
+                        pl.lit(None, dtype=pl.Float64).alias("dividend_yield")
+                    )
+                df = df.with_columns(
+                    pl.when(
+                        pl.col("dps").is_not_null()
+                        & (pl.col("dps") >= 0)
+                        & pl.col("price").is_not_null()
+                        & (pl.col("price") > 0)
+                    )
+                    .then((pl.col("dps") / pl.col("price")) * 100.0)
+                    .otherwise(pl.col("dividend_yield"))
+                    .alias("dividend_yield")
+                )
+
+            # 2-6. 時価総額 (market_cap) の動的算出: 当日株価 × 発行済株式数
+            if "shares_outstanding" in df.columns:
+                if "market_cap" not in cols:
+                    df = df.with_columns(
+                        pl.lit(None, dtype=pl.Float64).alias("market_cap")
+                    )
+                df = df.with_columns(
+                    pl.when(
+                        pl.col("shares_outstanding").is_not_null()
+                        & (pl.col("shares_outstanding") > 0)
+                        & pl.col("price").is_not_null()
+                        & (pl.col("price") > 0)
+                    )
+                    .then(pl.col("price") * pl.col("shares_outstanding"))
+                    .otherwise(pl.col("market_cap"))
+                    .alias("market_cap")
+                )
 
         # [Step 3] 黒字転換 / 利益ステータス判定 (#5)
         if all(c in cols for c in ["net_profit", "prev_net_profit"]):

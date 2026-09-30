@@ -286,7 +286,7 @@ def test_path_resolver_env_injection(monkeypatch):
         assert out_dir.exists()
 
         duck_path = PathResolver.get_duckdb_path()
-        assert duck_path == base / "stock_analyzer.duckdb"
+        assert duck_path == base / "cache" / "stock_analyzer.duckdb"
 
 
 def test_colab_sync_manager_three_tier_recovery():

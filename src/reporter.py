@@ -103,7 +103,12 @@ class StockReporter:
         Returns:
             dict[str, tuple[Any, str]]: 指標名 -> (値, "yf" | "edinet" | "calc" | "-")
         """
-        close = safe_float_or_none(common.get("close") or latest_row.get("close"))
+        close = safe_float_or_none(
+            common.get("close")
+            or latest_row.get("close")
+            or common.get("price")
+            or latest_row.get("price")
+        )
         eps = safe_float_or_none(common.get("eps") or latest_row.get("eps"))
         bps = safe_float_or_none(common.get("bps") or latest_row.get("bps"))
         dps = safe_float_or_none(

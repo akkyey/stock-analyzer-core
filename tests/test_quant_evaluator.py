@@ -242,3 +242,18 @@ def test_macd_zero_neutral_behavior():
     # Bearish ゲートキーパーによる STRONG_BUY 禁止および強制 WATCH 降格を受けず、STRONG_BUY が正しく成立すること
     assert verdict == "STRONG_BUY"
 
+
+def test_verdict_mode_grade_support():
+    """verdict_mode='grade' 指定時に Grade S / Grade A / Grade B / Grade C が正しく返されること"""
+    # 1. 高スコア正常株 -> Grade S
+    assert QuantEvaluator._determine_verdict(85.0, roe=15.0, macd_status="Bullish", ma_div=2.0, verdict_mode="grade") == "Grade S"
+    # 2. 中スコア株 -> Grade A
+    assert QuantEvaluator._determine_verdict(70.0, roe=10.0, macd_status="Bullish", ma_div=2.0, verdict_mode="grade") == "Grade A"
+    # 3. 実績赤字 (ROE < 0) -> Grade B にキャップ
+    assert QuantEvaluator._determine_verdict(85.0, roe=-2.0, macd_status="Bullish", ma_div=2.0, verdict_mode="grade") == "Grade B"
+    # 4. Bearish下降トレンド -> Grade S 禁止 (Grade A)
+    assert QuantEvaluator._determine_verdict(85.0, roe=15.0, macd_status="Bearish", ma_div=2.0, verdict_mode="grade") == "Grade A"
+    # 5. 低スコア株 -> Grade C
+    assert QuantEvaluator._determine_verdict(40.0, roe=5.0, macd_status="Bullish", ma_div=0.0, verdict_mode="grade") == "Grade C"
+
+

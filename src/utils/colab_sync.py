@@ -32,8 +32,13 @@ class ColabSyncManager:
 
             # 読み取り専用で接続テスト
             conn = duckdb.connect(str(db_path), read_only=True)
-            # 基本的なカタログ整合性確認
+            # 1. 基本的なカタログ整合性確認
             conn.execute("SELECT count(*) FROM information_schema.tables").fetchall()
+            # 2. 主要テーブルのデータブロック読み込み検証
+            tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+            for tbl in ["stocks", "fundamentals"]:
+                if tbl in tables:
+                    conn.execute(f"SELECT count(*) FROM {tbl}").fetchall()
             conn.close()
             return True
         except Exception as e:
@@ -169,6 +174,15 @@ class ColabSyncManager:
         try:
             # 1. DB の同期
             if working_db.exists() and working_db.stat().st_size > 0:
+                # WAL を確実にメイン DB ファイルへフラッシュ
+                try:
+                    import duckdb
+
+                    with duckdb.connect(str(working_db)) as con:
+                        con.execute("CHECKPOINT")
+                except Exception as e:
+                    logger.debug(f"DuckDB CHECKPOINT notice: {e}")
+
                 # 作業層 DB の健全性を最終確認
                 if not cls.is_duckdb_healthy(working_db):
                     logger.error(

@@ -101,6 +101,7 @@ class EvaluationPhase(BasePhase):
         verdicts: list[str] = []
 
         cfg = getattr(self.context, "config", None)
+        multipliers = QuantEvaluator.resolve_multipliers(cfg)
         for row in records:
             # 指摘1: ma25_divergence は ma_divergence / ma25_divergence の双方から取得
             ma_div = row.get("ma_divergence")
@@ -140,7 +141,9 @@ class EvaluationPhase(BasePhase):
                     "macd_status": macd_status,
                 },
             }
-            score, verdict = QuantEvaluator.evaluate(dossier, config=cfg)
+            score, verdict = QuantEvaluator.evaluate(
+                dossier, config=cfg, multipliers=multipliers
+            )
             scores.append(score)
             verdicts.append(verdict)
 

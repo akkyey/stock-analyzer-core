@@ -57,7 +57,7 @@
 ### 1. インストール
 
 ```bash
-git clone https://github.com/akkyey-stock-org/stock-analyzer-core.git
+git clone https://github.com/akkyey/stock-analyzer-core.git
 cd stock-analyzer-core
 
 python3 -m venv .venv

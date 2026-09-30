@@ -37,6 +37,7 @@ class EdinetBridge:
         self.logger.info(f"🌉 Bridging {len(json_files)} results to DuckDB...")
 
         data_to_upsert = []
+        docs_to_record = []
         for filename in json_files:
             filepath = os.path.join(self.results_dir, filename)
             try:
@@ -48,7 +49,7 @@ class EdinetBridge:
                 data["code"] = code
 
                 # スキーマに合わせたマッピング
-                # parser からは net_profit, prev_net_profit, shares_outstanding などが来ている
+                # parser からは net_profit, prev_net_profit, shares_outstanding, total_assets, net_assets などが来ている
                 record = {
                     "code": code,
                     "net_profit": data.get("net_profit"),
@@ -56,7 +57,8 @@ class EdinetBridge:
                     "shares_outstanding": data.get("shares_outstanding"),
                     "sales": data.get("sales"),
                     "operating_income": data.get("operating_income"),
-                    # 他の項目は Evaluation 時に推計されるため、ここでは最低限の Fact を流し込む
+                    "total_assets": data.get("total_assets"),
+                    "net_assets": data.get("net_assets"),
                 }
 
                 # operating_margin の計算 (パルサー側でやっていない場合の補填)
@@ -71,6 +73,18 @@ class EdinetBridge:
 
                 data_to_upsert.append(record)
 
+                doc_id = data.get("doc_id")
+                if doc_id:
+                    docs_to_record.append(
+                        {
+                            "doc_id": doc_id,
+                            "code": code,
+                            "doc_type": data.get("doc_type"),
+                            "submit_date": data.get("submit_date"),
+                            "is_annual": data.get("is_annual", False),
+                        }
+                    )
+
             except Exception as e:
                 self.logger.error(f"❌ Failed to load {filename}: {e}")
 
@@ -83,8 +97,21 @@ class EdinetBridge:
                 repaired_records = df_repaired.to_dicts()
 
                 self.repository.upsert(repaired_records)
+
+                # DuckDB の edinet_documents テーブルへ処理済みメタデータを記録
+                duck_repo = getattr(self.repository, "duck_repo", None)
+                if duck_repo and hasattr(duck_repo, "record_edinet_document"):
+                    for d in docs_to_record:
+                        duck_repo.record_edinet_document(
+                            doc_id=d["doc_id"],
+                            code=d["code"],
+                            doc_type=d["doc_type"],
+                            submit_date=d["submit_date"],
+                            is_annual=d["is_annual"],
+                        )
+
                 self.logger.info(
-                    f"✅ Successfully bridged and repaired {len(repaired_records)} records."
+                    f"✅ Successfully bridged and repaired {len(repaired_records)} records, recorded {len(docs_to_record)} docs."
                 )
 
                 if purge_after:

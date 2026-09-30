@@ -59,7 +59,8 @@ def test_safe_floats():
 
 def test_ensure_dir_and_save_csv(tmp_path):
     d = tmp_path / "sub_dir"
-    ensure_dir(str(d))
+    with pytest.deprecated_call():
+        ensure_dir(str(d))
     assert d.exists()
 
     df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})

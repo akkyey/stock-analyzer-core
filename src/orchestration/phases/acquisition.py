@@ -20,11 +20,18 @@ class AcquisitionPhase(BasePhase):
     def execute(self, df: Optional[pl.DataFrame] = None) -> Any:
         self.log_info("🚀 Starting Turbo Data Acquisition Phase...")
 
-        from src.fetcher.edinet_fetcher import EdinetFetcher
+        from pathlib import Path
+
+        from src.fetcher.edinet_fetcher import (
+            EdinetAuthenticationError,
+            EdinetFetcher,
+            mask_api_key,
+        )
         from src.fetcher.facade import DataFetcher
         from src.fetcher.turbo_acquisition import TurboAcquisitionManager
         from src.fetcher.xbrl_parser import XbrlParser
         from src.repositories.duck_repository import DuckDBRepository
+        from src.repositories.fundamentals_repository import FundamentalsRepository
         from src.repositories.market_data_repository import MarketDataRepository
         from src.services.edinet_bridge import EdinetBridge
 
@@ -54,9 +61,6 @@ class AcquisitionPhase(BasePhase):
                 self.log_error(f"❌ 銘柄マスタの初期登録に失敗しました: {e}")
 
         # 1-2. 財務データの初期シード (全件ベースラインデータ未登録時はバンドルされたシードデータから自動投入)
-        from pathlib import Path
-        from src.repositories.fundamentals_repository import FundamentalsRepository
-
         funda_repo = FundamentalsRepository(repo)
         if funda_repo.get_count() < 3000:
             seed_parquet = (
@@ -102,7 +106,14 @@ class AcquisitionPhase(BasePhase):
                     f"✅ EDINET sync completed. {sync_count} documents integrated."
                 )
             except Exception as e:
-                self.log_error(f"❌ EDINET sync failed (Skipped): {e}")
+                if isinstance(e, EdinetAuthenticationError):
+                    self.log_error(f"❌ EDINET 認証失敗: {e}")
+                    raise RuntimeError(
+                        f"EDINET APIキーの認証に失敗したため処理を中断しました: {e}"
+                    ) from e
+                self.log_error(
+                    f"❌ EDINET sync failed (Skipped): {mask_api_key(str(e))}"
+                )
 
         if self.context.limit:
             target_codes = target_codes[: self.context.limit]

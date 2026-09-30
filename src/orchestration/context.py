@@ -156,3 +156,17 @@ class OrchestratorContext:
         if self.report_url:
             self.logger.info(f"  Report URL: {self.report_url}")
         self.logger.info("=" * 40)
+
+    def update_config(self, new_config: dict[str, Any]) -> None:
+        """設定を再帰的にマージ（ディープマージ）して更新する。"""
+
+        def _deep_merge(target: dict, src: dict) -> dict:
+            for k, v in src.items():
+                if isinstance(v, dict) and k in target and isinstance(target[k], dict):
+                    _deep_merge(target[k], v)
+                else:
+                    target[k] = v
+            return target
+
+        _deep_merge(self.config, new_config)
+

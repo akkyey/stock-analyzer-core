@@ -58,3 +58,33 @@ def test_market_data_repository(mock_duck_repo):
 def test_fundamentals_repository(mock_duck_repo):
     fr = FundamentalsRepository(duck_repo=mock_duck_repo)
     assert fr is not None
+
+
+def test_duck_repository_edinet_documents(mock_duck_repo):
+    """edinet_documents テーブルへの登録と取得済み判定 (差分キャッシュ) の検証"""
+    # 登録前
+    assert mock_duck_repo.get_processed_edinet_doc_ids() == set()
+
+    # 登録
+    mock_duck_repo.record_edinet_document(
+        doc_id="S100TEST",
+        code="7203",
+        doc_type="120",
+        submit_date="2026-06-25",
+        is_annual=True,
+    )
+
+    # 登録後: doc_id が差分キャッシュセットに含まれること
+    processed = mock_duck_repo.get_processed_edinet_doc_ids()
+    assert "S100TEST" in processed
+
+    # 重複登録してもエラーにならず（ON CONFLICT DO NOTHING）保持されること
+    mock_duck_repo.record_edinet_document(
+        doc_id="S100TEST",
+        code="7203",
+        doc_type="120",
+        submit_date="2026-06-25",
+        is_annual=True,
+    )
+    assert len(mock_duck_repo.get_processed_edinet_doc_ids()) == 1
+

@@ -1,10 +1,33 @@
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, cast
 
 import pandas as pd
 import requests
+
+
+class EdinetAuthenticationError(PermissionError):
+    """EDINET APIの認証失敗エラー (401/403)"""
+
+    pass
+
+
+def mask_api_key(text: str) -> str:
+    """エラーメッセージやURL、ヘッダー文字列内の API キーを伏字化する"""
+    if not text:
+        return text
+    # 1. URL クエリパラメータ: Subscription-Key=xyz
+    text = re.sub(r"(Subscription-Key=)[^&\s'\"]+", r"\1***", text, flags=re.IGNORECASE)
+    # 2. ヘッダー / JSON: 'Ocp-Apim-Subscription-Key': 'xyz'
+    text = re.sub(
+        r"(['\"]?Ocp-Apim-Subscription-Key['\"]?\s*[:=]\s*['\"])[^'\"]+(['\"])",
+        r"\g<1>***\2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
 
 
 class EdinetFetcher:
@@ -45,16 +68,29 @@ class EdinetFetcher:
         self.logger.info(f"🌐 Fetching EDINET documents for {date_str}...")
         try:
             response = requests.get(url, params=params, headers=headers, timeout=30)
+            if response.status_code in (401, 403):
+                raise EdinetAuthenticationError(
+                    f"EDINET APIキーの認証に失敗しました (HTTP {response.status_code})。APIキーを確認してください。"
+                )
             response.raise_for_status()
-            return cast(Dict[str, Any], response.json())
+            data = cast(Dict[str, Any], response.json())
+            status = data.get("metadata", {}).get("status")
+            if str(status) in ("401", "403"):
+                raise EdinetAuthenticationError(
+                    f"EDINET APIキーの認証に失敗しました (metadata status {status})。APIキーを確認してください。"
+                )
+            return data
+        except EdinetAuthenticationError:
+            raise
         except requests.exceptions.JSONDecodeError as e:
             self.logger.warning(
                 f"⚠️ EDINET API returned non-JSON response for {date_str} (HTTP {response.status_code}): {e}. Content preview: {response.text[:150]}"
             )
             return {"results": []}
         except Exception as e:
+            masked_err = mask_api_key(str(e))
             self.logger.error(
-                f"❌ Failed to fetch EDINET documents for {date_str}: {e}"
+                f"❌ Failed to fetch EDINET documents for {date_str}: {masked_err}"
             )
             return {"results": []}
 
@@ -92,18 +128,30 @@ class EdinetFetcher:
         url = f"{self.BASE_URL}/documents/{doc_id}"
         headers, params = self._get_headers_and_params({"type": 1})  # type 1 = XBRL zip
 
-        response = requests.get(
-            url, params=params, headers=headers, stream=True, timeout=60
-        )
-        response.raise_for_status()
+        try:
+            response = requests.get(
+                url, params=params, headers=headers, stream=True, timeout=60
+            )
+            if response.status_code in (401, 403):
+                raise EdinetAuthenticationError(
+                    f"EDINET APIキーの認証に失敗しました (HTTP {response.status_code})。APIキーを確認してください。"
+                )
+            response.raise_for_status()
 
-        os.makedirs(save_dir, exist_ok=True)
-        file_path = os.path.join(save_dir, f"{doc_id}.zip")
-        with open(file_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+            os.makedirs(save_dir, exist_ok=True)
+            file_path = os.path.join(save_dir, f"{doc_id}.zip")
+            with open(file_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
 
-        return file_path
+            return file_path
+        except EdinetAuthenticationError:
+            raise
+        except Exception as e:
+            masked_err = mask_api_key(str(e))
+            raise RuntimeError(
+                f"Failed to download XBRL for {doc_id}: {masked_err}"
+            ) from None
 
     def backfill_scan(self, days: int = 365) -> List[Dict[str, Any]]:
         """過去 N 日分の書類をスキャンし、対象となる有報・四半報のメタデータリストを返す"""

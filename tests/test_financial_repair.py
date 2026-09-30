@@ -97,3 +97,32 @@ def test_financial_repair_direct_equity_ratio_calculation():
     # 既存の 30.0% はそのまま維持
     assert repaired["equity_ratio"][1] == 30.0
 
+
+def test_financial_repair_dynamic_valuation_metrics():
+    """当日株価と財務確定FactからPER/PBR/利回り/時価総額が動的に正しく計算されること"""
+    df = pl.DataFrame(
+        {
+            "code": ["1001"],
+            "price": [2000.0],
+            "net_profit": [10_000_000.0],
+            "net_assets": [100_000_000.0],
+            "shares_outstanding": [100_000.0],
+            "dps": [60.0],
+        }
+    )
+
+    repaired = FinancialRepairService.repair(df)
+    # EPS = 10,000,000 / 100,000 = 100.0
+    assert repaired["eps"][0] == 100.0
+    # BPS = 100,000,000 / 100,000 = 1000.0
+    assert repaired["bps"][0] == 1000.0
+    # PER = 2000.0 / 100.0 = 20.0
+    assert repaired["per"][0] == 20.0
+    # PBR = 2000.0 / 1000.0 = 2.0
+    assert repaired["pbr"][0] == 2.0
+    # Dividend Yield = (60.0 / 2000.0) * 100 = 3.0%
+    assert repaired["dividend_yield"][0] == 3.0
+    # Market Cap = 2000.0 * 100,000 = 200,000,000.0
+    assert repaired["market_cap"][0] == 200_000_000.0
+
+

@@ -7,7 +7,11 @@ from datetime import datetime, timedelta
 from threading import Semaphore
 from typing import Any, Dict, List
 
-from src.fetcher.edinet_fetcher import EdinetFetcher
+from src.fetcher.edinet_fetcher import (
+    EdinetAuthenticationError,
+    EdinetFetcher,
+    mask_api_key,
+)
 from src.fetcher.xbrl_parser import XbrlParser
 
 
@@ -97,7 +101,9 @@ class TurboAcquisitionManager:
                             d["is_annual"] = doc_type in ["120", "130"]
                             raw_docs.append(d)
                 except Exception as e:
-                    self.logger.error(f"❌ Scan error: {e}")
+                    if isinstance(e, EdinetAuthenticationError):
+                        raise
+                    self.logger.error(f"❌ Scan error: {mask_api_key(str(e))}")
 
         return raw_docs
 
@@ -128,6 +134,21 @@ class TurboAcquisitionManager:
 
     def _execute_pipeline(self, target_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
         """ダウンロード制限付きの並列パースパイプライン"""
+        from src.fetcher.edinet_fetcher import EdinetAuthenticationError, mask_api_key
+        from src.repositories.duck_repository import DuckDBRepository
+
+        # DuckDB 永続層から取得済みの doc_id 一覧をロード (Colab セッション跨ぎ差分キャッシュ)
+        try:
+            duck_repo = DuckDBRepository()
+            processed_doc_ids = duck_repo.get_processed_edinet_doc_ids()
+        except Exception:
+            processed_doc_ids = set()
+
+        if processed_doc_ids:
+            self.logger.info(
+                f"🗄️ DuckDB 差分キャッシュ: {len(processed_doc_ids)} 件の処理済み書類を実通信から除外します。"
+            )
+
         dl_semaphore = Semaphore(self.max_dl_concurrency)
         results = {}
 
@@ -136,7 +157,11 @@ class TurboAcquisitionManager:
             doc_id = doc["docID"]
             result_file = os.path.join(self.results_dir, f"{code}.json")
 
-            # 二層キャッシュガード判定 (取得済み同一書類の実通信を100%遮断)
+            # 第1段: DuckDB 永続層キャッシュ判定 (セッション跨ぎでの実通信を100%遮断)
+            if doc_id in processed_doc_ids:
+                return None
+
+            # 第2段: ローカル作業層 JSON キャッシュ判定
             if os.path.exists(result_file):
                 try:
                     with open(result_file, "r", encoding="utf-8") as f:
@@ -180,8 +205,12 @@ class TurboAcquisitionManager:
                         json.dump(item, f, indent=2, ensure_ascii=False)
                     return code, item
 
+            except EdinetAuthenticationError:
+                raise
             except Exception as e:
-                self.logger.error(f"❌ Pipeline failed for {code}: {e}")
+                self.logger.error(
+                    f"❌ Pipeline failed for {code}: {mask_api_key(str(e))}"
+                )
             return None
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:

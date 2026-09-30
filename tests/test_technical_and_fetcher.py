@@ -121,6 +121,34 @@ def test_edinet_fetcher_basic(tmp_path):
     assert ef is not None
 
 
+def test_mask_api_key_and_authentication_error(monkeypatch):
+    from src.fetcher.edinet_fetcher import EdinetAuthenticationError, mask_api_key
+
+    # 1. mask_api_key の URL / ヘッダー内キー伏字化検証
+    url = "https://api.edinet-fsa.go.jp/api/v2/documents.json?date=2026-06-25&type=2&Subscription-Key=abc123def456xyz"
+    masked = mask_api_key(url)
+    assert "abc123def456xyz" not in masked
+    assert "Subscription-Key=***" in masked
+
+    header_text = "{'Ocp-Apim-Subscription-Key': 'secretkey999'}"
+    masked_header = mask_api_key(header_text)
+    assert "secretkey999" not in masked_header
+    assert "***" in masked_header
+
+    # 2. 401/403 時に EdinetAuthenticationError が送出されること
+    monkeypatch.setenv("EDINET_API_KEY", "invalid_test_key")
+    ef = EdinetFetcher(config={})
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.json.return_value = {"metadata": {"status": "401", "message": "Unauthorized"}}
+        mock_get.return_value = mock_resp
+
+        with pytest.raises(EdinetAuthenticationError, match="認証に失敗しました"):
+            ef.fetch_documents_by_date("2026-06-25")
+
+
+
 # --- market_fetcher.py Tests ---
 
 

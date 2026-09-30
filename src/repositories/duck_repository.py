@@ -230,6 +230,30 @@ class DuckDBRepository:
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS operating_income DOUBLE"
             )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS net_assets DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS total_assets DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS dps DOUBLE"
+            )
+
+            # EDINET 処理済み書類メタデータ (セッション跨ぎ差分キャッシュ用)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS edinet_documents (
+                    doc_id VARCHAR PRIMARY KEY,
+                    code VARCHAR,
+                    doc_type VARCHAR,
+                    submit_date VARCHAR,
+                    is_annual BOOLEAN DEFAULT FALSE,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_edinet_docs_code ON edinet_documents(code)"
+            )
 
             # [v27.2] 市場カレンダー・キャッシュ
             conn.execute("""
@@ -350,3 +374,35 @@ class DuckDBRepository:
             """,
                 [alert_id],
             )
+
+    def get_processed_edinet_doc_ids(self) -> set[str]:
+        """処理済みの EDINET doc_id セットを取得する (Colab セッション跨ぎ差分キャッシュ用)"""
+        try:
+            with self.client.get_connection() as conn:
+                res = conn.execute("SELECT doc_id FROM edinet_documents").fetchall()
+                return {row[0] for row in res if row and row[0]}
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to fetch processed EDINET docs: {e}")
+            return set()
+
+    def record_edinet_document(
+        self,
+        doc_id: str,
+        code: str,
+        doc_type: Optional[str] = None,
+        submit_date: Optional[str] = None,
+        is_annual: bool = False,
+    ) -> None:
+        """EDINET 書類の処理完了を記録する"""
+        try:
+            with self.client.get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO edinet_documents (doc_id, code, doc_type, submit_date, is_annual, processed_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    [doc_id, code, doc_type, submit_date, is_annual],
+                )
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to record EDINET doc {doc_id}: {e}")
+
