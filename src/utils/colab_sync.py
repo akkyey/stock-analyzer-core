@@ -180,14 +180,14 @@ class ColabSyncManager:
 
         drive_cache = drive_dir / "cache"
         drive_output = drive_dir / "output"
-        drive_cache.mkdir(parents=True, exist_ok=True)
-        drive_output.mkdir(parents=True, exist_ok=True)
-
         drive_db = drive_cache / filename
         drive_bak = drive_cache / f"{filename}.bak"
         drive_tmp = drive_cache / f"{filename}.tmp"
 
         try:
+            drive_cache.mkdir(parents=True, exist_ok=True)
+            drive_output.mkdir(parents=True, exist_ok=True)
+
             # 1. DB の同期
             if working_db.exists() and working_db.stat().st_size > 0:
                 # WAL を確実にメイン DB ファイルへフラッシュ

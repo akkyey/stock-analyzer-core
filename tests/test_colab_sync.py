@@ -13,6 +13,7 @@ from src.utils.colab_sync import ColabSyncManager
 def _create_valid_duckdb(db_path: Path) -> None:
     """テスト用の健全な DuckDB ファイルを生成する"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.unlink(missing_ok=True)
     with duckdb.connect(str(db_path)) as conn:
         conn.execute("CREATE TABLE stocks (code VARCHAR PRIMARY KEY, name VARCHAR)")
         conn.execute("CREATE TABLE fundamentals (code VARCHAR PRIMARY KEY, per DOUBLE)")
@@ -138,3 +139,11 @@ def test_push_artifacts_safety_and_cleanup(tmp_path):
         working_dir, drive_dir, flush_unmount=False
     )
     assert blocked is False
+
+    # [Case 3] Drive がアンマウント・切断されている場合の安全復帰
+    _create_valid_duckdb(working_db)
+    with patch("pathlib.Path.mkdir", side_effect=OSError("Transport endpoint is not connected")):
+        safe_return = ColabSyncManager.push_artifacts(
+            working_dir, drive_dir, flush_unmount=False
+        )
+        assert safe_return is False
