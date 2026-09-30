@@ -126,3 +126,27 @@ def test_financial_repair_dynamic_valuation_metrics():
     assert repaired["market_cap"][0] == 200_000_000.0
 
 
+def test_financial_repair_nan_inf_safety():
+    """NaN や Inf を含む不正な入力値に対して、ゼロ除算や Inf 伝播を起こさず安全に処理されること"""
+    df = pl.DataFrame(
+        {
+            "code": ["1001", "1002", "1003"],
+            "price": [1000.0, float("nan"), float("inf")],
+            "net_profit": [float("nan"), 1000.0, -500.0],
+            "shares_outstanding": [0.0, float("inf"), 100.0],
+            "net_assets": [float("inf"), float("nan"), 5000.0],
+            "total_assets": [0.0, float("nan"), float("inf")],
+            "dps": [float("nan"), -10.0, 50.0],
+        }
+    )
+
+    repaired = FinancialRepairService.repair(df)
+    assert len(repaired) == 3
+    # ゼロ除算や inf から PER/PBR が inf にならず None になること
+    assert repaired["per"][0] is None
+    assert repaired["per"][1] is None
+    assert repaired["pbr"][0] is None
+    assert repaired["pbr"][1] is None
+
+
+

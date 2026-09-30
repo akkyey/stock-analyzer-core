@@ -30,16 +30,15 @@ class ColabSyncManager:
         try:
             import duckdb
 
-            # 読み取り専用で接続テスト
-            conn = duckdb.connect(str(db_path), read_only=True)
-            # 1. 基本的なカタログ整合性確認
-            conn.execute("SELECT count(*) FROM information_schema.tables").fetchall()
-            # 2. 主要テーブルのデータブロック読み込み検証
-            tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
-            for tbl in ["stocks", "fundamentals"]:
-                if tbl in tables:
-                    conn.execute(f"SELECT count(*) FROM {tbl}").fetchall()
-            conn.close()
+            # 読み取り専用で接続テスト (コンテキストマネージャで確実に切断)
+            with duckdb.connect(str(db_path), read_only=True) as conn:
+                # 1. 基本的なカタログ整合性確認
+                conn.execute("SELECT count(*) FROM information_schema.tables").fetchall()
+                # 2. 主要テーブルのデータブロック読み込み検証
+                tables = [row[0] for row in conn.execute("SHOW TABLES").fetchall()]
+                for tbl in ["stocks", "fundamentals"]:
+                    if tbl in tables:
+                        conn.execute(f"SELECT count(*) FROM {tbl}").fetchall()
             return True
         except Exception as e:
             logger.warning(f"⚠️ DuckDB 健全性検証エラー ({db_path}): {e}")
@@ -93,29 +92,43 @@ class ColabSyncManager:
         chosen = False
         # 第1段: メインDBの検証と採用
         if drive_db.exists():
-            shutil.copy2(drive_db, working_db)
-            if cls.is_duckdb_healthy(working_db):
-                logger.info(
-                    f"✅ [Pull: 第1段] Google Drive から健全なメイン DB をロードしました: {working_db}"
-                )
-                chosen = True
-            else:
+            try:
+                shutil.copy2(drive_db, working_db)
+                if cls.is_duckdb_healthy(working_db):
+                    logger.info(
+                        f"✅ [Pull: 第1段] Google Drive から健全なメイン DB をロードしました: {working_db}"
+                    )
+                    chosen = True
+                else:
+                    logger.warning(
+                        "⚠️ [Pull] Drive 上のメイン DB が破損しているか不正です。バックアップからの復旧を試みます..."
+                    )
+                    if working_db.exists():
+                        working_db.unlink(missing_ok=True)
+            except Exception as e:
                 logger.warning(
-                    "⚠️ [Pull] Drive 上のメイン DB が破損しているか不正です。バックアップからの復旧を試みます..."
+                    f"⚠️ [Pull] Drive メイン DB のコピー失敗 ({e})。バックアップ復旧を試みます..."
                 )
                 if working_db.exists():
                     working_db.unlink(missing_ok=True)
 
         # 第2段: バックアップ (.bak) の検証と採用
         if not chosen and drive_bak.exists():
-            shutil.copy2(drive_bak, working_db)
-            if cls.is_duckdb_healthy(working_db):
+            try:
+                shutil.copy2(drive_bak, working_db)
+                if cls.is_duckdb_healthy(working_db):
+                    logger.warning(
+                        f"⚠️ [Pull: 第2段] メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました: {working_db}"
+                    )
+                    chosen = True
+                else:
+                    logger.warning("⚠️ [Pull] バックアップ DB (.bak) も破損しています。")
+                    if working_db.exists():
+                        working_db.unlink(missing_ok=True)
+            except Exception as e:
                 logger.warning(
-                    f"⚠️ [Pull: 第2段] メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました: {working_db}"
+                    f"⚠️ [Pull] Drive バックアップ DB のコピー失敗 ({e})。"
                 )
-                chosen = True
-            else:
-                logger.warning("⚠️ [Pull] バックアップ DB (.bak) も破損しています。")
                 if working_db.exists():
                     working_db.unlink(missing_ok=True)
 
@@ -132,7 +145,10 @@ class ColabSyncManager:
 
         # working_db と working_cache_db の両方を同期（二重参照の完全安全化）
         if working_db != working_cache_db and working_db.exists():
-            shutil.copy2(working_db, working_cache_db)
+            try:
+                shutil.copy2(working_db, working_cache_db)
+            except Exception as e:
+                logger.debug(f"working_cache_db sync notice: {e}")
 
         return working_db
 
@@ -192,10 +208,13 @@ class ColabSyncManager:
 
                 # 既存 Drive DB を .bak へ退避
                 if drive_db.exists():
-                    shutil.copy2(drive_db, drive_bak)
-                    logger.info(
-                        "🛡️ [Push] Drive 上の既存 DB を 1 世代バックアップ (.bak) に退避しました。"
-                    )
+                    try:
+                        shutil.copy2(drive_db, drive_bak)
+                        logger.info(
+                            "🛡️ [Push] Drive 上の既存 DB を 1 世代バックアップ (.bak) に退避しました。"
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ [Push] .bak 退避に失敗しましたが処理を続行します: {e}")
 
                 # .tmp 経由のアトミック置換
                 shutil.copy2(working_db, drive_tmp)
@@ -204,16 +223,21 @@ class ColabSyncManager:
                     f"✅ [Push] 最新 DB をアトミックに Google Drive へ同期しました: {drive_db}"
                 )
 
-            # 2. CSV レポートの同期
+            # 2. CSV レポートの同期 (ファイルごとに安全処理)
             working_output = working_dir / "output"
             for csv_name in [cls.DAILY_REPORT_FILENAME, cls.UNPROCESSED_FILENAME]:
                 w_csv = working_output / csv_name
                 if w_csv.exists():
                     d_csv = drive_output / csv_name
                     d_tmp = drive_output / f"{csv_name}.tmp"
-                    shutil.copy2(w_csv, d_tmp)
-                    os.replace(d_tmp, d_csv)
-                    logger.info(f"✅ [Push] レポート CSV を同期しました: {d_csv}")
+                    try:
+                        shutil.copy2(w_csv, d_tmp)
+                        os.replace(d_tmp, d_csv)
+                        logger.info(f"✅ [Push] レポート CSV を同期しました: {d_csv}")
+                    except Exception as csv_err:
+                        logger.warning(f"⚠️ [Push] {csv_name} の同期中に警告: {csv_err}")
+                        if d_tmp.exists():
+                            d_tmp.unlink(missing_ok=True)
 
             # 3. Colab 環境でのフラッシュとアンマウント
             if flush_unmount:
@@ -226,6 +250,16 @@ class ColabSyncManager:
                 f"❌ [Push] Google Drive への同期中にエラーが発生しました: {e}",
                 exc_info=True,
             )
+            # 異常系: 中途半端に残った .tmp ファイルを確実に掃除
+            for tmp_file in [drive_tmp] + [
+                drive_output / f"{csv_name}.tmp"
+                for csv_name in [cls.DAILY_REPORT_FILENAME, cls.UNPROCESSED_FILENAME]
+            ]:
+                try:
+                    if tmp_file.exists():
+                        tmp_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
             return False
 
     @classmethod

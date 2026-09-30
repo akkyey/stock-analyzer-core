@@ -177,6 +177,62 @@ def test_mask_api_key_and_authentication_error(monkeypatch):
             ef.download_xbrl("S100TEST", "/tmp/dummy_save_dir")
 
 
+def test_edinet_fetcher_transient_retry_and_recovery(monkeypatch):
+    """429 や 503 等の一時的エラーに対してリトライを実行し、回復時は正常にデータを取得できること"""
+    ef = EdinetFetcher(config={})
+    monkeypatch.setattr("time.sleep", lambda s: None)  # テスト高速化のため sleep をスキップ
+
+    with patch("requests.get") as mock_get:
+        resp_429 = MagicMock()
+        resp_429.status_code = 429
+        resp_429.text = '{"message": "Rate limit exceeded"}'
+        resp_429.json.return_value = {"message": "Rate limit exceeded"}
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.text = '{"results": [{"docID": "S100TEST"}]}'
+        resp_200.json.return_value = {"results": [{"docID": "S100TEST"}]}
+
+        mock_get.side_effect = [resp_429, resp_200]
+
+        res = ef.fetch_documents_by_date("2026-06-25")
+        assert len(res.get("results", [])) == 1
+        assert mock_get.call_count == 2
+
+
+def test_download_xbrl_cleanup_on_failure(tmp_path, monkeypatch):
+    """ダウンロード中または認証検証で失敗した場合、破損/不完全な zip ファイルがディスクに残らないこと"""
+    ef = EdinetFetcher(config={})
+    save_dir = str(tmp_path / "xbrl_downloads")
+
+    with patch("requests.get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/octet-stream"}
+        # 不完全なチャンクを返し、途中で例外を発生させる
+        mock_resp.iter_content.side_effect = RuntimeError("Network dropped during stream")
+        mock_get.return_value = mock_resp
+
+        with pytest.raises(RuntimeError, match="Failed to download XBRL"):
+            ef.download_xbrl("S100FAIL", save_dir)
+
+        # ファイルが残留していないことを確認
+        assert not (tmp_path / "xbrl_downloads" / "S100FAIL.zip").exists()
+
+
+def test_xbrl_parser_corrupted_zip(tmp_path):
+    """破損した ZIP ファイル（BadZipFile）を渡してもクラッシュせず空辞書を安全に返すこと"""
+    from src.fetcher.xbrl_parser import XbrlParser
+
+    parser = XbrlParser()
+    bad_zip = tmp_path / "corrupted.zip"
+    bad_zip.write_bytes(b"This is definitely not a zip file content.")
+
+    res = parser.parse_zip(str(bad_zip))
+    assert res == {}
+
+
+
 
 # --- market_fetcher.py Tests ---
 

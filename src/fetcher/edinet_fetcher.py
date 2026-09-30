@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, cast
 
@@ -121,26 +122,58 @@ class EdinetFetcher:
         headers, params = self._get_headers_and_params({"date": date_str, "type": 2})
 
         self.logger.info(f"🌐 Fetching EDINET documents for {date_str}...")
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            self._validate_auth_response(response.status_code, text=response.text)
-            response.raise_for_status()
-            data = cast(Dict[str, Any], response.json())
-            self._validate_auth_response(response.status_code, data=data)
-            return data
-        except EdinetAuthenticationError:
-            raise
-        except requests.exceptions.JSONDecodeError as e:
-            self.logger.warning(
-                f"⚠️ EDINET API returned non-JSON response for {date_str} (HTTP {response.status_code}): {e}. Content preview: {response.text[:150]}"
-            )
-            return {"results": []}
-        except Exception as e:
-            masked_err = mask_api_key(str(e))
-            self.logger.error(
-                f"❌ Failed to fetch EDINET documents for {date_str}: {masked_err}"
-            )
-            return {"results": []}
+        max_retries = 3
+        backoff_sec = 2.0
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.get(url, params=params, headers=headers, timeout=30)
+                self._validate_auth_response(response.status_code, text=response.text)
+
+                # 一時的な 429 または 5xx サーバーエラーの場合はリトライ
+                if (
+                    response.status_code in (429, 500, 502, 503, 504)
+                    and attempt < max_retries
+                ):
+                    self.logger.warning(
+                        f"⚠️ EDINET API returned HTTP {response.status_code} for {date_str}. Retrying in {backoff_sec:.1f}s (attempt {attempt}/{max_retries})..."
+                    )
+                    time.sleep(backoff_sec)
+                    backoff_sec *= 2.0
+                    continue
+
+                response.raise_for_status()
+                data = cast(Dict[str, Any], response.json())
+                self._validate_auth_response(response.status_code, data=data)
+                return data
+            except EdinetAuthenticationError:
+                raise
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                if attempt < max_retries:
+                    self.logger.warning(
+                        f"⚠️ EDINET API connection/timeout error for {date_str}: {e}. Retrying in {backoff_sec:.1f}s (attempt {attempt}/{max_retries})..."
+                    )
+                    time.sleep(backoff_sec)
+                    backoff_sec *= 2.0
+                    continue
+                else:
+                    self.logger.error(
+                        f"❌ Failed to fetch EDINET documents for {date_str} after {max_retries} attempts: {e}"
+                    )
+                    return {"results": []}
+            except requests.exceptions.JSONDecodeError as e:
+                self.logger.warning(
+                    f"⚠️ EDINET API returned non-JSON response for {date_str} (HTTP {response.status_code}): {e}. Content preview: {response.text[:150]}"
+                )
+                return {"results": []}
+            except Exception as e:
+                masked_err = mask_api_key(str(e))
+                self.logger.error(
+                    f"❌ Failed to fetch EDINET documents for {date_str}: {masked_err}"
+                )
+                return {"results": []}
+
+        return {"results": []}
 
     def parse_code_listing(self) -> Dict[str, str]:
         """EdinetcodeDlInfo.csv を解析して {証券コード(4桁): EDINETコード} のマップを返す"""
@@ -229,8 +262,18 @@ class EdinetFetcher:
 
             return file_path
         except EdinetAuthenticationError:
+            if "file_path" in locals() and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
             raise
         except Exception as e:
+            if "file_path" in locals() and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
             masked_err = mask_api_key(str(e))
             raise RuntimeError(
                 f"Failed to download XBRL for {doc_id}: {masked_err}"

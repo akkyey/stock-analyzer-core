@@ -53,18 +53,25 @@ class XbrlParser:
     def parse_zip(self, zip_path: str) -> Dict[str, Any]:
         """ダウンロードした ZIP 内の XBRL 本体を探してパースする"""
         results: dict[str, Any] = {}
-        with zipfile.ZipFile(zip_path, "r") as z:
-            # .xbrl ファイルを探す (PublicDoc/ 内にあることが多い)
-            xbrl_files = [f for f in z.namelist() if f.endswith(".xbrl")]
-            if not xbrl_files:
-                self.logger.debug(f"ℹ️ No XBRL file found in {zip_path}")
-                return results
+        try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+                # .xbrl ファイルを探す (PublicDoc/ 内にあることが多い)
+                xbrl_files = [f for f in z.namelist() if f.endswith(".xbrl")]
+                if not xbrl_files:
+                    self.logger.debug(f"ℹ️ No XBRL file found in {zip_path}")
+                    return results
 
-            # 最大のファイルを本番データとみなす (簡易判定)
-            target = max(xbrl_files, key=lambda f: z.getinfo(f).file_size)
-            with z.open(target) as f:
-                content = f.read()
-                results = self.parse_content(content)
+                # 最大のファイルを本番データとみなす (簡易判定)
+                target = max(xbrl_files, key=lambda f: z.getinfo(f).file_size)
+                with z.open(target) as f:
+                    content = f.read()
+                    results = self.parse_content(content)
+        except (zipfile.BadZipFile, OSError, EOFError) as e:
+            self.logger.warning(f"⚠️ Corrupted or unreadable zip file ({zip_path}): {e}")
+            return {}
+        except Exception as e:
+            self.logger.error(f"❌ Unexpected error reading zip ({zip_path}): {e}")
+            return {}
 
         return results
 

@@ -28,9 +28,9 @@ class FinancialRepairService:
                 [
                     pl.when(
                         pl.col("equity_ratio").is_null()
-                        & pl.col("total_assets").is_not_null()
+                        & pl.col("total_assets").is_finite()
                         & (pl.col("total_assets") > 0)
-                        & pl.col("net_assets").is_not_null()
+                        & pl.col("net_assets").is_finite()
                     )
                     .then((pl.col("net_assets") / pl.col("total_assets")) * 100.0)
                     .otherwise(pl.col("equity_ratio"))
@@ -46,7 +46,7 @@ class FinancialRepairService:
                 [
                     pl.when(
                         pl.col("equity_ratio").is_null()
-                        & pl.col("debt_equity_ratio").is_not_null()
+                        & pl.col("debt_equity_ratio").is_finite()
                         & (pl.col("debt_equity_ratio") > 0)
                     )
                     .then(100.0 / (1.0 + (pl.col("debt_equity_ratio") / 100.0)))
@@ -65,8 +65,8 @@ class FinancialRepairService:
                 df = df.with_columns(
                     pl.when(
                         pl.col("eps").is_null()
-                        & pl.col("net_profit").is_not_null()
-                        & pl.col("shares_outstanding").is_not_null()
+                        & pl.col("net_profit").is_finite()
+                        & pl.col("shares_outstanding").is_finite()
                         & (pl.col("shares_outstanding") > 0)
                     )
                     .then(pl.col("net_profit") / pl.col("shares_outstanding"))
@@ -81,8 +81,8 @@ class FinancialRepairService:
                 df = df.with_columns(
                     pl.when(
                         pl.col("bps").is_null()
-                        & pl.col("net_assets").is_not_null()
-                        & pl.col("shares_outstanding").is_not_null()
+                        & pl.col("net_assets").is_finite()
+                        & pl.col("shares_outstanding").is_finite()
                         & (pl.col("shares_outstanding") > 0)
                     )
                     .then(pl.col("net_assets") / pl.col("shares_outstanding"))
@@ -96,9 +96,9 @@ class FinancialRepairService:
                     df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("per"))
                 df = df.with_columns(
                     pl.when(
-                        pl.col("eps").is_not_null()
+                        pl.col("eps").is_finite()
                         & (pl.col("eps") > 0)
-                        & pl.col("price").is_not_null()
+                        & pl.col("price").is_finite()
                         & (pl.col("price") > 0)
                     )
                     .then(pl.col("price") / pl.col("eps"))
@@ -112,9 +112,9 @@ class FinancialRepairService:
                     df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("pbr"))
                 df = df.with_columns(
                     pl.when(
-                        pl.col("bps").is_not_null()
+                        pl.col("bps").is_finite()
                         & (pl.col("bps") > 0)
-                        & pl.col("price").is_not_null()
+                        & pl.col("price").is_finite()
                         & (pl.col("price") > 0)
                     )
                     .then(pl.col("price") / pl.col("bps"))
@@ -130,9 +130,9 @@ class FinancialRepairService:
                     )
                 df = df.with_columns(
                     pl.when(
-                        pl.col("dps").is_not_null()
+                        pl.col("dps").is_finite()
                         & (pl.col("dps") >= 0)
-                        & pl.col("price").is_not_null()
+                        & pl.col("price").is_finite()
                         & (pl.col("price") > 0)
                     )
                     .then((pl.col("dps") / pl.col("price")) * 100.0)
@@ -148,9 +148,9 @@ class FinancialRepairService:
                     )
                 df = df.with_columns(
                     pl.when(
-                        pl.col("shares_outstanding").is_not_null()
+                        pl.col("shares_outstanding").is_finite()
                         & (pl.col("shares_outstanding") > 0)
-                        & pl.col("price").is_not_null()
+                        & pl.col("price").is_finite()
                         & (pl.col("price") > 0)
                     )
                     .then(pl.col("price") * pl.col("shares_outstanding"))

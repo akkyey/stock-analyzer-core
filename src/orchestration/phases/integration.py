@@ -181,13 +181,24 @@ class IntegrationPhase(BasePhase):
             self.log_error(err_msg)
             raise AssertionError(err_msg)
 
-        null_exprs = [pl.col(c).is_null().sum().alias(c) for c in essential_cols]
-        null_counts = df.select(null_exprs).to_dicts()[0]
-        invalid_cols = {col: count for col, count in null_counts.items() if count > 0}
+        # null または NaN (float型の場合) を網羅的に検知
+        invalid_exprs = [
+            (
+                pl.col(c).is_null()
+                | (pl.col(c).is_nan() if df.schema[c].is_float() else pl.lit(False))
+            )
+            .sum()
+            .alias(c)
+            for c in essential_cols
+        ]
+        invalid_counts = df.select(invalid_exprs).to_dicts()[0]
+        invalid_cols = {
+            col: count for col, count in invalid_counts.items() if count > 0
+        }
         if invalid_cols:
-            err_msg = f"Data Contract Violation: Null values detected in essential columns: {invalid_cols}"
+            err_msg = f"Data Contract Violation: Null values detected in essential columns (null/NaN): {invalid_cols}"
             self.log_error(err_msg)
             raise AssertionError(err_msg)
         self.log_info(
-            f"✅ Data contract verified: 0.00% missing values across essential columns ({essential_cols})."
+            f"✅ Data contract verified: 0.00% missing/NaN values across essential columns ({essential_cols})."
         )
