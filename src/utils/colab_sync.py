@@ -9,7 +9,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,36 @@ class ColabSyncManager:
     DB_FILENAME = "stock_analyzer.duckdb"
     DAILY_REPORT_FILENAME = "daily_report.csv"
     UNPROCESSED_FILENAME = "uncalculable_stocks.csv"
+
+    DEFAULT_DRIVE_FOLDER = "StockAnalyzer"
+    DEFAULT_DRIVE_BASE = Path("/content/drive/MyDrive")
+
+    @classmethod
+    def resolve_drive_dir(
+        cls,
+        drive_path_or_name: Optional[Union[str, Path]] = None,
+    ) -> Path:
+        """Google Drive 上の作業・保存先ディレクトリを安全かつ柔軟に解決する。
+
+        解決ロジック:
+        1. 引数 drive_path_or_name が指定されている場合:
+           - 絶対パス（/ で始まる）: そのまま Path オブジェクトとして採用（共有ドライブ等も対応）
+           - 相対パス（フォルダ名）: /content/drive/MyDrive/<名前> として結合
+        2. 環境変数 STOCK_ANALYZER_DRIVE_DIR が設定されている場合:
+           - そのパスを採用
+        3. デフォルト:
+           - /content/drive/MyDrive/StockAnalyzer
+        """
+        raw = drive_path_or_name or os.getenv("STOCK_ANALYZER_DRIVE_DIR")
+        if not raw:
+            return cls.DEFAULT_DRIVE_BASE / cls.DEFAULT_DRIVE_FOLDER
+
+        p = Path(raw)
+        if p.is_absolute():
+            return p
+
+        # 相対パスの場合は MyDrive 配下として解決
+        return cls.DEFAULT_DRIVE_BASE / p
 
     @classmethod
     def is_duckdb_healthy(cls, db_path: Path) -> bool:

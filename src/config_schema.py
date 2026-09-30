@@ -53,6 +53,7 @@ class GDriveConfig(BaseModel):
     use_shared_drive: bool = False
     shared_folder_id: str | None = None
     report_spreadsheet_id: str | None = None
+    drive_dir: str | None = None
 
 
 class SectorPolicy(BaseModel):

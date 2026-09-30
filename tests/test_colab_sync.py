@@ -147,3 +147,34 @@ def test_push_artifacts_safety_and_cleanup(tmp_path):
             working_dir, drive_dir, flush_unmount=False
         )
         assert safe_return is False
+
+
+def test_resolve_drive_dir(monkeypatch):
+    """Google Drive パス解決のカスタマイズ性テスト（デフォルト、フォルダ名、相対パス、絶対パス、環境変数）"""
+    monkeypatch.delenv("STOCK_ANALYZER_DRIVE_DIR", raising=False)
+
+    # 1. デフォルト (引数なし)
+    p_def = ColabSyncManager.resolve_drive_dir()
+    assert p_def == Path("/content/drive/MyDrive/StockAnalyzer")
+
+    # 2. ユーザー指定フォルダ名
+    p_custom = ColabSyncManager.resolve_drive_dir("MyStockAnalyzer")
+    assert p_custom == Path("/content/drive/MyDrive/MyStockAnalyzer")
+
+    # 3. 階層化された相対パス
+    p_nested = ColabSyncManager.resolve_drive_dir("Portfolio/JapanEquities")
+    assert p_nested == Path("/content/drive/MyDrive/Portfolio/JapanEquities")
+
+    # 4. フルパス（共有ドライブ含む）
+    p_shared = ColabSyncManager.resolve_drive_dir("/content/drive/Shareddrives/Team/StockAnalyzer")
+    assert p_shared == Path("/content/drive/Shareddrives/Team/StockAnalyzer")
+
+    # 5. Path オブジェクト直接渡し
+    p_path_obj = ColabSyncManager.resolve_drive_dir(Path("/custom/dir/path"))
+    assert p_path_obj == Path("/custom/dir/path")
+
+    # 6. 環境変数による指定
+    monkeypatch.setenv("STOCK_ANALYZER_DRIVE_DIR", "/custom/env/drive/StockAnalyzer")
+    p_env = ColabSyncManager.resolve_drive_dir()
+    assert p_env == Path("/custom/env/drive/StockAnalyzer")
+
