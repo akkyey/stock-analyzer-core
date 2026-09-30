@@ -74,7 +74,7 @@ stock-analyzer-core/
 │   └── ...
 │
 ├── data/                              # 💾 ローカル実行時のデフォルト配置 (Git管理外: .gitignore)
-│   ├── cache/                         # SQLiteメタデータ・有報キャッシュ
+│   ├── cache/                         # DuckDBメタデータ・有報キャッシュ
 │   └── output/                        # 生成CSV (daily_report.csv等)
 │
 ├── docs/                              # 📚 設計書・技術ドキュメント
@@ -89,15 +89,16 @@ stock-analyzer-core/
 
 * **Google Colab 実行時（Stage-and-Sync 規約）**:
   - **作業層（Colab 内蔵 高速ローカルSSD: `/content/working/`）**:
-    - `cache/`: 実行中の SQLite DB、一時展開生 ZIP（パース直後に即時削除）
+    - `cache/`: 実行中の DuckDB (`stock_analyzer.duckdb`)、一時展開生 ZIP（パース直後に即時削除）
     - `output/`: 生成直後の CSV
-  - **永続層（Google Drive: `/content/drive/MyDrive/StockAnalyzer/`）**:
-    - `cache/`: `edinet_metadata.sqlite`（＋バックアップ `.bak`、安全同期用 `.tmp`）
+  - **永続層（Google Drive: `/content/drive/MyDrive/StockAnalyzer/` 等）**:
+    - ※ Colab フォーム `drive_folder_name` や設定 `gdrive.drive_dir`（環境変数 `STOCK_ANALYZER_DRIVE_DIR`）により任意のフォルダ名・相対パス・共有ドライブへ変更可能。
+    - `cache/`: `stock_analyzer.duckdb`（＋バックアップ `.bak`、安全同期用 `.tmp`）
     - `output/`: `daily_report.csv`, `uncalculable_stocks.csv`
     - `config/`: `custom_config.json`（ユーザー独自設定）
 * **ローカル PC / サーバー実行時**:
   - `STOCK_ANALYZER_BASE_DIR` が未指定の場合、リポジトリ直下の `data/` を自動使用：
-    - `data/cache/`: SQLite メタデータ等
+    - `data/cache/`: DuckDB データベース等
     - `data/output/`: レポート CSV
     - `config/custom_config.json`: 設定ファイル
 
@@ -363,7 +364,7 @@ from pathlib import Path
 
 # フォールバック & 優先順位の確定
 if use_custom_json:
-    json_path = Path("/content/drive/MyDrive/StockAnalyzer/config/custom_config.json")
+    json_path = DRIVE_DIR / "config" / "custom_config.json"
     if json_path.exists():
         with open(json_path, encoding="utf-8") as f:
             custom_config = json.load(f)

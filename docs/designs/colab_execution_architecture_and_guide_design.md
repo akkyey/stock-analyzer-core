@@ -33,8 +33,8 @@ Colab のランタイムと Google Drive 連携においては、一般的なロ
 
 1. **FUSE マウントによる極端な I/O レイテンシ（大量の細切れファイル問題）**:  
    Google Drive（`/content/drive/`）はネットワーク経由の FUSE（Filesystem in Userspace）で動作する。数千件に及ぶ有報書類の細切れキャッシュや JSON などを Drive 直下で直接読み書きすると、ローカル SSD と比較して数十倍〜百倍以上の遅延が発生し、平常時 1分40秒のパイプラインが 30分以上フリーズしたように遅くなる。
-2. **SQLite のファイルロック遅延と DB 破損リスク**:  
-   Drive 上の SQLite ファイルに対して高頻度の書き込み・トランザクションを実行すると、FUSE の遅延によって `database is locked` エラーやファイル破損が発生しやすい。
+2. **DuckDB のファイルロック遅延と DB 破損リスク**:  
+   Drive 上のデータベースファイルに対して直接高頻度の書き込み・トランザクションを実行すると、FUSE の遅延によってロック競合エラーやファイル破損が発生しやすい。
 3. **ユーザーの Google Drive 無料枠（15 GB）圧迫リスク**:  
    一般ユーザーの Drive 無料枠は Gmail や Google フォトと共有されている。生 ZIP や不要な中間生成物を Drive に溜め込むと、数回の実行で容量オーバーとなり実行不能に陥る。
 
@@ -70,7 +70,7 @@ flowchart TD
 | 領域 | パス | 格納対象 | 特徴・管理方針 |
 | :--- | :--- | :--- | :--- |
 | **作業層**<br>(Local SSD) | `/content/working/` | ・実行用 DuckDB (`cache/stock_analyzer.duckdb`)<br>・ダウンロードした生 ZIP<br>・Polars 中間テーブル | **Colab 内蔵 高速ローカル SSD**。<br>すべての高頻度 I/O はここで行い、生 ZIP はパース直後に即時削除（`unlink`）してディスクを圧迫させない。セッション切断で破棄される前提の一時領域。 |
-| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/` | ・`cache/stock_analyzer.duckdb`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB を消費させない（数十MB未満）。 |
+| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/`<br>（※`drive_folder_name` により任意のフォルダ名・相対階層・共有ドライブへ変更可能） | ・`cache/stock_analyzer.duckdb`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB を消費させない（数十MB未満）。 |
 
 ### 3.2 同期ライフサイクル（Stage-and-Sync 規約）
 1. **[Pull Phase: 実行開始時 & 整合性検証（3段構えの復元）]**:
@@ -111,7 +111,11 @@ flowchart TD
 
 #### 【Step 0】Google Drive マウント & キャッシュ初期化（Pull Phase）
 - `google.colab.drive.mount('/content/drive')` を実行。
-- 永続用フォルダ（`/content/drive/MyDrive/StockAnalyzer/`）の存在を確認し、なければ自動作成。
+- 入力パラメータ `drive_folder_name`（デフォルト: `StockAnalyzer`）または環境変数 `STOCK_ANALYZER_DRIVE_DIR` に基づき、`ColabSyncManager.resolve_drive_dir` で永続先フォルダを動的に解決。
+  - 単一フォルダ名（`StockAnalyzer` 等）の場合は `/content/drive/MyDrive/<名前>`
+  - 相対パス（`Portfolio/Japan` 等）の場合は `/content/drive/MyDrive/<相対パス>`
+  - 絶対パス（`/content/drive/Shareddrives/...` 等）の場合はそのまま採用（共有ドライブ対応）
+- 解決された永続用フォルダ配下の `cache/`, `output/`, `config/` の存在を確認し、なければ自動作成。
 - **Stage-and-Sync (Pull)**: 3.2 節の 3 段構え検証（メイン DB -> .bak -> 新規作成）に基づき、健全な DB を Colab の高速ローカル SSD（`/content/working/cache/`）へ配置。
 
 #### 【Step 1】環境セットアップ（安定リリースタグの取得 ＆ 依存解決）

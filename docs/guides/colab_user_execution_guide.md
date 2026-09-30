@@ -62,7 +62,11 @@ flowchart TD
 ### 【Step 0】Google Drive マウント & キャッシュ初期化
 - **実行内容**:
   - セルを実行すると、「Google ドライブへの接続を許可しますか？」というポップアップが表示されます。**「Google ドライブに接続」** をクリックして許可してください。
-  - Google Drive 内に `MyDrive/StockAnalyzer/` フォルダが自動作成されます。
+  - セル上部の入力フォーム **`drive_folder_name`** で Google Drive 上の保存先フォルダを自由にカスタマイズ可能です（デフォルト: `StockAnalyzer`）：
+    - **フォルダ名のみ指定**: `StockAnalyzer` や `MyAnalysis` 等（マイドライブ直下の `MyDrive/<フォルダ名>/` に自動展開）
+    - **階層パス指定**: `Portfolio/Japan` 等（マイドライブ配下の階層フォルダ）
+    - **共有ドライブ指定**: `/content/drive/Shareddrives/TeamFolder/StockAnalyzer`（Google Workspace の共有ドライブへの直接保存）
+  - 指定したフォルダ配下に `cache/`、`output/`、`config/` ディレクトリが自動作成されます。
   - 前回のキャッシュ DB がある場合は、Colab 内蔵の超高速ローカル SSD（`/content/working/`）へ自動で引き継がれます。
 - **安心設計**:
   - Google Drive に保存されるのは数MBのデータベースと結果 CSV のみです。無料の 15GB 枠を圧迫することは一切ありません。
