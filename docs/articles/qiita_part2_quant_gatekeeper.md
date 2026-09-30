@@ -28,7 +28,8 @@ private: false
 
 本稿では、前作の「全件一元ランキング」から、適格銘柄のみを抽出する「3層判定によるスクリーニング」、そして結果を後から検証しやすくする「適格・除外銘柄の2ファイル分離」についてまとめます。
 
-> 動作環境：Ubuntu 24.04 LTS / 8 vCPU / 16GB RAM / Python 3.12.8 / Polars 1.x
+> 動作環境：Ubuntu 24.04 LTS / 8 vCPU / 16GB RAM / Python 3.12.8 / Polars 1.x  
+> ※【リポジトリ実装の更新注記】OSS版 `stock-analyzer-core` では、金融商品取引法（投資助言規制）に配慮し、本記事で解説する `STRONG_BUY / BUY / WATCH / PASS` 判定に加え、客観的格付けグレード（`Grade S / Grade A / Grade B / Grade C`）を標準デフォルトとして提供しています。本記事の表記と同一の判定名を取得したい場合は、設定で `verdict_mode="legacy"` を指定することで完全互換動作します。
 
 ---
 
