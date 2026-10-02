@@ -104,6 +104,23 @@ def test_get_all_history_pl(db_conn):
     assert "Close" in history.columns
 
 
+def test_get_all_history_pl_returns_stored_ohlc_not_dummy_zeros(db_conn):
+    """DB の始値・高値・安値を返す (旧版のダミー 0 は欠損として返し、保存時に 0 を書き戻さない)"""
+    repo = MarketDataRepository()
+    d = datetime.now().strftime("%Y-%m-%d")
+    repo.upsert(
+        [
+            {"code": "1302", "entry_date": d, "price": 110.0, "open": 100.0, "high": 120.0, "low": 95.0},
+            {"code": "1303", "entry_date": d, "price": 50.0, "open": 0.0, "high": 0.0, "low": 0.0},
+        ]
+    )
+    h = repo.get_all_history_pl(months=1)
+    r2 = h.filter(pl.col("code") == "1302").to_dicts()[0]
+    r3 = h.filter(pl.col("code") == "1303").to_dicts()[0]
+    assert (r2["Open"], r2["High"], r2["Low"]) == (100.0, 120.0, 95.0)
+    assert (r3["Open"], r3["High"], r3["Low"]) == (None, None, None)
+
+
 def test_get_id(db_conn):
     """ID 生成の便宜的実装のテスト"""
     repo = MarketDataRepository()

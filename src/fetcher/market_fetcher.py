@@ -32,6 +32,14 @@ class MarketFetcher(FetcherBase):
         super().__init__(*args, **kwargs)
         self._thread_local = threading.local()
         self.lock = threading.Lock()
+        # 取得したデータに含まれていた株式分割 {code: [(日付, 比率)]}
+        self._detected_splits: dict[str, list[tuple[Any, float]]] = {}
+
+    def pop_detected_splits(self) -> dict[str, list[tuple[Any, float]]]:
+        """前回呼び出し以降の取得で見つかった株式分割を返し、記録を空にする。"""
+        with self.lock:
+            found, self._detected_splits = self._detected_splits, {}
+        return found
 
     def _warm_up(self) -> None:
         if MarketFetcher._warmed_up:
@@ -95,6 +103,9 @@ class MarketFetcher(FetcherBase):
                         interval="1d",
                         group_by="ticker",
                         auto_adjust=True,
+                        # 株式分割のイベントも同じリクエストで受け取る (Yahoo は日本株の
+                        # 分割を過去に遡って調整しないため、自前で調整する)
+                        actions=True,
                         threads=False,
                         progress=False,
                     )
@@ -107,6 +118,21 @@ class MarketFetcher(FetcherBase):
 
                     # If empty, it might be 429 or simply no data
                     record_fetch_stat(context, "empty_responses")
+                    # 確実にデータがある銘柄で試し取得し、取れれば「レート制限ではなく、
+                    # このバッチの銘柄にデータが無い (上場廃止・PRO Market 等)」と判断して
+                    # 待機・再試行をしない (無駄なバックオフの回避)
+                    if self._is_market_reachable(period, end_date):
+                        record_fetch_stat(context, "empty_no_data_batches")
+                        self.logger.info(
+                            f"ℹ️ Batch {sub_symbols[:2]}... にはデータがありません (レート制限ではないため再試行しません)"
+                        )
+                        break
+                    if attempt == profile.max_retries - 1:
+                        # 最後の試行の後は待っても再試行しないため、待たずに諦める
+                        self.logger.warning(
+                            f"⚠️ Batch {sub_symbols[:2]}... empty after {profile.max_retries} attempts."
+                        )
+                        break
                     wait_time = (2**attempt) * profile.empty_backoff_base + random.uniform(1, 3)
                     self.logger.warning(
                         f"⚠️ Batch {sub_symbols[:2]}... empty. Backoff {wait_time:.1f}s (Attempt {attempt + 1}/{profile.max_retries})"
@@ -115,13 +141,13 @@ class MarketFetcher(FetcherBase):
 
                 except Exception as e:
                     record_fetch_stat(context, "download_exceptions")
+                    if attempt == profile.max_retries - 1:
+                        raise e
                     wait_time = (2**attempt) * profile.error_backoff_base + random.uniform(2, 5)
                     self.logger.error(
                         f"❌ Error downloading {sub_symbols[:2]}...: {e}. Retry in {wait_time:.1f}s"
                     )
                     time.sleep(wait_time)
-                    if attempt == profile.max_retries - 1:
-                        raise e
 
             return df, time.time() - t_sub_start
 
@@ -185,6 +211,25 @@ class MarketFetcher(FetcherBase):
 
         return results
 
+    # レート制限の判定に使う、常にデータがある銘柄 (トヨタ自動車)
+    CANARY_SYMBOL = "7203.T"
+
+    def _is_market_reachable(self, period: str, end_date: str | None) -> bool:
+        """常にデータがある銘柄を 1 件取得できれば True (= レート制限を受けていない)。"""
+        try:
+            probe = yf.download(
+                tickers=[self.CANARY_SYMBOL],
+                period=period,
+                end=end_date,
+                interval="1d",
+                auto_adjust=True,
+                threads=False,
+                progress=False,
+            )
+            return probe is not None and not probe.empty
+        except Exception:
+            return False
+
     def _extract_dfs_from_batch(
         self, all_hist: pd.DataFrame, full_symbols: list[str]
     ) -> dict[str, pd.DataFrame]:
@@ -214,6 +259,26 @@ class MarketFetcher(FetcherBase):
                     )
                     continue
 
+                # 株式分割のイベント列を取り出し、履歴からは除く
+                if not hist.empty and "Stock Splits" in hist.columns:
+                    events = hist["Stock Splits"]
+                    events = events[events.notna() & (events > 0) & (events != 1)]
+                    if len(events):
+                        with self.lock:
+                            self._detected_splits.setdefault(code, []).extend(
+                                (ts.date() if hasattr(ts, "date") else ts, float(r))
+                                for ts, r in events.items()
+                            )
+                if not hist.empty:
+                    hist = hist.drop(
+                        columns=[c for c in ("Dividends", "Stock Splits", "Capital Gains") if c in hist.columns]
+                    )
+
+                # 終値が空の行 (Yahoo が直近日を NaN で返すことがある) は採用しない。
+                # 残すと DB 履歴との結合で同じ日付の正しい値を空で上書きし、
+                # 1 日前のデータが「最新」として扱われてしまう
+                if not hist.empty and "Close" in hist.columns:
+                    hist = hist[hist["Close"].notna()]
                 if not hist.empty and "Close" in hist.columns:
                     batch_results[code] = hist
                 else:

@@ -6,12 +6,25 @@
 
 import queue
 import threading
+import time
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Optional
 
 import pandas as pd
 import polars as pl
 
+from src.fetcher.incremental import (
+    ADJUSTMENT_TOLERANCE,
+    FULL_PERIOD,
+    REFETCH_PERIOD,
+    adjustment_ratio,
+    apply_split_adjustments,
+    drop_unsettled_today,
+    merge_history,
+    plan_period,
+)
 from src.orchestration.phases.base import BasePhase
+from src.utils import get_current_time
 from src.utils.diagnostics import record_fetch_stat
 
 
@@ -19,48 +32,130 @@ class AcquisitionPhase(BasePhase):
     """データ取得フェーズ (v10: yfinance financials 排除 / EDINET Turbo 統合)"""
 
     # 流動性指標 (直近20日平均売買代金) の算出に必要な最低履歴行数。
-    # これ未満の銘柄は 1y、十分な銘柄は 2d (差分) で取得する。
+    # これ未満の銘柄は全期間 (1y) を取得する
     MIN_HISTORY_ROWS = 20
+    # 差分更新でテクニカル指標の計算に使う DB 履歴の長さ (初回の 1y 取得と揃える)
+    HISTORY_MONTHS = 13
     FETCH_BATCH_SIZE = 20  # OHLCVのみなのでバッチサイズ拡大
+    # Producer から 1 件も届かない状態をどこまで待つか (秒)。Colab プロファイルの
+    # 再試行・待機 (1 バッチ最大約 8 分) より長くし、取得途中で打ち切らない
+    NO_ITEM_TIMEOUT_SEC = 900
+
+    # EDINET の走査期間の上限 (日)。前回の走査から間が空いても、これより前は遡らない
+    MAX_EDINET_SCAN_DAYS = 365
+    EDINET_SCAN_META_KEY = "edinet_last_scan_date"
+    # 旧版の EDINET 取り込みで NULL になった項目の復旧 (実施済みかどうかの記録キー)
+    RESTORE_META_KEY = "fundamentals_restored_parser_v2"
+    RESTORE_COLUMNS = (
+        "net_profit",
+        "prev_net_profit",
+        "sales",
+        "operating_income",
+        "operating_margin",
+        "eps",
+        "bps",
+        "dps",
+        "shares_outstanding",
+    )
+
+    def _edinet_scan_days(self, repo: Any, configured: int) -> int:
+        """EDINET の走査日数。前回の走査日から今日までを必ず含める (上限あり)。
+
+        固定日数だけを走査すると、実行間隔がそれより空いた場合に、その間に提出された
+        書類を取り逃し、翌年の提出まで反映されない。
+        """
+        try:
+            last = repo.get_meta(self.EDINET_SCAN_META_KEY)
+        except Exception:
+            last = None
+        days = configured
+        if last:
+            try:
+                last_d = datetime.strptime(last[:10], "%Y-%m-%d").date()
+                gap = (get_current_time().date() - last_d).days + 1
+                days = max(days, gap)
+            except ValueError:
+                pass
+        return min(days, self.MAX_EDINET_SCAN_DAYS)
+
+    def _record_edinet_scan(self, repo: Any, failed_dates: list) -> None:
+        """走査済みの日付を記録する。一覧を取得できなかった日があれば、次回はその日から走査する。"""
+        today = get_current_time().date()
+        if failed_dates:
+            earliest = min(datetime.strptime(d, "%Y-%m-%d").date() for d in failed_dates)
+            mark = earliest - timedelta(days=1)
+            self.log_warn(
+                f"EDINET の書類一覧を取得できなかった日が {len(failed_dates)} 日あります。次回 {earliest} から走査し直します。"
+            )
+        else:
+            mark = today
+        try:
+            previous = repo.get_meta(self.EDINET_SCAN_META_KEY)
+            # 失敗で記録を巻き戻す場合も、以前の記録より後ろへは進めない
+            if failed_dates and previous and previous[:10] < mark.isoformat():
+                mark = datetime.strptime(previous[:10], "%Y-%m-%d").date()
+            repo.set_meta(self.EDINET_SCAN_META_KEY, mark.isoformat())
+        except Exception as e:
+            self.log_warn(f"EDINET の走査日の記録に失敗しました: {e}")
+
+    @staticmethod
+    def _last_history_date(df_db: Any) -> Optional[date]:
+        """DB 履歴の最終日 (日付型でない場合は None)。"""
+        if df_db is None or df_db.is_empty() or "Date" not in df_db.columns:
+            return None
+        if not df_db.schema["Date"].is_temporal():
+            return None
+        last = df_db.select(pl.col("Date").cast(pl.Date).max()).item()
+        return last if isinstance(last, date) else None
 
     def _plan_fetch_batches(
         self,
         target_codes: list,
         db_hist_by_code: Dict[Any, Any],
+        today: Optional[date] = None,
     ) -> list:
-        """銘柄ごとに履歴の厚みで取得期間を決め、(codes, period) のバッチ列を返す。
+        """銘柄ごとに取得期間を決め、(codes, period) のバッチ列を返す。
 
         - 履歴が MIN_HISTORY_ROWS 未満 (新規・過去の取得欠落) → "1y"
-        - 十分 → "2d" (差分)
+        - 十分 → DB の最終日から今日までの欠落営業日数に合わせた差分 ("2d"〜"21d")。
+          欠落が 1 か月を超える場合は "1y"
         - config["is_first_run"] が True の場合は全銘柄 "1y"
 
-        リクエスト総数は増えず (銘柄を 2 グループに分けるだけ)、429 などで
-        欠落した銘柄も次回は自動的に 1y で取り直される。
+        実行間隔が空いても欠落日を取り込めるよう、期間は最終日から決める
+        (固定の 2 日では、間の日付が永久に欠落していた)。
         """
         cfg = getattr(self.context, "config", None) or {}
         force_full = bool(cfg.get("is_first_run", False))
+        today = today or get_current_time().date()
 
-        thin, enough = [], []
+        by_period: Dict[str, list] = {}
         for code in target_codes:
             df_db = db_hist_by_code.get((code,))
             rows = 0 if df_db is None else df_db.height
             if force_full or rows < self.MIN_HISTORY_ROWS:
-                thin.append(code)
+                period = FULL_PERIOD
             else:
-                enough.append(code)
+                last = self._last_history_date(df_db)
+                # 日付型でない履歴 (テスト用の簡易データ等) は従来どおり 2d
+                period = plan_period(last, today) if last is not None else "2d"
+            by_period.setdefault(period, []).append(code)
 
         size = self.FETCH_BATCH_SIZE
         batches: list[tuple[list, str]] = []
-        for codes, period in ((thin, "1y"), (enough, "2d")):
+        for period, codes in by_period.items():
             batches.extend(
                 (codes[i : i + size], period) for i in range(0, len(codes), size)
             )
-        self.log_info(
-            f"Fetch plan: {len(thin)} stocks -> 1y, {len(enough)} stocks -> 2d "
-            f"({len(batches)} batches)"
+        summary = ", ".join(f"{len(c)} stocks -> {p}" for p, c in by_period.items())
+        self.log_info(f"Fetch plan: {summary or 'none'} ({len(batches)} batches)")
+        record_fetch_stat(
+            self.context, "plan_stocks_1y", len(by_period.get(FULL_PERIOD, []))
         )
-        record_fetch_stat(self.context, "plan_stocks_1y", len(thin))
-        record_fetch_stat(self.context, "plan_stocks_2d", len(enough))
+        record_fetch_stat(
+            self.context,
+            "plan_stocks_2d",
+            sum(len(c) for p, c in by_period.items() if p != FULL_PERIOD),
+        )
         record_fetch_stat(self.context, "plan_batches", len(batches))
         return batches
 
@@ -154,10 +249,26 @@ class AcquisitionPhase(BasePhase):
         except Exception as e:
             self.log_error(f"❌ 成長率の補完に失敗しました (継続): {e}")
 
+        # 1-4. 旧版の EDINET 取り込みで消えた財務値の復旧 (1 回だけ)。
+        # 旧版は半期報告書などで取れなかった項目を NULL で上書きしていた。
+        # 消えた項目のうち、株価に依存しない値だけをシードから補う (DB に値がある項目は変更しない)
+        try:
+            if repo.get_meta(self.RESTORE_META_KEY) is None:
+                restored = funda_repo.restore_missing_from_seed(
+                    seed_parquet, self.RESTORE_COLUMNS
+                )
+                repo.set_meta(self.RESTORE_META_KEY, get_current_time().date().isoformat())
+                if restored:
+                    self.log_info(f"ℹ️ 欠損していた財務値を {restored} 銘柄分、シードから補完しました。")
+        except Exception as e:
+            self.log_error(f"❌ 財務値の復旧に失敗しました (継続): {e}")
+
         # [Phase 0/1] 財務データの正典同期 (Fundamental Truth Sync)
         fetcher_cfg = self.context.config.get("fetcher", {})
         if fetcher_cfg.get("enable_edinet_turbo", True):
-            scan_days = fetcher_cfg.get("edinet_scan_days", 30)
+            scan_days = self._edinet_scan_days(
+                repo, int(fetcher_cfg.get("edinet_scan_days", 30))
+            )
             self.log_info(
                 f"⚡ Synchronizing Fundamentals from EDINET (Turbo, {scan_days} days)..."
             )
@@ -170,6 +281,7 @@ class AcquisitionPhase(BasePhase):
 
                 # 過去 N 日分の書類を並列・差分スキャニング (二層キャッシュガード)
                 turbo_mgr.run_turbo_acquisition(days=scan_days)
+                self._record_edinet_scan(repo, turbo_mgr.failed_dates)
 
                 # ブリッジによる DB 反映 (成果物キャッシュを保持して平常時の実通信を遮断)
                 bridge = EdinetBridge()
@@ -211,8 +323,10 @@ class AcquisitionPhase(BasePhase):
             flush=True,
         )
 
-        # 2. DB から過去履歴を一括ロード (RSI等バッファ用)
-        df_db_hist_all = market_repo.get_all_history_pl(months=3)
+        # 2. DB から過去履歴を一括ロード (テクニカル指標の計算用)
+        # 初回 (1y 取得) と同じ長さの履歴で計算しないと、MA75 (75 営業日必要) が計算できず、
+        # RSI 等の値も初回と 2 回目以降で食い違う。3 か月 (約 63 営業日) では不足していた
+        df_db_hist_all = market_repo.get_all_history_pl(months=self.HISTORY_MONTHS)
 
         # 3. Producer-Consumer パイプライン (Market Data 取得)
         result_queue: queue.Queue = queue.Queue(maxsize=200)
@@ -228,9 +342,65 @@ class AcquisitionPhase(BasePhase):
         # 最大限活かすため、バッチ単位で同期的に直列取得（外部の ThreadPoolExecutor は不要）
         stop_event = threading.Event()
 
+        # 当日足の確定判定に使う現在時刻 (JST)。バックデート指定時は判定しない
+        now_jst: Optional[datetime] = (
+            None if self.context.config.get("target_date") else get_current_time()
+        )
+        history_cutoff = df_db_hist_all.select(pl.col("Date").min()).item() if (
+            not df_db_hist_all.is_empty() and "Date" in df_db_hist_all.columns
+        ) else None
+
+        def _to_polars(df_yf: Any) -> pl.DataFrame:
+            # 指摘12: pandas への不要な往復変換を撤廃し Polars DataFrame のまま保持
+            df_pl = pl.from_pandas(df_yf.reset_index()) if isinstance(df_yf, pd.DataFrame) else df_yf
+            for old in ("index", "date"):
+                if old in df_pl.columns:
+                    df_pl = df_pl.rename({old: "Date"})
+            if now_jst is not None:
+                df_pl = drop_unsettled_today(df_pl, now_jst)
+            return df_pl
+
+        def _emit(code: str, df_final_pl: pl.DataFrame) -> bool:
+            # Consumer 停止時の永久ブロック防止のためタイムアウト付きで put
+            while not stop_event.is_set():
+                try:
+                    result_queue.put((code, df_final_pl), timeout=2.0)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
         def _producer():
             """Hybrid Producer: 市場価格データのみを取得"""
             self.log_info("📡 Market Data Producer started...")
+            # 分割・配当落ちで DB の保存値と調整がずれた銘柄 (全期間を取り直す)
+            readjust: Dict[str, pl.DataFrame] = {}
+            # 株式分割 {code: [(日付, 比率)]}。記録済みの分と、今回の取得で見つかった分
+            splits_by_code: Dict[str, list] = {}
+            new_splits: list = []
+            try:
+                recorded = repo.load_splits()
+                if isinstance(recorded, pl.DataFrame):
+                    for code, d, r in recorded.iter_rows():
+                        splits_by_code.setdefault(str(code), []).append((d, r))
+            except Exception as e:
+                self.log_warn(f"株式分割の記録を読めませんでした (継続): {e}")
+
+            def _collect_splits() -> None:
+                found = fetcher.market_fetcher.pop_detected_splits()
+                if not isinstance(found, dict):
+                    return
+                for code, events in found.items():
+                    known = splits_by_code.setdefault(code, [])
+                    for d, r in events:
+                        if all(abs((d - kd).days) > 10 for kd, _ in known):
+                            known.append((d, r))
+                            new_splits.append((code, d, r))
+
+            def _adjust(code: str, df: pl.DataFrame) -> pl.DataFrame:
+                # Yahoo は日本株の分割を過去に遡って調整しないため、分割前の値を自前で調整する
+                events = splits_by_code.get(code)
+                return apply_split_adjustments(df, events) if events else df
             try:
                 batches = self._plan_fetch_batches(target_codes, db_hist_by_code)
 
@@ -249,71 +419,67 @@ class AcquisitionPhase(BasePhase):
                     except Exception as e:
                         self.log_error(f"Batch {i + 1} failed: {e}")
                         continue
+                    _collect_splits()
 
-                    if hist_map:
-                        for code, df_yf in hist_map.items():
-                            if stop_event.is_set():
-                                break
+                    for code, df_yf in (hist_map or {}).items():
+                        if stop_event.is_set():
+                            break
+                        df_yf_pl = _to_polars(df_yf)
+                        if df_yf_pl.is_empty():
+                            continue
+                        df_db = db_hist_by_code.get((code,))
+                        if period_to_use != FULL_PERIOD and df_db is not None:
+                            ratio = adjustment_ratio(df_db, df_yf_pl)
+                            if ratio is not None and abs(ratio - 1.0) > ADJUSTMENT_TOLERANCE:
+                                readjust[code] = df_yf_pl
+                                continue
+                        _emit(code, _adjust(code, merge_history(df_db, df_yf_pl)))
 
-                            df_db = db_hist_by_code.get((code,))
-
-                            # 指摘12: pandas への不要な往復変換を撤廃し Polars DataFrame のまま保持
-                            if isinstance(df_yf, pd.DataFrame):
-                                df_yf_pl = pl.from_pandas(df_yf.reset_index())
-                            else:
-                                df_yf_pl = df_yf
-
-                            rename_map = {"index": "Date", "date": "Date"}
-                            for old, new in rename_map.items():
-                                if old in df_yf_pl.columns:
-                                    df_yf_pl = df_yf_pl.rename({old: new})
-
-                            if df_db is None or df_db.is_empty():
-                                df_final_pl = df_yf_pl
-                            else:
-                                # 結合 & 重複排除 (指摘7: 型差異の吸収と keep="last")
-                                df_db_norm = df_db
-                                if (
-                                    "entry_date" in df_db_norm.columns
-                                    and "Date" not in df_db_norm.columns
-                                ):
-                                    df_db_norm = df_db_norm.rename(
-                                        {"entry_date": "Date"}
-                                    )
-                                if "Volume" in df_db_norm.columns:
-                                    df_db_norm = df_db_norm.with_columns(
-                                        pl.col("Volume").cast(pl.Float64)
-                                    )
-
-                                df_yf_norm = df_yf_pl
-                                if "Volume" in df_yf_norm.columns:
-                                    df_yf_norm = df_yf_norm.with_columns(
-                                        pl.col("Volume").cast(pl.Float64)
-                                    )
-
-                                df_final_pl = (
-                                    pl.concat(
-                                        [
-                                            df_db_norm.with_columns(
-                                                pl.col("Date").cast(pl.Datetime)
-                                            ),
-                                            df_yf_norm.with_columns(
-                                                pl.col("Date").cast(pl.Datetime)
-                                            ),
-                                        ],
-                                        how="diagonal_relaxed",
-                                    )
-                                    .unique("Date", keep="last")
-                                    .sort("Date")
+                # 調整がずれた銘柄は、DB の履歴を使わず取り直した値だけで計算する
+                # (保存時に DB の過去の値も取り直した値で上書きされる)
+                if readjust and not stop_event.is_set():
+                    self.log_info(
+                        f"🔁 配当落ち等で過去の株価の調整が変わった {len(readjust)} 銘柄は、全期間を取り直します。"
+                    )
+                    record_fetch_stat(self.context, "readjusted_stocks", len(readjust))
+                    size = self.FETCH_BATCH_SIZE
+                    readjust_codes = list(readjust)
+                    for j in range(0, len(readjust_codes), size):
+                        if stop_event.is_set():
+                            break
+                        chunk = readjust_codes[j : j + size]
+                        try:
+                            hist_map = fetcher.fetch_stock_data(
+                                chunk, period=REFETCH_PERIOD, context=self.context
+                            )
+                        except Exception as e:
+                            self.log_error(f"Readjust batch failed: {e}")
+                            hist_map = {}
+                        _collect_splits()
+                        for code in chunk:
+                            df_yf = (hist_map or {}).get(code)
+                            df_new = _to_polars(df_yf) if df_yf is not None else None
+                            if df_new is None or df_new.is_empty():
+                                # 取り直せなかった場合は、ずれを含むが従来どおり結合して評価を継続
+                                _emit(code, _adjust(code, merge_history(db_hist_by_code.get((code,)), readjust[code])))
+                                continue
+                            if history_cutoff is not None:
+                                df_new = df_new.filter(
+                                    pl.col("Date").cast(pl.Datetime) >= pl.lit(history_cutoff).cast(pl.Datetime)
                                 )
-
-                            # Consumer 停止時の永久ブロック防止のためタイムアウト付きで put
-                            while not stop_event.is_set():
-                                try:
-                                    result_queue.put((code, df_final_pl), timeout=2.0)
-                                    break
-                                except queue.Full:
-                                    continue
+                            _emit(code, _adjust(code, df_new))
+                # 株式分割を記録する (株価の調整と、1 株当たりの財務指標の補正に使う)
+                if new_splits:
+                    try:
+                        repo.save_splits(new_splits)
+                        self.log_info(
+                            "✂️ 株式分割を記録しました: "
+                            + ", ".join(f"{c} ({d} 1:{r:g})" for c, d, r in new_splits[:20])
+                            + (f" ほか {len(new_splits) - 20} 件" if len(new_splits) > 20 else "")
+                        )
+                    except Exception as e:
+                        self.log_warn(f"株式分割の記録に失敗しました (継続): {e}")
+                record_fetch_stat(self.context, "splits_recorded", len(new_splits))
             except Exception as e:
                 self.log_error(f"Producer Fatal Error: {e}")
             finally:
@@ -329,34 +495,34 @@ class AcquisitionPhase(BasePhase):
         # 4. Consumer 集約 (指摘7-3: タイムアウト耐性とプロデューサー生存確認)
         all_data_map: Dict[str, Any] = {}
         processed_count = 0
-        timeout_retries = 0
-        MAX_TIMEOUT_RETRIES = 3
+        last_item_at = time.monotonic()
 
         while True:
             try:
                 item = result_queue.get(timeout=60)
             except queue.Empty:
-                if producer_thread.is_alive():
-                    timeout_retries += 1
-                    self.log_info(
-                        f"Producer is still working. Waiting for items (retry {timeout_retries}/{MAX_TIMEOUT_RETRIES})..."
-                    )
-                    if timeout_retries < MAX_TIMEOUT_RETRIES:
-                        continue
-                    err_msg = "Producer timed out exceeding max retries. Proceeding with collected data."
-                    self.log_error(err_msg)
-                    if hasattr(self.context, "add_error"):
-                        self.context.add_error(err_msg)
-                    stop_event.set()  # Producer スレッドに停止シグナルを通知
+                if not producer_thread.is_alive():
+                    self.log_warn("Producer thread has finished. Completing consumption.")
                     break
-                self.log_warn("Producer thread has finished. Completing consumption.")
-                stop_event.set()
+                waited = time.monotonic() - last_item_at
+                if waited < self.NO_ITEM_TIMEOUT_SEC:
+                    # 再試行の待機中 (レート制限のバックオフ等)。打ち切らずに待つ
+                    self.log_info(
+                        f"Producer is still working. Waiting for items ({waited:.0f}s / {self.NO_ITEM_TIMEOUT_SEC}s)..."
+                    )
+                    continue
+                err_msg = "Producer timed out exceeding max wait. Proceeding with collected data."
+                self.log_error(err_msg)
+                if hasattr(self.context, "add_error"):
+                    self.context.add_error(err_msg)
+                stop_event.set()  # Producer スレッドに停止シグナルを通知
+                producer_thread.join(timeout=5)
                 break
 
             if item is None:
                 break
 
-            timeout_retries = 0  # 正常受信時はリセット
+            last_item_at = time.monotonic()
             code, df_data = item
             all_data_map[code] = df_data
             processed_count += 1

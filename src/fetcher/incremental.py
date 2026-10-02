@@ -1,0 +1,201 @@
+"""株価履歴の差分取得を支える純粋関数群
+
+差分取得 (DB に保存済みの履歴 + Yahoo Finance の直近分) で、初回の全期間取得と
+同じ履歴を再現するための判定をまとめる。
+
+- 取得期間: DB の最終日から今日までの欠落営業日数に合わせて決める
+  (固定の 2 日では、実行間隔が空いた分の日付が永久に欠落する)
+- 当日足: 取引終了直後は値が確定していないため採用しない
+- 調整のずれ: yfinance は配当落ちのたびに過去の値を遡って調整し直すため、
+  DB の保存値と重なり日の終値が食い違ったら、その銘柄は全期間を取り直す
+- 株式分割: Yahoo Finance は日本株の分割を過去に遡って調整しない (2026-10 時点で確認。
+  しまむら 8227 の 3:1 分割は、調整済みの値でも 10,975 円 → 3,713 円の段差のまま)。
+  分割の記録 (日付・比率) をもとに、分割前の値を自前で調整する
+"""
+
+import math
+from datetime import date, datetime, time, timedelta
+from typing import Iterable, Optional
+
+import polars as pl
+
+# 差分取得で使う期間 (取引日数)。Yahoo は任意の "Nd" を受け付ける。
+# バッチの分割数を抑えるため、必要日数をこの段階に切り上げる
+INCREMENTAL_PERIODS = (2, 5, 10, 21)
+# これを超える欠落は差分ではなく全期間を取り直す
+FULL_PERIOD = "1y"
+# 調整のずれ (分割・配当落ち) で全期間を取り直すときの期間。
+# DB から読む履歴 (13 か月) を覆えるだけの長さにする
+REFETCH_PERIOD = "2y"
+
+# 東証の大引けは 15:30。Yahoo の日足が確定するまでの余裕をみて 16:00 以降に当日足を採用する
+SESSION_SETTLED_AT = time(16, 0)
+
+# 重なり日の終値の食い違いがこれを超えたら、調整のずれとみなす (0.5%)。
+# 分割は数十 % 以上、配当落ちの調整は概ね 0.5〜3% の差になる
+ADJUSTMENT_TOLERANCE = 0.005
+
+
+def count_weekdays_after(last: date, today: date) -> int:
+    """last の翌日から today までの平日数 (祝日は数えてしまうため、必要日数の上限になる)。"""
+    if today <= last:
+        return 0
+    n = 0
+    d = last + timedelta(days=1)
+    while d <= today:
+        if d.weekday() < 5:
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+def plan_period(last: Optional[date], today: date) -> str:
+    """DB の最終日 last から、差分取得に使う期間を決める。
+
+    最終日そのものも取り直す (重なり日として調整のずれの判定に使う) ため、
+    必要な取引日数は「欠落した平日数 + 1」。
+    """
+    if last is None:
+        return FULL_PERIOD
+    needed = count_weekdays_after(last, today) + 1
+    for n in INCREMENTAL_PERIODS:
+        if needed <= n:
+            return f"{n}d"
+    return FULL_PERIOD
+
+
+def drop_unsettled_today(df: pl.DataFrame, now: datetime) -> pl.DataFrame:
+    """取引時間中・終了直後に取得した当日足 (値が確定していない) を除く。
+
+    Args:
+        df: "Date" 列を持つ履歴
+        now: 現在時刻 (JST)
+    """
+    if df.is_empty() or "Date" not in df.columns:
+        return df
+    if now.time() >= SESSION_SETTLED_AT:
+        return df
+    return df.filter(pl.col("Date").cast(pl.Date) != now.date())
+
+
+def adjustment_ratio(df_db: pl.DataFrame, df_new: pl.DataFrame) -> Optional[float]:
+    """重なる日付の終値について、DB の値 / 新しい値 のうち 1 から最も離れたものを返す。
+
+    重なる日付が無ければ None。
+    """
+    if df_db.is_empty() or df_new.is_empty():
+        return None
+    left = df_db.select(
+        pl.col("Date").cast(pl.Date).alias("d"), pl.col("Close").alias("db")
+    )
+    right = df_new.select(
+        pl.col("Date").cast(pl.Date).alias("d"), pl.col("Close").alias("new")
+    )
+    both = left.join(right, on="d", how="inner").filter(
+        pl.col("db").is_not_null()
+        & pl.col("new").is_not_null()
+        & (pl.col("db") > 0)
+        & (pl.col("new") > 0)
+    )
+    if both.is_empty():
+        return None
+    ratios = both.select((pl.col("db") / pl.col("new")).alias("r"))["r"]
+    return max(ratios.to_list(), key=lambda r: abs(r - 1.0))
+
+
+# Yahoo の分割イベントの日付は、実際に株価が切り替わった日 (権利落ち日) より後になる
+# (8227: 段差 2/18・イベント 2/19、7946: 段差 3/2・イベント 3/5)。この範囲で段差を探す
+SPLIT_SEARCH_BEFORE = timedelta(days=7)
+SPLIT_SEARCH_AFTER = timedelta(days=3)
+# 前日比が分割比率からこの割合 (対数) 以内なら、分割による段差とみなす
+SPLIT_JUMP_TOLERANCE = 0.25
+
+_PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Adj Close")
+
+
+def apply_split_adjustments(
+    df: pl.DataFrame, splits: Iterable[tuple[date, float]]
+) -> pl.DataFrame:
+    """分割前の株価を分割後の基準に調整する (分割比率で割り、出来高に比率を掛ける)。
+
+    分割イベントの日付の近くで、前日比が分割比率に最も近い日を段差の日とし、それより前の
+    行を調整する。既に調整済み (段差が無い) 履歴には何もしないため、何度適用しても同じ結果になる。
+
+    Args:
+        df: "Date" と "Close" を持つ 1 銘柄の履歴
+        splits: (分割イベントの日付, 比率) の列。3:1 分割なら比率 3.0、併合なら 1 未満
+    """
+    if df.is_empty() or "Date" not in df.columns or "Close" not in df.columns:
+        return df
+    out = df.sort("Date")
+    for split_day, ratio in sorted(splits):
+        if not ratio or ratio <= 0 or ratio == 1:
+            continue
+        days = out["Date"].cast(pl.Date).to_list()
+        closes = out["Close"].to_list()
+        best_i, best_err = None, None
+        for i in range(1, len(days)):
+            d = days[i]
+            if d is None or not (split_day - SPLIT_SEARCH_BEFORE <= d <= split_day + SPLIT_SEARCH_AFTER):
+                continue
+            prev, cur = closes[i - 1], closes[i]
+            if not prev or not cur or prev <= 0 or cur <= 0:
+                continue
+            err = abs(math.log(prev / cur) - math.log(ratio))
+            if best_err is None or err < best_err:
+                best_i, best_err = i, err
+        if best_i is None or best_err > SPLIT_JUMP_TOLERANCE:
+            continue  # 段差が無い (調整済み、または該当期間のデータが無い)
+        jump_day = days[best_i]
+        before = pl.col("Date").cast(pl.Date) < jump_day
+        exprs = [
+            pl.when(before).then(pl.col(c) / ratio).otherwise(pl.col(c)).alias(c)
+            for c in _PRICE_COLUMNS
+            if c in out.columns
+        ]
+        if "Volume" in out.columns:
+            exprs.append(
+                pl.when(before)
+                .then(pl.col("Volume").cast(pl.Float64) * ratio)
+                .otherwise(pl.col("Volume").cast(pl.Float64))
+                .alias("Volume")
+            )
+        out = out.with_columns(exprs)
+    return out
+
+
+def has_adjustment_mismatch(
+    df_db: pl.DataFrame, df_new: pl.DataFrame, tolerance: float = ADJUSTMENT_TOLERANCE
+) -> bool:
+    """DB の保存値と新しく取得した値が、重なる日付の終値で食い違っていれば True。
+
+    yfinance は分割・配当落ちのたびに過去の値を遡って調整するため、食い違いは
+    「DB 側の過去の値が古い調整のまま」であることを示す。
+    """
+    ratio = adjustment_ratio(df_db, df_new)
+    return ratio is not None and abs(ratio - 1.0) > tolerance
+
+
+def merge_history(df_db: Optional[pl.DataFrame], df_new: pl.DataFrame) -> pl.DataFrame:
+    """DB の履歴に新しく取得した分を重ねる (同じ日付は新しい値を採用)。"""
+    if df_db is None or df_db.is_empty():
+        return df_new
+    db_norm = df_db
+    if "entry_date" in db_norm.columns and "Date" not in db_norm.columns:
+        db_norm = db_norm.rename({"entry_date": "Date"})
+    if "Volume" in db_norm.columns:
+        db_norm = db_norm.with_columns(pl.col("Volume").cast(pl.Float64))
+    new_norm = df_new
+    if "Volume" in new_norm.columns:
+        new_norm = new_norm.with_columns(pl.col("Volume").cast(pl.Float64))
+    return (
+        pl.concat(
+            [
+                db_norm.with_columns(pl.col("Date").cast(pl.Datetime)),
+                new_norm.with_columns(pl.col("Date").cast(pl.Datetime)),
+            ],
+            how="diagonal_relaxed",
+        )
+        .unique("Date", keep="last", maintain_order=True)
+        .sort("Date")
+    )

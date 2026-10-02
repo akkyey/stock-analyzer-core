@@ -80,14 +80,20 @@ class MarketDataRepository:
             "%Y-%m-%d"
         )
 
+        # 始値・高値・安値は保存値を返す (旧版がダミーの 0 で上書きした行は欠損として扱う)。
+        # ダミー値を返すと、評価フェーズの保存時に DB の実際の値を 0 で上書きしてしまう
         query = """
-            SELECT 
+            SELECT
                 code,
                 entry_date as Date,
+                nullif(open, 0) as Open,
+                nullif(high, 0) as High,
+                nullif(low, 0) as Low,
                 price as Close,
+                coalesce(adj_close, price) as "Adj Close",
                 volume as Volume,
                 trading_value
-            FROM daily_metrics 
+            FROM daily_metrics
             WHERE entry_date >= ?
             ORDER BY code, entry_date
         """
@@ -98,29 +104,8 @@ class MarketDataRepository:
             if df.is_empty():
                 return df
 
-            # OHLC 形式のダミー列を追加（バックテスト/検証用互換性）
             return df.with_columns(
-                [
-                    pl.lit(0.0).alias("Open"),
-                    pl.lit(0.0).alias("High"),
-                    pl.lit(0.0).alias("Low"),
-                    pl.col("Close").alias("Adj Close"),
-                    pl.col("Date")
-                    .cast(pl.String)
-                    .str.to_datetime("%Y-%m-%d", strict=False),
-                ]
-            ).select(
-                [
-                    "code",
-                    "Date",
-                    "Open",
-                    "High",
-                    "Low",
-                    "Close",
-                    "Adj Close",
-                    "Volume",
-                    "trading_value",
-                ]
+                pl.col("Date").cast(pl.String).str.to_datetime("%Y-%m-%d", strict=False)
             )
         except Exception as e:
             self.logger.error(f"Error fetching historical records: {e}")
