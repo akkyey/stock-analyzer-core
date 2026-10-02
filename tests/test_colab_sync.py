@@ -421,3 +421,57 @@ def test_pull_does_not_clobber_working_db_with_corrupt_drive_copy(tmp_path):
     res = ColabSyncManager.pull_database(drive_dir, working_dir)
     assert ColabSyncManager.is_duckdb_healthy(res)
     assert not list((working_dir / "cache").glob("*.pulltmp"))
+
+
+def _leave_stale_wal(db_path: Path) -> None:
+    """異常終了を模擬し、db_path の横に WAL を残す"""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = duckdb.connect(str(db_path))
+    conn.execute("PRAGMA disable_checkpoint_on_shutdown")
+    conn.execute("CREATE TABLE stocks (code VARCHAR)")
+    conn.execute("INSERT INTO stocks VALUES ('9999')")
+    wal = db_path.with_name(db_path.name + ".wal")
+    keep = wal.read_bytes()
+    conn.close()
+    wal.write_bytes(keep)  # close 時に消えても、異常終了時と同じ状態に戻す
+
+
+def test_pull_discards_stale_wal_of_replaced_db(tmp_path):
+    """中断した実行の WAL が作業領域に残っていても、Drive から復元した DB が開ける"""
+    drive_dir = tmp_path / "drive"
+    working_dir = tmp_path / "working"
+    _create_valid_duckdb(drive_dir / "cache" / "stock_analyzer.duckdb")
+    working_db = working_dir / "cache" / "stock_analyzer.duckdb"
+    _leave_stale_wal(working_db)
+    assert working_db.with_name("stock_analyzer.duckdb.wal").exists()
+
+    res = ColabSyncManager.pull_database(drive_dir, working_dir)
+    assert not res.with_name("stock_analyzer.duckdb.wal").exists()
+    with duckdb.connect(str(res)) as conn:  # 読み書きで開けること (WAL 再生エラーにならない)
+        assert conn.execute("SELECT count(*) FROM stocks").fetchall()[0][0] == 1
+
+
+def test_reset_cache_removes_wal(tmp_path):
+    """reset_database (reset_cache) は WAL も消し、新しい DB を作り直せる"""
+    drive_dir = tmp_path / "drive"
+    working_dir = tmp_path / "working"
+    working_db = working_dir / "cache" / "stock_analyzer.duckdb"
+    _leave_stale_wal(working_db)
+
+    ColabSyncManager.reset_cache(drive_dir, working_dir)
+    assert not working_db.exists()
+    assert not working_db.with_name("stock_analyzer.duckdb.wal").exists()
+    with duckdb.connect(str(working_db)) as conn:  # 新規 DB が問題なく作れる
+        conn.execute("CREATE TABLE stocks (code VARCHAR)")
+
+
+def test_pull_keeps_working_db_with_its_own_wal(tmp_path):
+    """Drive に復元元が無く作業層 DB を継続利用する場合、その DB 自身の WAL は消さない"""
+    working_dir = tmp_path / "working"
+    working_db = working_dir / "cache" / "stock_analyzer.duckdb"
+    _create_valid_duckdb(working_db)
+    wal = working_db.with_name("stock_analyzer.duckdb.wal")
+    wal.write_bytes(b"")  # 存在だけを確認する (中身は DuckDB が管理)
+
+    ColabSyncManager.pull_database(tmp_path / "no_drive", working_dir)
+    assert wal.exists()

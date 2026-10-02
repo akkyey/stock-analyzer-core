@@ -29,6 +29,11 @@ class ColabSyncManager:
     MIN_STOCKS = 1000
     MIN_HISTORY_DATES = 20
 
+    @staticmethod
+    def _wal_path(db_path: Path) -> Path:
+        """DuckDB の WAL ファイルのパス (<db>.wal)。"""
+        return db_path.with_name(db_path.name + ".wal")
+
     @classmethod
     def _resolve_drive_files(
         cls, drive_dir: Path, db_filename: Optional[str] = None
@@ -108,10 +113,13 @@ class ColabSyncManager:
             drive_dir / filename,
             drive_dir / f"{filename}.bak",
             drive_dir / "cache" / f"{filename}.tmp",
+            drive_dir / "cache" / f"{filename}.wal",
             working_dir / "cache" / filename,
             working_dir / filename,
             working_dir / "cache" / f"{filename}.bak",
             working_dir / "cache" / f"{filename}.tmp",
+            working_dir / "cache" / f"{filename}.wal",
+            working_dir / f"{filename}.wal",
             working_dir / "output",
         ]
         for t in targets:
@@ -275,6 +283,9 @@ class ColabSyncManager:
             try:
                 shutil.copy2(src, tmp)
                 if cls.is_duckdb_healthy(tmp):
+                    # 置き換える前の DB に属する WAL (中断した実行の未反映分) が残っていると、
+                    # 新しい DB に再生されて開けなくなるため、先に削除する
+                    cls._wal_path(working_db).unlink(missing_ok=True)
                     os.replace(tmp, working_db)
                     return True
                 logger.warning(f"⚠️ [Pull] Drive 上の{label}が破損しているか不正です: {src}")
@@ -311,8 +322,9 @@ class ColabSyncManager:
                 logger.warning(
                     f"ℹ️ [Pull: 第3段] 既存DB未存在または全破損のため、新規に空の DB を初期化します: {working_db}"
                 )
-                working_db.unlink(missing_ok=True)
-                working_cache_db.unlink(missing_ok=True)
+                for stale in (working_db, working_cache_db):
+                    stale.unlink(missing_ok=True)
+                    cls._wal_path(stale).unlink(missing_ok=True)
                 return working_db
 
         # working_db と working_cache_db の両方を同期（二重参照の完全安全化）
