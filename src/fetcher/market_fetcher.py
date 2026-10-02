@@ -262,7 +262,10 @@ class MarketFetcher(FetcherBase):
                 # 株式分割のイベント列を取り出し、履歴からは除く
                 if not hist.empty and "Stock Splits" in hist.columns:
                     events = hist["Stock Splits"]
-                    events = events[events.notna() & (events > 0) & (events != 1)]
+                    # 異常な比率 (Yahoo が 2e-07 などを返すことがある) は除く
+                    events = events[
+                        events.notna() & (events >= 0.02) & (events <= 100) & (events != 1)
+                    ]
                     if len(events):
                         with self.lock:
                             self._detected_splits.setdefault(code, []).extend(

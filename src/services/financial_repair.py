@@ -286,7 +286,12 @@ class FinancialRepairService:
                     on="code",
                     how="inner",
                 )
-                .filter(pl.col("_basis").is_not_null() & (pl.col("split_date") > pl.col("_basis")))
+                .filter(
+                    pl.col("_basis").is_not_null()
+                    & (pl.col("split_date") > pl.col("_basis"))
+                    # 異常な比率 (Yahoo の誤ったイベント) で 1 株当たり指標を壊さない
+                    & pl.col("ratio").is_between(0.02, 100.0)
+                )
                 .group_by("code")
                 .agg(pl.col("ratio").product().alias("_f"))
             )

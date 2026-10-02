@@ -112,6 +112,44 @@ SPLIT_JUMP_TOLERANCE = 0.25
 
 _PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Adj Close")
 
+# 分割比率として現実的な範囲。Yahoo は上場廃止前後などに 2e-07 のような異常な分割イベントを
+# 返すことがある (2026-10 に 1909・2180・7082・7426 で確認)
+SPLIT_RATIO_RANGE = (0.02, 100.0)
+
+
+def is_plausible_split_ratio(ratio: Optional[float]) -> bool:
+    return (
+        ratio is not None
+        and SPLIT_RATIO_RANGE[0] <= ratio <= SPLIT_RATIO_RANGE[1]
+        and ratio != 1
+    )
+
+
+def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional[date]:
+    """分割イベントの日付の近くで、前日比が分割比率に最も近い日 (段差の日) を返す。
+
+    比率に合う段差が無ければ None (調整済みの履歴、該当期間のデータが無い、異常なイベント)。
+    """
+    if not is_plausible_split_ratio(ratio) or df.is_empty():
+        return None
+    out = df.sort("Date")
+    days = out["Date"].cast(pl.Date).to_list()
+    closes = out["Close"].to_list()
+    best_i, best_err = None, None
+    for i in range(1, len(days)):
+        d = days[i]
+        if d is None or not (split_day - SPLIT_SEARCH_BEFORE <= d <= split_day + SPLIT_SEARCH_AFTER):
+            continue
+        prev, cur = closes[i - 1], closes[i]
+        if not prev or not cur or prev <= 0 or cur <= 0:
+            continue
+        err = abs(math.log(prev / cur) - math.log(ratio))
+        if best_err is None or err < best_err:
+            best_i, best_err = i, err
+    if best_i is None or best_err > SPLIT_JUMP_TOLERANCE:
+        return None
+    return days[best_i]
+
 
 def apply_split_adjustments(
     df: pl.DataFrame, splits: Iterable[tuple[date, float]]
@@ -129,24 +167,9 @@ def apply_split_adjustments(
         return df
     out = df.sort("Date")
     for split_day, ratio in sorted(splits):
-        if not ratio or ratio <= 0 or ratio == 1:
-            continue
-        days = out["Date"].cast(pl.Date).to_list()
-        closes = out["Close"].to_list()
-        best_i, best_err = None, None
-        for i in range(1, len(days)):
-            d = days[i]
-            if d is None or not (split_day - SPLIT_SEARCH_BEFORE <= d <= split_day + SPLIT_SEARCH_AFTER):
-                continue
-            prev, cur = closes[i - 1], closes[i]
-            if not prev or not cur or prev <= 0 or cur <= 0:
-                continue
-            err = abs(math.log(prev / cur) - math.log(ratio))
-            if best_err is None or err < best_err:
-                best_i, best_err = i, err
-        if best_i is None or best_err > SPLIT_JUMP_TOLERANCE:
+        jump_day = find_split_jump(out, split_day, ratio)
+        if jump_day is None:
             continue  # 段差が無い (調整済み、または該当期間のデータが無い)
-        jump_day = days[best_i]
         before = pl.col("Date").cast(pl.Date) < jump_day
         exprs = [
             pl.when(before).then(pl.col(c) / ratio).otherwise(pl.col(c)).alias(c)

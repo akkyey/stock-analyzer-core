@@ -115,10 +115,21 @@ def test_market_fetcher_extracts_split_events_and_drops_action_columns():
     idx = pd.to_datetime(["2026-02-17", "2026-02-18", "2026-02-19"])
     cols = pd.MultiIndex.from_product([["8227.T"], ["Close", "Volume", "Dividends", "Stock Splits"]])
     raw = pd.DataFrame(
-        [[10806.8, 1, 0.0, 0.0], [3634.9, 1, 0.0, 0.0], [3585.1, 1, 0.0, 3.0]], index=idx, columns=cols
+        [[10806.8, 1, 0.0, 2.27e-07], [3634.9, 1, 0.0, 0.0], [3585.1, 1, 0.0, 3.0]], index=idx, columns=cols
     )
     mf = MarketFetcher({})
     out = mf._extract_dfs_from_batch(raw, ["8227.T"])
     assert list(out["8227"].columns) == ["Close", "Volume"]
     assert mf.pop_detected_splits() == {"8227": [(date(2026, 2, 19), 3.0)]}
     assert mf.pop_detected_splits() == {}
+
+
+def test_implausible_split_events_are_ignored():
+    from src.fetcher.incremental import apply_split_adjustments, find_split_jump
+
+    # Yahoo が上場廃止前後に返す異常なイベント (比率 2e-07)。株価は変えない
+    df = _series("2026-09-08", [1000.0, 1001.0, 1002.0, 1003.0, 1004.0])
+    assert find_split_jump(df, date(2026, 9, 14), 2.2727e-07) is None
+    assert apply_split_adjustments(df, [(date(2026, 9, 14), 2.2727e-07)])["Close"].to_list() == df["Close"].to_list()
+    # 段差の無い 2:1 イベントも採用しない
+    assert find_split_jump(df, date(2026, 9, 10), 2.0) is None

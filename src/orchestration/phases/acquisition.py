@@ -20,6 +20,7 @@ from src.fetcher.incremental import (
     adjustment_ratio,
     apply_split_adjustments,
     drop_unsettled_today,
+    find_split_jump,
     merge_history,
     plan_period,
 )
@@ -386,19 +387,29 @@ class AcquisitionPhase(BasePhase):
             except Exception as e:
                 self.log_warn(f"株式分割の記録を読めませんでした (継続): {e}")
 
+            # 今回の取得で見つかった分割イベント (株価の段差を確認するまでは記録しない)
+            candidates: Dict[str, list] = {}
+
             def _collect_splits() -> None:
                 found = fetcher.market_fetcher.pop_detected_splits()
                 if not isinstance(found, dict):
                     return
                 for code, events in found.items():
-                    known = splits_by_code.setdefault(code, [])
+                    known = splits_by_code.get(code, [])
                     for d, r in events:
                         if all(abs((d - kd).days) > 10 for kd, _ in known):
-                            known.append((d, r))
-                            new_splits.append((code, d, r))
+                            candidates.setdefault(code, []).append((d, r))
 
             def _adjust(code: str, df: pl.DataFrame) -> pl.DataFrame:
-                # Yahoo は日本株の分割を過去に遡って調整しないため、分割前の値を自前で調整する
+                # Yahoo は日本株の分割を過去に遡って調整しないため、分割前の値を自前で調整する。
+                # 新しいイベントは、履歴に比率どおりの段差がある場合だけ分割として記録する
+                # (Yahoo は異常な分割イベントを返すことがあるため)
+                for d, r in candidates.pop(code, []):
+                    if find_split_jump(df, d, r) is not None:
+                        splits_by_code.setdefault(code, []).append((d, r))
+                        new_splits.append((code, d, r))
+                    else:
+                        self.log_info(f"分割イベントを採用しませんでした ({code} {d} 比率 {r:g}): 株価に対応する段差がありません")
                 events = splits_by_code.get(code)
                 return apply_split_adjustments(df, events) if events else df
             try:
