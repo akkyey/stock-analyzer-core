@@ -17,8 +17,15 @@ def _create_valid_duckdb(db_path: Path) -> None:
     with duckdb.connect(str(db_path)) as conn:
         conn.execute("CREATE TABLE stocks (code VARCHAR PRIMARY KEY, name VARCHAR)")
         conn.execute("CREATE TABLE fundamentals (code VARCHAR PRIMARY KEY, per DOUBLE)")
+        conn.execute(
+            "CREATE TABLE daily_metrics (code VARCHAR, entry_date DATE, PRIMARY KEY (code, entry_date))"
+        )
         conn.execute("INSERT INTO stocks VALUES ('7203', 'トヨタ自動車')")
         conn.execute("INSERT INTO fundamentals VALUES ('7203', 10.5)")
+        for i in range(5):
+            conn.execute(
+                f"INSERT INTO daily_metrics VALUES ('7203', '2026-10-0{i+1}'::DATE)"
+            )
 
 
 def test_is_duckdb_healthy(tmp_path):
@@ -200,7 +207,9 @@ def test_verify_database_integrity_and_reset(tmp_path):
 
     # 3. 健全な DB -> 正常判定
     _create_valid_duckdb(db_file)
-    valid, msg = ColabSyncManager.verify_database_integrity(db_file)
+    valid, msg = ColabSyncManager.verify_database_integrity(
+        db_file, min_stocks=1, min_history_dates=5
+    )
     assert valid is True
     assert "正常" in msg
 

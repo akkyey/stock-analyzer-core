@@ -104,9 +104,12 @@ class ColabSyncManager:
 
     @classmethod
     def verify_database_integrity(
-        cls, db_path: Path
+        cls,
+        db_path: Path,
+        min_stocks: int = 1000,
+        min_history_dates: int = 5,
     ) -> tuple[bool, str]:
-        """実行前 DB の整合性を検証する。
+        """実行前 DB の整合性を厳格に検証する。
 
         Returns:
             tuple[bool, str]: (is_consistent, message)
@@ -123,19 +126,32 @@ class ColabSyncManager:
                 tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
 
                 # 2. 必須テーブル存在確認
-                required_tables = {"stocks", "fundamentals"}
+                required_tables = {"stocks", "fundamentals", "daily_metrics"}
                 missing = required_tables - tables
                 if missing:
                     return False, f"必須テーブル {missing} が欠落しています"
 
-                # 3. データの最低件数チェック (1社以上の存在確認)
+                # 3. データの最低件数チェック
                 stocks_count = conn.execute("SELECT count(*) FROM stocks").fetchone()[0]
                 funda_count = conn.execute("SELECT count(*) FROM fundamentals").fetchone()[0]
 
-                if stocks_count == 0 or funda_count == 0:
-                    return False, f"データが空です (stocks: {stocks_count}, fundamentals: {funda_count})"
+                if stocks_count < min_stocks:
+                    return False, f"銘柄マスタ件数が異常に少なくなっています ({stocks_count} 件 / 期待値: {min_stocks}件以上)"
 
-            return True, f"正常 (stocks: {stocks_count}社, fundamentals: {funda_count}件)"
+                if funda_count < min_stocks:
+                    return False, f"財務データ件数が異常に少なくなっています ({funda_count} 件 / 期待値: {min_stocks}件以上)"
+
+                # 4. 株価履歴データの蓄積日数・件数チェック (差分更新の前提条件)
+                metrics_count = conn.execute("SELECT count(*) FROM daily_metrics").fetchone()[0]
+                dates_count = conn.execute("SELECT count(distinct entry_date) FROM daily_metrics").fetchone()[0]
+
+                if dates_count < min_history_dates:
+                    return False, (
+                        f"株価時系列履歴 (daily_metrics) が不足しています "
+                        f"(現在: {dates_count}日分・{metrics_count}行 / 差分モード必要条件: 最低{min_history_dates}日分以上)"
+                    )
+
+            return True, f"正常 (stocks: {stocks_count}社, fundamentals: {funda_count}件, 株価履歴: {dates_count}日分・{metrics_count}行)"
         except Exception as e:
             return False, f"DuckDBファイル破損または読み込みエラー: {e}"
 
@@ -244,6 +260,23 @@ class ColabSyncManager:
                 shutil.copy2(working_db, working_cache_db)
             except Exception as e:
                 logger.debug(f"working_cache_db sync notice: {e}")
+
+        # 実行前 DB 整合性検証 (破損・不整合時のフェイルセーフ)
+        if chosen and working_db.exists():
+            is_valid, reason = cls.verify_database_integrity(working_db)
+            if not is_valid:
+                print("\n" + "❌" * 35)
+                print("⚠️ 【データベース不整合を検知しました】")
+                print(f"   詳細: {reason}")
+                print("   破損または不整合が生じた状態のまま実行すると、誤った分析やデータ破壊につながる恐れがあります。")
+                print("   安全のために処理を中断しました。")
+                print("\n👉 【対処方法】")
+                print("   Google Drive 上の古いキャッシュをリセットしてください。")
+                print("   Colab のセルで以下を実行してキャッシュをリセットし、再実行してください:")
+                print("   >>> from src.utils.colab_sync import ColabSyncManager")
+                print("   >>> ColabSyncManager.reset_cache(DRIVE_DIR, WORKING_DIR)")
+                print("❌" * 35 + "\n")
+                raise RuntimeError(f"データベース不整合を検知したため安全に中断しました: {reason}")
 
         return working_db
 
