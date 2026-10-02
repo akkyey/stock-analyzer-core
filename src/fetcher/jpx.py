@@ -7,8 +7,51 @@ from src.utils import rotate_file_backup
 
 from .base import FetcherBase
 
+JPX_LIST_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
+
 
 class JPXFetcher(FetcherBase):
+    @staticmethod
+    def normalize_jpx_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """JPX 公式の上場銘柄一覧 (data_j.xlsx) を code/name/sector/market の 4 列に正規化する。
+
+        個別株のみに絞り込み (ETF・REIT 等は 33業種区分が "-")、コードは先頭 4 桁、
+        市場区分は Prime / Standard / Growth / Other に正規化する。
+        """
+        df = df[df["33業種区分"] != "-"]
+        df = df[["コード", "銘柄名", "33業種区分", "市場・商品区分"]].copy()
+        df.columns = ["code", "name", "sector", "market"]
+        df["code"] = df["code"].astype(str).str[:4]
+
+        def normalize_market(m):
+            if pd.isna(m):
+                return "Unknown"
+            m_str = str(m)
+            if "プライム" in m_str:
+                return "Prime"
+            if "スタンダード" in m_str:
+                return "Standard"
+            if "グロース" in m_str:
+                return "Growth"
+            return "Other"
+
+        df["market"] = df["market"].apply(normalize_market)
+        # 同一の 4 桁コードに複数の銘柄種別 (優先株等) がある場合は先頭を採用
+        return df.drop_duplicates("code").reset_index(drop=True)
+
+    def download_live_list(self, timeout: int = 30) -> pd.DataFrame:
+        """JPX の最新の上場銘柄一覧をダウンロードして正規化する (ローカルキャッシュは使わない)。
+
+        月次の銘柄マスタ更新用。失敗時は例外を送出する (呼び出し側で握りつぶす)。
+        """
+        import io
+
+        with requests.Session() as session:
+            session.headers.update({"User-Agent": "Mozilla/5.0"})
+            resp = session.get(JPX_LIST_URL, timeout=timeout)
+            resp.raise_for_status()
+        return self.normalize_jpx_frame(pd.read_excel(io.BytesIO(resp.content), dtype=str))
+
     def fetch_jpx_list(self, fallback_on_error=False, save_to_csv=True):
         """JPXリスト取得"""
         print("📥 JPXリストをダウンロード中...", flush=True)
@@ -33,7 +76,7 @@ class JPXFetcher(FetcherBase):
             print("   ✨ Using latest JPX list from Local cache.", flush=True)
             return local_df
 
-        url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
+        url = JPX_LIST_URL
 
         # Session setup for User-Agent
         print(
@@ -58,27 +101,7 @@ class JPXFetcher(FetcherBase):
                 print(f"   📥 Downloading {len(resp.content)} bytes...", flush=True)
                 df = pd.read_excel(io.BytesIO(resp.content))
 
-                # [Optimization] 個別株のみに絞り込む
-                df = df[df["33業種区分"] != "-"]
-
-                df = df[["コード", "銘柄名", "33業種区分", "市場・商品区分"]]
-                df.columns = ["code", "name", "sector", "market"]
-                df["code"] = df["code"].astype(str).str[:4]
-
-                # 市場区分名の正規化
-                def normalize_market(m):
-                    if pd.isna(m):
-                        return "Unknown"
-                    m_str = str(m)
-                    if "プライム" in m_str:
-                        return "Prime"
-                    if "スタンダード" in m_str:
-                        return "Standard"
-                    if "グロース" in m_str:
-                        return "Growth"
-                    return "Other"
-
-                df["market"] = df["market"].apply(normalize_market)
+                df = self.normalize_jpx_frame(df)
 
                 if save_to_csv:
                     print(f"   💾 Saving to {jp_stock_path}", flush=True)

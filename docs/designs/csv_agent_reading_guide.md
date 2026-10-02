@@ -1,4 +1,4 @@
-# 定量分析レポート (daily_report.csv / uncalculable_stocks.csv) エージェント解析・活用ガイドライン (v3.0)
+# 定量分析レポート (daily_report.csv / uncalculable_stocks.csv) エージェント解析・活用ガイドライン (v3.1)
 
 ## 1. 概要 (Overview)
 
@@ -28,7 +28,7 @@
 
 ```csv
 Rank,Code,Name,Sector,Market,Market_Cap_Src,Market_Cap,Verdict,Score,PER_Src,PER,PBR_Src,PBR,Div_Yield_Src,Div_Yield,ROE_Src,ROE,Sales_Growth,Profit_Growth,Operating_Margin,Equity_Ratio,RSI,Trend,Report_Timestamp
-1,3306,日本製麻,卸売業,Standard,yf,3181029376,Grade B,73.7,yf,5.55,yf,1.3,calc,0.55,yf,27.41,-,-,-1.48,59.72,63.3,3,2026-10-02 16:35:05
+1,3306,日本製麻,卸売業,Standard,calc,3181029376,Grade B,73.7,calc,5.55,calc,1.3,calc,0.55,edinet,27.41,2.03,-64.7,-1.48,59.72,63.3,3,2026-10-02 16:35:05
 ```
 
 ### 3.2 `-`（欠損）の扱い（重要）
@@ -67,14 +67,14 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 | **Name** | String | 正式企業名 | `トヨタ自動車` |
 | **Sector** | String | 東証33業種分類 | `卸売業`, `情報・通信業` |
 | **Market** | String | 上場市場区分 | `Prime`, `Standard`, `Growth`, `Other` |
-| **Market_Cap_Src** | String | `Market_Cap` の出所（下記参照） | `yf`, `calc`, `-` |
+| **Market_Cap_Src** | String | `Market_Cap` の出所（下記参照） | `calc`, `edinet`, `-` |
 | **Market_Cap** | Integer | 時価総額 (円) | `3181029376` |
 | **Verdict** | String | 機械判定グレード (`Grade S` / `Grade A` / `Grade B` / `Grade C`、レガシー設定時: `STRONG_BUY` / `BUY` / `WATCH` / `PASS`) | `Grade A` |
 | **Score** | Float | クオンツ総合スコア (0〜100) | `73.7` |
-| **PER_Src** / **PER** | String / Float | 株価収益率 (倍) と出所 | `yf` / `5.55` |
+| **PER_Src** / **PER** | String / Float | 株価収益率 (倍) と出所 | `calc` / `5.55` |
 | **PBR_Src** / **PBR** | String / Float | 株価純資産倍率 (倍) と出所 | `calc` / `1.3` |
 | **Div_Yield_Src** / **Div_Yield** | String / Float | 配当利回り (**%表記**。`0.55` は 0.55%) と出所 | `calc` / `0.55` |
-| **ROE_Src** / **ROE** | String / Float | 自己資本利益率 (**%表記**) と出所 | `yf` / `27.41` |
+| **ROE_Src** / **ROE** | String / Float | 自己資本利益率 (**%表記**) と出所 | `edinet` / `27.41` |
 | **Sales_Growth** | Float | 売上高成長率 (%) | `2.03` |
 | **Profit_Growth** | Float | 利益成長率 (%) | `-64.7` |
 | **Operating_Margin** | Float | 営業利益率 (%) | `-1.48` |
@@ -84,16 +84,18 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 | **Report_Timestamp** | String | レポート生成日時 | `2026-10-02 16:35:05` |
 
 **`*_Src`（出所）の値**
-- `yf`: 外部データ（yfinance・同梱ベースライン）の値をそのまま使用。
+- `edinet`: 金融庁 EDINET の開示値（同梱ベースラインを含む）をそのまま使用。
 - `calc`: 株価と財務データ（EPS・BPS・DPS・発行済株式数など）から本システムが算出した値。
 - `-`: 元データが無く算出もできないため欠損（このとき数値列も `-`）。
 
 > [!NOTE]
+> v1.3.0 より、出所を実態どおりに表示する（財務データは EDINET 由来で、yfinance は株価・出来高のみ）。以前の `yf` 表示は、実際は算出値または EDINET 値だった。
+
 > 旧版は、元データが無い場合に業種別の仮の PER・PBR、配当利回り 2.25%、推定株式数（2,500万株）、ROE 8.5% を `calc` として出力していた。これらは**実データではない**ため廃止し、`-` とした。過去に生成した CSV を扱う場合は、`calc` の値が仮の値である可能性に注意する。
 
 ---
 
-### 4.2 `uncalculable_stocks.csv`（全 64 カラム）
+### 4.2 `uncalculable_stocks.csv`（全 66 カラム）
 
 銘柄の元データ（`code`, `market`, `entry_date`, `price`, 出来高、テクニカル指標、`per` / `pbr` / `roe` / `equity_ratio` 等の財務指標など）に、**除外理由の 2 列**を末尾に付与した構造である。主な列は次のとおり。
 
@@ -103,6 +105,7 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 | **entry_date** / **price** | 最新の取引日と株価 (**市場データを取得できなかった銘柄は空**) |
 | **avg_trading_value_20d** | 直近20営業日の平均売買代金 (円) |
 | **zero_volume_days_5d** | 直近5営業日の出来高ゼロ日数 |
+| **status** / **exclusion_reason** | 銘柄マスタの状態（`delisted` = 上場廃止）と、除外・停止の理由 |
 | **filter_reason** | **除外・算出不能理由カテゴリ** |
 | **filter_detail** | **不足売買代金・ゼロ日数・CF赤字幅等の詳細** |
 
@@ -117,7 +120,8 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 6. **データ鮮度不足 (取引停止)**: 最新の取引日が古く、取引が止まっている。
 
 ##### B. 論理的算出不能
-7. **市場データ取得不能**: Yahoo Finance から株価を取得できなかった銘柄（上場廃止・整理ポスト・新規上場直後など。**取得失敗の一時的な不具合ではなく、多くは取引が存在しない銘柄**）。
+7. **上場廃止**: JPX の上場銘柄一覧（月次で自動更新）に掲載が無くなった銘柄。以後は株価の取得対象から外れる。
+7b. **市場データ取得不能**: Yahoo Finance から株価を取得できなかった銘柄。多くは **Yahoo Finance がデータを提供しない銘柄（PRO Market 等）** や、新規上場直後の銘柄。連続して取得できない銘柄は 30 日間再取得を止め、`filter_detail` にその旨を表示する（30 日ごとに 1 回再確認し、データが取れれば自動で復帰する）。
 8. **重要指標未開示/算出不能**: PBR・ROE・自己資本比率のいずれかが未開示または算出不能。
 
 ---
@@ -235,7 +239,7 @@ AI エージェントが本レポートを基にユーザーへスクリーニ�
 2. **インサイトの根拠提示**:
    - 各指標の実数値（ROE、PER、PBR、配当利回り、自己資本比率、営業利益率、RSI など）を直接参照して、LLM 自身が具体的で客観的な財務分析根拠を提示する。
    - **指標が `-`（欠損）の銘柄は、その指標で比較・ランキング・評価をしない**。推定や補完をせず、「データなし」と明示する。
-   - 数値の出所は `*_Src` 列で確認できる（`yf` = 外部データ、`calc` = 本システムの算出値）。
+   - 数値の出所は `*_Src` 列で確認できる（`edinet` = 金融庁 EDINET の開示値、`calc` = 株価と開示値から本システムが算出した値）。
    - `Div_Yield` / `ROE` などは **%表記**（`0.55` は 0.55%）。100 倍して読まない。
 3. **除外・未算出銘柄の問い合わせ対応**:
    - ユーザーから「○○社のPERはなぜ載っていないのか？」「なぜこの銘柄がレポートにないのか？」と問われた際は、[uncalculable_stocks.csv](file:///home/irom/dev/stock-analyzer-core/data/output/uncalculable_stocks.csv) を照会し、`filter_reason`（例: `極小流動性トラップ`）および `filter_detail`（例: `20日平均売買代金不足 (1,123万円 < 3,000万円)`）を即座に回答する。
@@ -245,6 +249,7 @@ AI エージェントが本レポートを基にユーザーへスクリーニ�
 
 ## 7. 改訂履歴 (Revision History)
 
+- **v3.1 (2026-10-03)**: `*_Src` の出所を実態に合わせて `edinet` / `calc` / `-` に修正（`yf` は廃止）。除外理由に「上場廃止」を追加し、`status` / `exclusion_reason` 列を追加（66 カラム）。
 - **v3.0 (2026-10-02)**: **現行スキーマへ全面改訂**。
   - `daily_report.csv` を実際の 24 カラム、`uncalculable_stocks.csv` を実際の 64 カラム（`filter_reason` / `filter_detail`）の定義に合わせた。コメント行（`# Generated At`）・`Triggers` 列などの廃止済み記述を削除。
   - 指標の欠損を `-` とする仕様を明文化（仮の PER・PBR・配当利回り・時価総額・ROE の出力を廃止）。配当利回り・ROE の 100 倍表示バグを修正。

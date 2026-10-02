@@ -210,7 +210,7 @@ class EvaluationPhase(BasePhase):
 
         if not stocks_df.is_empty():
             stocks_df = stocks_df.with_columns(pl.col("code").cast(pl.Utf8))
-            candidate_cols = ["code", "name", "sector", "market"]
+            candidate_cols = ["code", "name", "sector", "market", "status", "exclusion_reason"]
             master_cols = [c for c in candidate_cols if c in stocks_df.columns]
             # df側のマスター列重複をドロップ
             df_metrics = df.drop(

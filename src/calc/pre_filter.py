@@ -277,13 +277,28 @@ class PreFilter:
             is_recent_trade = row.get("is_recent_trade")
             sector = str(row.get("sector", "Other"))
 
+            # 0. 上場廃止 (JPX 一覧から消えた銘柄。銘柄マスタの月次更新で status='delisted' になる)
+            if row.get("status") == "delisted":
+                rejected_rows.append(
+                    {
+                        **row,
+                        "filter_reason": "上場廃止",
+                        "filter_detail": "JPX 上場銘柄一覧に掲載がありません (上場廃止・整理等)",
+                    }
+                )
+                continue
+
             # 1. 株価データ欠損判定（市場データ取得不能: OHLCV未取得銘柄を最優先隔離）
             if price is None:
                 rejected_rows.append(
                     {
                         **row,
                         "filter_reason": "市場データ取得不能",
-                        "filter_detail": "市場価格データ欠損 (OHLCV未取得)",
+                        "filter_detail": (
+                            "Yahoo Finance に株価データが提供されていません (PRO Market 等。30日ごとに再確認)"
+                            if str(row.get("exclusion_reason") or "").startswith("市場データ提供なし")
+                            else "市場価格データ欠損 (OHLCV未取得)"
+                        ),
                     }
                 )
                 continue

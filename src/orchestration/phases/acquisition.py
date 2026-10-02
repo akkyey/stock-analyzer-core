@@ -107,6 +107,23 @@ class AcquisitionPhase(BasePhase):
             except Exception as e:
                 self.log_error(f"❌ 銘柄マスタの初期登録に失敗しました: {e}")
 
+        # 1-1b. 銘柄マスタの月次更新 (JPX 公式一覧との同期: 新規上場の追加・上場廃止の除外)
+        fetcher_cfg0 = self.context.config.get("fetcher", {}) or {}
+        if fetcher_cfg0.get("refresh_stock_master", True):
+            from src.services.stock_master import refresh_stock_master
+
+            res = refresh_stock_master(repo, fetcher.jpx_fetcher)
+            if res.status == "updated":
+                self.log_info(
+                    f"🔄 銘柄マスタを更新しました: 新規 {res.added} / 上場廃止 {res.delisted} "
+                    f"/ 再上場 {res.relisted} 銘柄"
+                )
+                record_fetch_stat(self.context, "master_added", res.added)
+                record_fetch_stat(self.context, "master_delisted", res.delisted)
+                target_codes = repo.get_all_codes()
+            elif res.status in ("skipped_unsafe", "failed"):
+                self.log_warn(f"銘柄マスタの更新をスキップしました: {res.detail}")
+
         # 1-2. 財務データの初期シード (全件ベースラインデータ未登録時はバンドルされたシードデータから自動投入)
         funda_repo = FundamentalsRepository(repo)
         seed_parquet = (
@@ -172,6 +189,22 @@ class AcquisitionPhase(BasePhase):
 
         if self.context.limit:
             target_codes = target_codes[: self.context.limit]
+
+        # 市場データを提供しない銘柄 (PRO Market 等) は、連続して取得できなかった場合に
+        # 一定期間 (30日) 再取得を止める。除外銘柄リストには「取得不能」として残る
+        from src.services.stock_master import get_cooling_codes, update_no_data_tracking
+
+        try:
+            cooling = get_cooling_codes(repo)
+        except Exception as e:
+            self.log_warn(f"再取得抑制の確認に失敗しました (全銘柄を取得): {e}")
+            cooling = set()
+        if cooling:
+            target_codes = [c for c in target_codes if c not in cooling]
+            self.log_info(
+                f"⏭️ 市場データが提供されない銘柄 {len(cooling)} 件は再取得を一時停止しています (30日ごとに再確認)。"
+            )
+            record_fetch_stat(self.context, "skipped_no_data_stocks", len(cooling))
 
         print(
             f"📡 全 {len(target_codes)} 銘柄の市場データ取得を開始します...",
@@ -334,6 +367,19 @@ class AcquisitionPhase(BasePhase):
                 )
 
         stop_event.set()  # 正常終了時も確実にセット
+
+        try:
+            tracked = update_no_data_tracking(
+                repo,
+                fetched=set(all_data_map),
+                attempted=list(target_codes),
+                codes_with_history={str(k[0]) for k in db_hist_by_code},
+            )
+            record_fetch_stat(self.context, "no_data_failed", tracked["failed"])
+            record_fetch_stat(self.context, "no_data_cooled", tracked["cooled"])
+        except Exception as e:
+            self.log_warn(f"取得不能銘柄の記録に失敗しました (継続): {e}")
+
         print(
             f"✅ 市場データ取得完了: 全 {len(all_data_map)} 銘柄のデータを準備しました。",
             flush=True,

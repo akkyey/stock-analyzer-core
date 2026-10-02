@@ -92,16 +92,32 @@ class StockReporter:
 
         return {"summary": report_path}
 
+    @staticmethod
+    def _stored_value_source(
+        value: float, derived: float | None, rel_tol: float, abs_tol: float
+    ) -> str:
+        """保存済みの値が、株価と開示値から再計算した値と一致すれば "calc"、そうでなければ "edinet"。
+
+        算出値 (FinancialRepair が price と EPS 等から作る) と EDINET の開示値は、
+        同じ列に保存されるため、再計算との一致で出所を判別する。
+        """
+        if derived is not None and abs(value - derived) <= abs(derived) * rel_tol + abs_tol:
+            return "calc"
+        return "edinet"
+
     def _resolve_metrics_with_fallback(
         self, latest_row: dict[str, Any], common: dict[str, Any]
     ) -> dict[str, tuple[Any, str]]:
         """yfinanceとEDINETを両立させたデータソース統合と算出を行う。
-        - "yf": yfinance 直取得データ
-        - "edinet": EDINET 公式決算データ
-        - "calc": 株価・財務データからのハイブリッド算出およびスマート補完データ
+        出所 (`*_Src`) の定義:
+        - "calc": 株価と開示値 (EPS・BPS・DPS・発行済株式数) から本システムが算出した値
+        - "edinet": 金融庁 EDINET の開示値 (同梱ベースラインを含む) をそのまま用いた値
+        - "-": 元データが無く算出もできない (数値も "-")
+        ※ 財務データは EDINET 由来で、yfinance は株価・出来高のみ。以前は算出値も "yf" と
+          表示されていたが、実態と異なるため廃止した。
 
         Returns:
-            dict[str, tuple[Any, str]]: 指標名 -> (値, "yf" | "edinet" | "calc" | "-")
+            dict[str, tuple[Any, str]]: 指標名 -> (値, "edinet" | "calc" | "-")
         """
         close = safe_float_or_none(
             common.get("close")
@@ -127,7 +143,11 @@ class StockReporter:
         # 1. PER (yfinance -> calc)。データが無い場合は仮の値を出さず "-" とする
         per_val = safe_float_or_none(common.get("per") or latest_row.get("per"))
         if per_val is not None and per_val > 0:
-            res["per"] = (round(per_val, 2), "yf")
+            derived_per = close / eps if close and eps and eps > 0 else None
+            res["per"] = (
+                round(per_val, 2),
+                self._stored_value_source(per_val, derived_per, 0.01, 0.01),
+            )
         elif close is not None and eps is not None and eps > 0:
             res["per"] = (round(close / eps, 2), "calc")
         else:
@@ -136,7 +156,11 @@ class StockReporter:
         # 2. PBR (yfinance -> calc)。データが無い場合は "-"
         pbr_val = safe_float_or_none(common.get("pbr") or latest_row.get("pbr"))
         if pbr_val is not None and pbr_val > 0:
-            res["pbr"] = (round(pbr_val, 2), "yf")
+            derived_pbr = close / bps if close and bps and bps > 0 else None
+            res["pbr"] = (
+                round(pbr_val, 2),
+                self._stored_value_source(pbr_val, derived_pbr, 0.01, 0.01),
+            )
         elif close is not None and bps is not None and bps > 0:
             res["pbr"] = (round(close / bps, 2), "calc")
         else:
@@ -147,7 +171,13 @@ class StockReporter:
             common.get("dividend_yield") or latest_row.get("dividend_yield")
         )
         if div_val is not None:
-            res["div_yield"] = (round(div_val, 2), "yf")
+            derived_div = (
+                dps / close * 100.0 if close and dps is not None and close > 0 else None
+            )
+            res["div_yield"] = (
+                round(div_val, 2),
+                self._stored_value_source(div_val, derived_div, 0.01, 0.01),
+            )
         elif close is not None and dps is not None and close > 0:
             res["div_yield"] = (round((dps / close) * 100.0, 2), "calc")
         else:
@@ -158,7 +188,11 @@ class StockReporter:
             common.get("market_cap") or latest_row.get("market_cap")
         )
         if mc_val is not None and mc_val > 0:
-            res["market_cap"] = (int(mc_val), "yf")
+            derived_mc = close * shares if close and shares and shares > 0 else None
+            res["market_cap"] = (
+                int(mc_val),
+                self._stored_value_source(mc_val, derived_mc, 0.001, 1.0),
+            )
         elif close is not None and shares is not None and shares > 0:
             res["market_cap"] = (int(close * shares), "calc")
         else:
@@ -168,7 +202,7 @@ class StockReporter:
         roe_val = safe_float_or_none(common.get("roe") or latest_row.get("roe"))
         edinet_roe = safe_float_or_none(common.get("edinet_roe"))
         if roe_val is not None:
-            res["roe"] = (round(roe_val, 2), "yf")
+            res["roe"] = (round(roe_val, 2), "edinet")
         elif edinet_roe is not None:
             roe_pct = edinet_roe * 100.0 if abs(edinet_roe) < 1.0 else edinet_roe
             res["roe"] = (round(roe_pct, 2), "edinet")

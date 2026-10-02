@@ -270,6 +270,14 @@ class DuckDBRepository:
                     date DATE PRIMARY KEY
                 )
             """)
+            # 小さな状態値 (銘柄マスタの最終更新日など)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_meta (
+                    key VARCHAR PRIMARY KEY,
+                    value VARCHAR,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             # stocks テーブルのスキーマ進化
             conn.execute(
                 "ALTER TABLE stocks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE"
@@ -311,6 +319,23 @@ class DuckDBRepository:
         with self.client.get_connection() as conn:
             res = conn.execute("SELECT count(*) FROM daily_metrics").fetchone()
             return int(res[0]) if res else 0
+
+    def get_meta(self, key: str) -> Optional[str]:
+        """app_meta の値を取得する (無ければ None)。"""
+        with self.client.get_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_meta WHERE key = ?", [key]
+            ).fetchall()
+        return str(row[0][0]) if row and row[0][0] is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """app_meta に値を保存する。"""
+        with self.client.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                [key, value],
+            )
 
     def save_stocks(self, df: pl.DataFrame):
         """銘柄マスタを保存・更新する。"""
