@@ -24,6 +24,24 @@ class ColabSyncManager:
     DEFAULT_DRIVE_FOLDER = "StockAnalyzer"
     DEFAULT_DRIVE_BASE = Path("/content/drive/MyDrive")
 
+    # 差分更新の前提となる DB 整合性の閾値 (Colab / CLI 共通の単一定義)
+    MIN_STOCKS = 1000
+    MIN_HISTORY_DATES = 20
+
+    @classmethod
+    def _resolve_drive_files(
+        cls, drive_dir: Path, db_filename: Optional[str] = None
+    ) -> tuple[Path, Path]:
+        """Drive 上のメイン DB と .bak のパスを解決する (cache/ 配下 → Drive 直下の順)。"""
+        filename = db_filename or cls.DB_FILENAME
+        drive_db = drive_dir / "cache" / filename
+        drive_bak = drive_dir / "cache" / f"{filename}.bak"
+        if not drive_db.exists() and (drive_dir / filename).exists():
+            drive_db = drive_dir / filename
+        if not drive_bak.exists() and (drive_dir / f"{filename}.bak").exists():
+            drive_bak = drive_dir / f"{filename}.bak"
+        return drive_db, drive_bak
+
     @classmethod
     def resolve_drive_dir(
         cls,
@@ -88,9 +106,11 @@ class ColabSyncManager:
             drive_dir / "cache" / f"{filename}.bak",
             drive_dir / filename,
             drive_dir / f"{filename}.bak",
+            drive_dir / "cache" / f"{filename}.tmp",
             working_dir / "cache" / filename,
             working_dir / filename,
             working_dir / "cache" / f"{filename}.bak",
+            working_dir / "cache" / f"{filename}.tmp",
             working_dir / "output",
         ]
         for t in targets:
@@ -106,14 +126,20 @@ class ColabSyncManager:
     def verify_database_integrity(
         cls,
         db_path: Path,
-        min_stocks: int = 1000,
-        min_history_dates: int = 5,
+        min_stocks: Optional[int] = None,
+        min_history_dates: Optional[int] = None,
     ) -> tuple[bool, str]:
         """実行前 DB の整合性を厳格に検証する。
+
+        閾値の既定値は MIN_STOCKS / MIN_HISTORY_DATES (Colab / CLI 共通)。
 
         Returns:
             tuple[bool, str]: (is_consistent, message)
         """
+        min_stocks = cls.MIN_STOCKS if min_stocks is None else min_stocks
+        min_history_dates = (
+            cls.MIN_HISTORY_DATES if min_history_dates is None else min_history_dates
+        )
         if not db_path.exists() or db_path.stat().st_size == 0:
             return True, "新規初期化（キャッシュなし）"
 
@@ -156,15 +182,49 @@ class ColabSyncManager:
             return False, f"DuckDBファイル破損または読み込みエラー: {e}"
 
     @classmethod
+    def enforce_integrity(
+        cls,
+        db_path: Path,
+        min_stocks: Optional[int] = None,
+        min_history_dates: Optional[int] = None,
+    ) -> None:
+        """DB 整合性を検証し、不整合なら対処方法を案内して RuntimeError で安全に中断する。
+
+        Colab (Step 1 / Step 3 / pull_database) と CLI の共通ゲート。
+        """
+        is_valid, reason = cls.verify_database_integrity(
+            db_path, min_stocks=min_stocks, min_history_dates=min_history_dates
+        )
+        if is_valid:
+            return
+
+        print()
+        print("❌" * 35)
+        print("⚠️ 【データベース不整合を検知しました】")
+        print(f"   詳細: {reason}")
+        print("   破損または不整合が生じた状態のまま実行すると、誤った分析やデータ破壊につながる恐れがあります。")
+        print("   安全のために処理を中断しました。")
+        print()
+        print("👉 【対処方法】")
+        print("   ■ Google Colab: Step 0 の「reset_database」を ON (True) にして Step 0 から再実行してください。")
+        print("   ■ CLI / ローカル: 次を実行してキャッシュをリセットし、再実行してください。")
+        print("     >>> from pathlib import Path")
+        print("     >>> from src.utils.colab_sync import ColabSyncManager")
+        print("     >>> ColabSyncManager.reset_cache(<Drive保存先 または base_dir>, <作業ディレクトリ>)")
+        print("❌" * 35)
+        print()
+        raise RuntimeError(f"データベース不整合を検知したため安全に中断しました: {reason}")
+
+    @classmethod
     def is_first_run(
         cls, drive_dir: Path, db_filename: Optional[str] = None
     ) -> bool:
-        """Google Drive 上に健全な既存 DB が存在するか確認し、初回実行（キャッシュなし）か否かを判定する"""
-        filename = db_filename or cls.DB_FILENAME
-        drive_db = drive_dir / "cache" / filename
-        if not drive_db.exists() and (drive_dir / filename).exists():
-            drive_db = drive_dir / filename
-        return not cls.is_duckdb_healthy(drive_db)
+        """Drive 上に復元可能な健全 DB (メイン または .bak) が無ければ初回実行と判定する。
+
+        pull_database の復元順序 (メイン → .bak → 新規) と同じ基準で判定する。
+        """
+        drive_db, drive_bak = cls._resolve_drive_files(drive_dir, db_filename)
+        return not (cls.is_duckdb_healthy(drive_db) or cls.is_duckdb_healthy(drive_bak))
 
     @classmethod
     def pull_database(
@@ -173,8 +233,8 @@ class ColabSyncManager:
         working_dir: Path,
         db_filename: Optional[str] = None,
         validate_integrity: bool = False,
-        min_stocks: int = 1000,
-        min_history_dates: int = 20,
+        min_stocks: Optional[int] = None,
+        min_history_dates: Optional[int] = None,
     ) -> Path:
         """【Pull Phase】Google Drive から作業層 SSD へ 3段構えの復元検証を行い DB を配置する。
 
@@ -189,14 +249,7 @@ class ColabSyncManager:
         from src.utils.path_resolver import PathResolver
 
         filename = db_filename or cls.DB_FILENAME
-        drive_db = drive_dir / "cache" / filename
-        drive_bak = drive_dir / "cache" / f"{filename}.bak"
-
-        # Drive 直下のフォールバック確認
-        if not drive_db.exists() and (drive_dir / filename).exists():
-            drive_db = drive_dir / filename
-        if not drive_bak.exists() and (drive_dir / f"{filename}.bak").exists():
-            drive_bak = drive_dir / f"{filename}.bak"
+        drive_db, drive_bak = cls._resolve_drive_files(drive_dir, filename)
 
         working_db = PathResolver.get_duckdb_path(working_dir)
         working_cache = working_dir / "cache"
@@ -265,28 +318,10 @@ class ColabSyncManager:
                 logger.debug(f"working_cache_db sync notice: {e}")
 
         # 実行前 DB 整合性検証 (明示指定時のフェイルセーフ)
-        if validate_integrity and chosen and working_db.exists():
-            is_valid, reason = cls.verify_database_integrity(
-                working_db,
-                min_stocks=min_stocks,
-                min_history_dates=min_history_dates,
+        if validate_integrity and working_db.exists():
+            cls.enforce_integrity(
+                working_db, min_stocks=min_stocks, min_history_dates=min_history_dates
             )
-            if not is_valid:
-                print()
-                print("❌" * 35)
-                print("⚠️ 【データベース不整合を検知しました】")
-                print(f"   詳細: {reason}")
-                print("   破損または不整合が生じた状態のまま実行すると、誤った分析やデータ破壊につながる恐れがあります。")
-                print("   安全のために処理を中断しました。")
-                print()
-                print("👉 【対処方法】")
-                print("   Google Drive 上の古いキャッシュをリセットしてください。")
-                print("   Colab のセルで以下を実行してキャッシュをリセットし、再実行してください:")
-                print("   >>> from src.utils.colab_sync import ColabSyncManager")
-                print("   >>> ColabSyncManager.reset_cache(DRIVE_DIR, WORKING_DIR)")
-                print("❌" * 35)
-                print()
-                raise RuntimeError(f"データベース不整合を検知したため安全に中断しました: {reason}")
 
         return working_db
 
@@ -344,8 +379,12 @@ class ColabSyncManager:
                     )
                     return False
 
-                # 既存 Drive DB を .bak へ退避
-                if drive_db.exists():
+                # 既存 Drive DB を .bak へ退避 (健全な場合のみ。破損 DB で健全な .bak を潰さない)
+                if drive_db.exists() and not cls.is_duckdb_healthy(drive_db):
+                    logger.warning(
+                        "⚠️ [Push] Drive 上の既存 DB が健全ではないため、既存の .bak を保護して退避をスキップします。"
+                    )
+                elif drive_db.exists():
                     try:
                         shutil.copy2(drive_db, drive_bak)
                         logger.info(
