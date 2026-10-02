@@ -55,7 +55,27 @@ class PolarsProcessor:
                 .alias("volume")
             )
 
-        # 2. 前日比異常スパイク (5倍超または 0.2倍未満の異常跳ね上がり・分割漏れ) のチェックアウト
+        # 2. 前後 31 日の中央値から 5 倍超・0.2 倍未満に外れた値 (データ不良) のチェックアウト。
+        # 前日比だけでは、異常値が連続すると 2 日目以降が前日比 1 倍となりすり抜ける
+        # (8303 で 11 日連続の 536 億円を確認。通常は約 1,630 円)
+        if "code" in cleaned.columns:
+            date_col = next((c for c in ("Date", "entry_date", "index") if c in cleaned.columns), None)
+            if date_col is not None:
+                cleaned = cleaned.sort(["code", date_col])
+            local_median = (
+                pl.col(price_col)
+                .rolling_median(window_size=31, center=True, min_samples=5)
+                .over("code")
+            )
+            deviation = pl.col(price_col) / local_median
+            cleaned = cleaned.with_columns(
+                pl.when((deviation > 5.0) | (deviation < 0.2))
+                .then(None)
+                .otherwise(pl.col(price_col))
+                .alias(price_col)
+            )
+
+        # 3. 前日比異常スパイク (5倍超または 0.2倍未満の異常跳ね上がり・分割漏れ) のチェックアウト
         if "code" in cleaned.columns:
             prev_price = pl.col(price_col).shift(1).over("code")
             ratio = pl.col(price_col) / prev_price

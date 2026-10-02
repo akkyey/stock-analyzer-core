@@ -96,3 +96,20 @@ def test_anomaly_data_checkout():
     # 負の価格やスパイクが排除または無効化されていること
     prices = cleaned_df["price"].to_list()
     assert any(p is None for p in prices)
+
+
+def test_consecutive_glitch_prices_are_removed():
+    """異常値が連続しても除外する (前日比だけでは 2 日目以降がすり抜けていた)"""
+    import polars as pl
+
+    prices = [1630.0] * 20 + [53637025792.0] * 11 + [1630.0] * 20
+    df = pl.DataFrame(
+        {
+            "code": ["8303"] * len(prices),
+            "Date": [datetime(2025, 11, 1) + timedelta(days=i) for i in range(len(prices))],
+            "Close": prices,
+        }
+    )
+    cleaned = PolarsProcessor.clean_anomalous_prices(df)["Close"].to_list()
+    assert cleaned[20:31] == [None] * 11
+    assert all(p == 1630.0 for p in cleaned[:20] + cleaned[31:])

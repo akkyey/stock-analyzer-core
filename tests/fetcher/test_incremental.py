@@ -133,3 +133,37 @@ def test_implausible_split_events_are_ignored():
     assert apply_split_adjustments(df, [(date(2026, 9, 14), 2.2727e-07)])["Close"].to_list() == df["Close"].to_list()
     # 段差の無い 2:1 イベントも採用しない
     assert find_split_jump(df, date(2026, 9, 10), 2.0) is None
+
+
+def test_infer_unrecorded_splits_from_integer_jumps():
+    from src.fetcher.incremental import apply_split_adjustments, infer_unrecorded_splits
+
+    # 8377 の実例: イベント無しで 7870 → 806 (約 10:1、休日を挟み 7 日)
+    df = pl.DataFrame(
+        {
+            "Date": [datetime(2026, 9, 17), datetime(2026, 9, 18), datetime(2026, 9, 25), datetime(2026, 9, 26)],
+            "Close": [7625.1, 7870.2, 806.3, 804.4],
+        }
+    )
+    found = infer_unrecorded_splits(df)
+    assert found == [(date(2026, 9, 25), 10.0)]
+    adj = apply_split_adjustments(df, found)
+    assert abs(adj["Close"][1] - 787.02) < 0.01
+    assert infer_unrecorded_splits(adj) == []  # 調整後は段差が無い
+
+    # 併合 (1:2) 相当の上方向の段差
+    up = pl.DataFrame({"Date": [datetime(2026, 2, 12), datetime(2026, 2, 13)], "Close": [328.0, 648.0]})
+    assert infer_unrecorded_splits(up) == [(date(2026, 2, 13), 0.5)]
+
+
+def test_infer_ignores_market_moves_and_glitches():
+    from src.fetcher.incremental import infer_unrecorded_splits
+
+    # 値幅制限内の大きな動き、整数比から遠い段差 (5537: 7.55 倍)、桁違いのデータ不良は対象外
+    df = pl.DataFrame(
+        {
+            "Date": [datetime(2026, 1, d) for d in (5, 6, 7, 8, 9)],
+            "Close": [1000.0, 700.0, 264.75 * 2.644, 264.75, 53637025792.0],
+        }
+    )
+    assert infer_unrecorded_splits(df) == []

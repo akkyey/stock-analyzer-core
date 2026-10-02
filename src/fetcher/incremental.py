@@ -104,9 +104,17 @@ def adjustment_ratio(df_db: pl.DataFrame, df_new: pl.DataFrame) -> Optional[floa
 
 
 # Yahoo の分割イベントの日付は、実際に株価が切り替わった日 (権利落ち日) より後になる
-# (8227: 段差 2/18・イベント 2/19、7946: 段差 3/2・イベント 3/5)。この範囲で段差を探す
-SPLIT_SEARCH_BEFORE = timedelta(days=7)
-SPLIT_SEARCH_AFTER = timedelta(days=3)
+# (8227: 段差 2/18・イベント 2/19、7946: 段差 3/2・イベント 3/5、329A: 段差 3/2・イベント 3/10、
+# 7176: 段差 10/22・イベント 10/30)。この範囲で段差を探す
+SPLIT_SEARCH_BEFORE = timedelta(days=14)
+SPLIT_SEARCH_AFTER = timedelta(days=5)
+
+# Yahoo が分割イベントを返さない銘柄もある (8377・326A・4316 等で確認)。値幅制限により
+# 1 取引日で 1.9 倍以上 (または 1/1.9 以下) に動くことは通常ないため、この幅を超え、
+# かつ整数比 (2・3・5・10 倍等) から INFERRED_SPLIT_TOLERANCE 以内の段差は分割 (併合) とみなす
+INFERRED_SPLIT_MIN_RATIO = 1.9
+INFERRED_SPLIT_TOLERANCE = 0.05
+INFERRED_SPLIT_MAX_GAP = timedelta(days=7)
 # 前日比が分割比率からこの割合 (対数) 以内なら、分割による段差とみなす
 SPLIT_JUMP_TOLERANCE = 0.25
 
@@ -149,6 +157,35 @@ def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional
     if best_i is None or best_err > SPLIT_JUMP_TOLERANCE:
         return None
     return days[best_i]
+
+
+def infer_unrecorded_splits(df: pl.DataFrame) -> list[tuple[date, float]]:
+    """分割イベントの無い、分割 (併合) とみなせる段差を探す。
+
+    Returns:
+        (段差の日, 比率) の列。3:1 分割相当なら比率 3.0、1:3 併合相当なら 1/3
+    """
+    if df.is_empty() or "Date" not in df.columns or "Close" not in df.columns:
+        return []
+    out = df.sort("Date")
+    days = out["Date"].cast(pl.Date).to_list()
+    closes = out["Close"].to_list()
+    found: list[tuple[date, float]] = []
+    for i in range(1, len(days)):
+        prev, cur, d0, d1 = closes[i - 1], closes[i], days[i - 1], days[i]
+        if not prev or not cur or prev <= 0 or cur <= 0 or d0 is None or d1 is None:
+            continue
+        if d1 - d0 > INFERRED_SPLIT_MAX_GAP:
+            continue
+        r = prev / cur
+        x = r if r >= 1 else 1 / r
+        n = round(x)
+        if x < INFERRED_SPLIT_MIN_RATIO or not is_plausible_split_ratio(float(n)):
+            continue
+        if abs(x / n - 1) > INFERRED_SPLIT_TOLERANCE:
+            continue
+        found.append((d1, float(n) if r >= 1 else 1.0 / n))
+    return found
 
 
 def apply_split_adjustments(

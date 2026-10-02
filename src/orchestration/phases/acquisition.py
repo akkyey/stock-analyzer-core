@@ -20,6 +20,7 @@ from src.fetcher.incremental import (
     adjustment_ratio,
     apply_split_adjustments,
     drop_unsettled_today,
+    infer_unrecorded_splits,
     is_plausible_split_ratio,
     merge_history,
     plan_period,
@@ -422,7 +423,17 @@ class AcquisitionPhase(BasePhase):
                 # Yahoo は日本株の分割を過去に遡って調整しないことがある (8227・7946 で確認。
                 # 調整済みの銘柄もある) ため、株価に段差が残っている分割だけを自前で調整する
                 events = splits_by_code.get(code)
-                return apply_split_adjustments(df, events) if events else df
+                if events:
+                    df = apply_split_adjustments(df, events)
+                # イベントが返されない分割 (8377・326A 等) は、値幅制限ではありえない
+                # 整数比の段差から推定して調整・記録する
+                inferred = infer_unrecorded_splits(df)
+                if inferred:
+                    for d, r in inferred:
+                        splits_by_code.setdefault(code, []).append((d, r))
+                        new_splits.append((code, d, r))
+                    df = apply_split_adjustments(df, inferred)
+                return df
 
             try:
                 batches = self._plan_fetch_batches(target_codes, db_hist_by_code)
