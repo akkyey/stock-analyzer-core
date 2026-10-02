@@ -70,13 +70,14 @@ def test_summary_includes_db_stats(tmp_path):
     db.parent.mkdir(parents=True)
     with duckdb.connect(str(db)) as con:
         con.execute("CREATE TABLE stocks (code VARCHAR)")
-        con.execute("CREATE TABLE fundamentals (code VARCHAR)")
+        con.execute("CREATE TABLE fundamentals (code VARCHAR, per DOUBLE, eps DOUBLE)")
         con.execute("CREATE TABLE daily_metrics (code VARCHAR, entry_date DATE)")
         con.execute("INSERT INTO stocks VALUES ('7203')")
         con.execute("INSERT INTO daily_metrics VALUES ('7203','2026-10-01'),('7203','2026-10-02')")
     text = build_run_summary(_Ctx(), working_dir=tmp_path)
     assert "stocks: 1 行" in text
     assert "daily_metrics: 2 日分" in text
+    assert "fundamentals の充足" in text and "per=0" in text and "eps=0" in text
     assert "2026-10-01" in text and "2026-10-02" in text
 
 

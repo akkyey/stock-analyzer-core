@@ -96,28 +96,29 @@ class StockReporter:
     def _stored_value_source(
         value: float, derived: float | None, rel_tol: float, abs_tol: float
     ) -> str:
-        """保存済みの値が、株価と開示値から再計算した値と一致すれば "calc"、そうでなければ "edinet"。
+        """保存済みの値が、株価と財務データから再計算した値と一致すれば "calc"、そうでなければ "stored"。
 
-        算出値 (FinancialRepair が price と EPS 等から作る) と EDINET の開示値は、
-        同じ列に保存されるため、再計算との一致で出所を判別する。
+        算出値 (FinancialRepair が price と EPS 等から作る) と、過去に取得して保存された値は
+        同じ列に入るため、再計算との一致でのみ「算出値」と判別する (取得元までは断定しない)。
         """
         if derived is not None and abs(value - derived) <= abs(derived) * rel_tol + abs_tol:
             return "calc"
-        return "edinet"
+        return "stored"
 
     def _resolve_metrics_with_fallback(
         self, latest_row: dict[str, Any], common: dict[str, Any]
     ) -> dict[str, tuple[Any, str]]:
         """yfinanceとEDINETを両立させたデータソース統合と算出を行う。
         出所 (`*_Src`) の定義:
-        - "calc": 株価と開示値 (EPS・BPS・DPS・発行済株式数) から本システムが算出した値
-        - "edinet": 金融庁 EDINET の開示値 (同梱ベースラインを含む) をそのまま用いた値
+        - "calc": 株価と財務データ (EPS・BPS・DPS・発行済株式数) から再計算でき、値が一致した
+        - "stored": DB に保存済みの値 (同梱ベースラインや過去の取得結果。取得元・取得時点は DB 次第で、
+          本システムが再計算して確認できたものではない)
         - "-": 元データが無く算出もできない (数値も "-")
-        ※ 財務データは EDINET 由来で、yfinance は株価・出来高のみ。以前は算出値も "yf" と
-          表示されていたが、実態と異なるため廃止した。
+        ※ 以前は保存値を一律 "yf" (yfinance 直取得) と表示していたが、実データでは EPS 等が空で
+          再計算できない保存値が大半であり、取得元を証明できないため "stored" に改めた。
 
         Returns:
-            dict[str, tuple[Any, str]]: 指標名 -> (値, "edinet" | "calc" | "-")
+            dict[str, tuple[Any, str]]: 指標名 -> (値, "calc" | "stored" | "-")
         """
         close = safe_float_or_none(
             common.get("close")
@@ -202,7 +203,7 @@ class StockReporter:
         roe_val = safe_float_or_none(common.get("roe") or latest_row.get("roe"))
         edinet_roe = safe_float_or_none(common.get("edinet_roe"))
         if roe_val is not None:
-            res["roe"] = (round(roe_val, 2), "edinet")
+            res["roe"] = (round(roe_val, 2), "stored")
         elif edinet_roe is not None:
             roe_pct = edinet_roe * 100.0 if abs(edinet_roe) < 1.0 else edinet_roe
             res["roe"] = (round(roe_pct, 2), "edinet")

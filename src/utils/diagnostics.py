@@ -165,6 +165,23 @@ def _db_section(working_dir: Optional[Path], drive_dir: Optional[Path]) -> str:
                     "FROM daily_metrics"
                 ).fetchall()[0]
                 lines.append(f"  - daily_metrics: {row[0]} 日分 ({row[1]} 〜 {row[2]})")
+
+                # 財務データの充足状況 (各指標が空でない銘柄数)。再計算の入力 (eps 等) が空だと、
+                # 指標は計算できず保存値頼みになるため、環境ごとの違いを判別する手掛かりになる
+                fcols = {r[1] for r in con.execute("PRAGMA table_info('fundamentals')").fetchall()}
+                wanted = [
+                    c for c in (
+                        "per", "pbr", "dividend_yield", "market_cap", "roe", "equity_ratio",
+                        "eps", "bps", "dps", "shares_outstanding", "sales_growth", "profit_growth",
+                    ) if c in fcols
+                ]
+                if wanted:
+                    exprs = ", ".join(f"count({c})" for c in wanted)
+                    counts = con.execute(f"SELECT {exprs} FROM fundamentals").fetchall()[0]
+                    lines.append(
+                        "  - fundamentals の充足 (空でない銘柄数): "
+                        + ", ".join(f"{c}={n}" for c, n in zip(wanted, counts, strict=True))
+                    )
         else:
             lines.append("- 作業層DB: なし")
     if drive_dir is not None and str(drive_dir).startswith("/content/drive") and not Path(
