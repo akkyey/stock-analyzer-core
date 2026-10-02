@@ -78,7 +78,9 @@ flowchart TD
    - **整合性検証と 3 段構えの自動復旧**:
      - **第1段（メインDB検証）**: Drive 上にメイン DB が存在する場合、作業層（`/content/working/cache/`）へコピーし、主要テーブル（`stocks` 等）の読み込み検証を実行。正常であればそのまま採用。
      - **第2段（.bak 検証と復元）**: メイン DB が存在しない、または検証で破損が検知された場合、Drive 上のバックアップ `cache/stock_analyzer.duckdb.bak` を作業層へコピーし、**この `.bak` に対しても健全性検証を実行**。健全であれば警告ログ（`⚠️ メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました`）を出力して採用。
-     - **第3段（新規初期化フォールバック）**: メイン DB・バックアップともに未存在、または**両方とも破損している場合**は、破損ファイルを破棄して初期シードから新規 DuckDB を初期化作成（`⚠️ バックアップDBも破損または未存在のため、DBを新規初期化します`）。
+     - **第3段（作業層の既存 DB 継続 / 新規初期化）**: メイン DB・バックアップともに未存在、または**両方とも破損している場合**、作業層に健全な DB があれば**消さずに継続利用**する（Step 3 の同期確定で Drive がアンマウントされた後に Step 1 を再実行した場合や、同期失敗後の再実行で、最新データを失わないため）。作業層にも無ければ新規初期化とし、スキーマ作成はパイプライン（`ensure_schema`）が行う。
+     - **検証前に作業層 DB を上書きしない**: Drive からのコピーは一時ファイル（`.pulltmp`）へ行い、健全性を確認してから `os.replace` で作業層 DB と置き換える。Drive 側が破損していても作業層の既存 DB は保たれる。
+     - Step 1 は冒頭で Drive が未マウントなら再マウントする（Step 3 と同じガード）。
 2. **[Execution Phase: パイプライン実行中]**:
    - パイプライン本体には作業層のローカルパス（`/content/working/`）のみを環境変数 `STOCK_ANALYZER_BASE_DIR` として渡す（※Google Driveのパスは絶対に渡さない）。
    - すべての DuckDB トランザクション、ZIP 展開、Polars 集計はローカル SSD の爆速 I/O で完結。
@@ -118,7 +120,7 @@ flowchart TD
 ### 3.4 DB 整合性検証仕様（Colab / CLI 共通）
 - 閾値は `ColabSyncManager.MIN_STOCKS = 1000`（銘柄マスタ・財務データ）、`MIN_HISTORY_DATES = 20`（`daily_metrics` の日数）の**単一定義**。必須テーブルは `stocks` / `fundamentals` / `daily_metrics`。
 - 検証・案内・中断は `ColabSyncManager.enforce_integrity()` に集約し、Step 1・Step 3・`pull_database(validate_integrity=True)` はすべてこれを呼ぶ。不整合時は Colab 向け（`reset_database` を ON）と CLI 向け（`reset_cache` を実行）の両方の対処を案内して `RuntimeError` で中断する。
-- **初回判定** `is_first_run()` は `pull_database` の復元順序と同じ基準で、Drive 上に復元可能な健全 DB（メイン**または** `.bak`）が無い場合のみ初回とする。初回・`reset_database` 直後は検証をスキップする。
+- **初回判定**: ノートブック Step 1 は `pull_database(validate_integrity=True)` の後、**実際に使う DB が健全かどうか**で初回を判定する（Drive が見えないだけで初回扱いにしない）。既存 DB を使う場合は整合性を検証し、新規（初回・`reset_database` 直後）は検証しない。`is_first_run()`（Drive 上のメイン**または** `.bak` の有無で判定）は Step 3 を単独実行した場合の補助判定に使う。
 - Step 3 が正常完了したら `is_first_run = False` に更新し、同一セッションでの Step 3 単独再実行は差分モードかつ検証ありで動作する。
 - `reset_cache` は DB・`.bak` に加え、Push 中断で残る `.tmp` も削除する。
 
@@ -137,6 +139,7 @@ flowchart TD
 - **内容**: 実行環境（Colab / CLI、Python、コード版 = `git describe`、主要ライブラリ版）、取得コード指定（`TARGET_BRANCH`）、実行モード、設定の主要項目（ホワイトリスト）、市場データ取得の統計（サブバッチ数・空応答・例外・1y/2d の計画銘柄数）、取得できなかった銘柄、時間内訳、DB 統計（各テーブル件数・日付範囲・サイズ。**中身は含めない**）、Drive キャッシュの有無と更新時刻、記録されたエラーと中断時の traceback。
 - **含めない情報**: API キー、メールアドレス、認証情報、設定ファイル全体、DB の中身。API キー様の文字列とメールアドレスは出力時に自動で伏せる（`scrub`）。ファイル冒頭に「含まれない情報」を明記し、添付前の確認を促す。
 - **堅牢性**: 各セクションの収集失敗は握りつぶし、取れた範囲だけ出力する。診断はファイルシステムに副作用を持たない（読み取り専用）。
+- **取り違え防止**: Step 3 開始時に `stamp_run` で実行時のコード版と開始時刻を記録し、サマリには「実行時のコード版」と「サマリ作成時点のコード版」を分けて載せる。結果欄は生成元で区別する（Step 3 完了 / Step 3 失敗 / 「困ったときは」セルで作成＝結果不明）。時刻は JST、Drive 未マウント時はその旨を表示する。
 - 取得統計は `context.config["fetch_stats"]`（`record_fetch_stat`）に加算され、`fetch_missing_codes` と合わせて出力される。
 
 ## 4. Colab ノートブック セル構成と UX 設計 (Step-by-Step Flow)

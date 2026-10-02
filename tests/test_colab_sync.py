@@ -394,3 +394,30 @@ def test_notebook_uses_only_existing_sync_methods():
         pytest.skip(f"タグ {tag} が未作成のためタグ時点の検証をスキップ")
     for name in called:
         assert f"def {name}(" in res.stdout, f"{tag} に {name} が存在しません"
+
+
+def test_pull_keeps_working_db_when_drive_unavailable(tmp_path):
+    """Drive 未マウント (Step 3 の flush_and_unmount 後に Step 1 だけ再実行) でも作業層 DB を消さない"""
+    drive_dir = tmp_path / "drive_not_mounted"  # 存在しない
+    working_dir = tmp_path / "working"
+    working_db = working_dir / "cache" / "stock_analyzer.duckdb"
+    _create_valid_duckdb(working_db)
+    before = working_db.read_bytes()
+
+    res = ColabSyncManager.pull_database(drive_dir, working_dir)
+    assert res == working_db
+    assert working_db.read_bytes() == before
+
+
+def test_pull_does_not_clobber_working_db_with_corrupt_drive_copy(tmp_path):
+    """Drive 側が破損していても、検証前に作業層 DB を上書きしない"""
+    drive_dir = tmp_path / "drive"
+    (drive_dir / "cache").mkdir(parents=True)
+    (drive_dir / "cache" / "stock_analyzer.duckdb").write_bytes(b"CORRUPTED")
+    working_dir = tmp_path / "working"
+    working_db = working_dir / "cache" / "stock_analyzer.duckdb"
+    _create_valid_duckdb(working_db)
+
+    res = ColabSyncManager.pull_database(drive_dir, working_dir)
+    assert ColabSyncManager.is_duckdb_healthy(res)
+    assert not list((working_dir / "cache").glob("*.pulltmp"))

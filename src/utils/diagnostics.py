@@ -13,11 +13,19 @@ import re
 import subprocess
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 DIAGNOSTICS_FILENAME = "diagnostics_summary.txt"
+
+# Colab のシステム時刻は UTC のため、表示は JST に統一する
+JST = timezone(timedelta(hours=9), "JST")
+
+# サマリの生成元 (結果欄の表記を決める)
+SOURCE_COMPLETED = "step3_completed"
+SOURCE_FAILED = "step3_failed"
+SOURCE_MANUAL = "manual"
 
 # サマリに載せてよい設定キー (ホワイトリスト。設定全体は出さない)
 _CONFIG_WHITELIST = (
@@ -45,6 +53,37 @@ def scrub(text: str) -> str:
     return text
 
 
+def _now() -> str:
+    return datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
+
+
+def code_version() -> str:
+    """リポジトリのコード版 (git describe / 短縮ハッシュ)。取得できなければ "?"。"""
+    root = Path(__file__).resolve().parent.parent.parent
+
+    def git(*args: str) -> str:
+        try:
+            out = subprocess.run(
+                ["git", *args], cwd=root, capture_output=True, text=True, timeout=5
+            )
+            return out.stdout.strip() or "?"
+        except Exception:
+            return "?"
+
+    return f"{git('describe', '--tags', '--always')} / {git('rev-parse', '--short', 'HEAD')}"
+
+
+def stamp_run(context: Any) -> None:
+    """Step 3 (パイプライン) 開始時に、実行時点のコード版と開始時刻を記録する。
+
+    後から「困ったときは」セルでサマリを作っても、実際に動いたコード版が分かるようにする。
+    """
+    cfg = getattr(context, "config", None)
+    if isinstance(cfg, dict):
+        cfg["run_code_version"] = code_version()
+        cfg["run_started_at"] = _now()
+
+
 def _safe(section: str, fn: Callable[[], str]) -> str:
     """セクション収集を失敗させない (失敗理由だけを書く)。"""
     try:
@@ -62,22 +101,11 @@ def _env_section(extra: dict) -> str:
         except Exception:
             return "?"
 
-    root = Path(__file__).resolve().parent.parent.parent
-
-    def git(*args: str) -> str:
-        try:
-            out = subprocess.run(
-                ["git", *args], cwd=root, capture_output=True, text=True, timeout=5
-            )
-            return out.stdout.strip() or "?"
-        except Exception:
-            return "?"
-
     is_colab = "google.colab" in sys.modules or bool(os.environ.get("COLAB_RELEASE_TAG"))
     lines = [
         f"- 実行環境: {'Google Colab' if is_colab else 'ローカル / CLI'}",
         f"- Python: {platform.python_version()} ({platform.system()})",
-        f"- コード版: {git('describe', '--tags', '--always')} / {git('rev-parse', '--short', 'HEAD')}",
+        f"- コード版 (サマリ作成時点): {code_version()}",
         "- ライブラリ: "
         + ", ".join(f"{p}={pkg(p)}" for p in ("yfinance", "polars", "duckdb", "pandas")),
     ]
@@ -88,8 +116,14 @@ def _env_section(extra: dict) -> str:
 
 def _config_section(context: Any) -> str:
     cfg = getattr(context, "config", None) or {}
-    lines = [f"- {k}: {cfg[k]}" for k in _CONFIG_WHITELIST if k in cfg]
-    return "\n".join(lines) or "(なし)"
+    if "run_started_at" not in cfg:
+        return "(Step 3 の実行記録なし)"
+    lines = [
+        f"- 開始時刻: {cfg['run_started_at']}",
+        f"- 実行時のコード版: {cfg.get('run_code_version', '?')}",
+    ]
+    lines += [f"- {k}: {cfg[k]}" for k in _CONFIG_WHITELIST if k in cfg]
+    return "\n".join(lines)
 
 
 def _fetch_section(context: Any) -> str:
@@ -133,7 +167,11 @@ def _db_section(working_dir: Optional[Path], drive_dir: Optional[Path]) -> str:
                 lines.append(f"  - daily_metrics: {row[0]} 日分 ({row[1]} 〜 {row[2]})")
         else:
             lines.append("- 作業層DB: なし")
-    if drive_dir is not None:
+    if drive_dir is not None and str(drive_dir).startswith("/content/drive") and not Path(
+        "/content/drive/MyDrive"
+    ).exists():
+        lines.append("- Google Drive: 未マウント (Drive 上のファイルは確認できません)")
+    elif drive_dir is not None:
         cache = Path(drive_dir) / "cache"
         for name in ("stock_analyzer.duckdb", "stock_analyzer.duckdb.bak"):
             f = cache / name
@@ -169,13 +207,31 @@ def build_run_summary(
     elapsed_sec: Optional[float] = None,
     error: Optional[BaseException] = None,
     extra: Optional[dict] = None,
+    source: Optional[str] = None,
 ) -> str:
-    """調査用サマリのテキストを生成する (機微情報は伏せ済み)。"""
+    """調査用サマリのテキストを生成する (機微情報は伏せ済み)。
+
+    source: SOURCE_COMPLETED / SOURCE_FAILED / SOURCE_MANUAL。
+        未指定時は error の有無から SOURCE_FAILED / SOURCE_MANUAL を選ぶ。
+    """
     extra = extra or {}
+    if source is None:
+        source = SOURCE_FAILED if error is not None else SOURCE_MANUAL
+    if source == SOURCE_COMPLETED:
+        result = "Step 3 完了"
+    elif source == SOURCE_FAILED:
+        result = "Step 3 失敗 (中断)"
+    else:
+        cfg = getattr(context, "config", None) or {}
+        result = (
+            "不明 (「困ったときは」セルで作成。下記は直近の Step 3 実行記録)"
+            if "run_started_at" in cfg
+            else "不明 (「困ったときは」セルで作成。Step 3 の実行記録なし)"
+        )
     head = [
         "# Stock Analyzer 調査用サマリ",
-        f"生成日時: {datetime.now():%Y-%m-%d %H:%M:%S}",
-        f"結果: {'失敗 (中断)' if error is not None else '完了'}"
+        f"生成日時: {_now()}",
+        f"結果: {result}"
         + (f" / 所要 {elapsed_sec:.0f} 秒" if elapsed_sec is not None else ""),
         "",
         "※ APIキー・メールアドレス・認証情報・DBの中身は含まれません (件数と日付範囲のみ)。",
@@ -183,7 +239,7 @@ def build_run_summary(
     ]
     sections = [
         ("実行環境", _safe("env", lambda: _env_section(extra))),
-        ("設定 (主要項目のみ)", _safe("cfg", lambda: _config_section(context))),
+        ("Step 3 実行時の設定 (主要項目のみ)", _safe("cfg", lambda: _config_section(context))),
         ("市場データ取得", _safe("fetch", lambda: _fetch_section(context))),
         ("データベース", _safe("db", lambda: _db_section(working_dir, drive_dir))),
         ("エラー", _safe("err", lambda: _errors_section(context, error))),

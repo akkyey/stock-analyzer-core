@@ -159,8 +159,8 @@ class ColabSyncManager:
                     return False, f"必須テーブル {missing} が欠落しています"
 
                 # 3. データの最低件数チェック
-                stocks_count = conn.execute("SELECT count(*) FROM stocks").fetchone()[0]
-                funda_count = conn.execute("SELECT count(*) FROM fundamentals").fetchone()[0]
+                stocks_count = conn.execute("SELECT count(*) FROM stocks").fetchall()[0][0]
+                funda_count = conn.execute("SELECT count(*) FROM fundamentals").fetchall()[0][0]
 
                 if stocks_count < min_stocks:
                     return False, f"銘柄マスタ件数が異常に少なくなっています ({stocks_count} 件 / 期待値: {min_stocks}件以上)"
@@ -169,8 +169,8 @@ class ColabSyncManager:
                     return False, f"財務データ件数が異常に少なくなっています ({funda_count} 件 / 期待値: {min_stocks}件以上)"
 
                 # 4. 株価履歴データの蓄積日数・件数チェック (差分更新の前提条件)
-                metrics_count = conn.execute("SELECT count(*) FROM daily_metrics").fetchone()[0]
-                dates_count = conn.execute("SELECT count(distinct entry_date) FROM daily_metrics").fetchone()[0]
+                metrics_count = conn.execute("SELECT count(*) FROM daily_metrics").fetchall()[0][0]
+                dates_count = conn.execute("SELECT count(distinct entry_date) FROM daily_metrics").fetchall()[0][0]
 
                 if dates_count < min_history_dates:
                     return False, (
@@ -265,59 +265,55 @@ class ColabSyncManager:
         working_cache.mkdir(parents=True, exist_ok=True)
         working_cache_db = working_cache / filename
 
+        def _try_restore(src: Path, label: str) -> bool:
+            """src を一時ファイルへコピーして検証し、健全な場合のみ作業層 DB を置き換える。
+
+            検証前に作業層 DB を上書きしないため、Drive 側が破損していても
+            作業層の既存 DB (最新の可能性がある) は失われない。
+            """
+            tmp = working_db.with_name(working_db.name + ".pulltmp")
+            try:
+                shutil.copy2(src, tmp)
+                if cls.is_duckdb_healthy(tmp):
+                    os.replace(tmp, working_db)
+                    return True
+                logger.warning(f"⚠️ [Pull] Drive 上の{label}が破損しているか不正です: {src}")
+            except Exception as e:
+                logger.warning(f"⚠️ [Pull] Drive {label}のコピー失敗 ({e})。")
+            finally:
+                tmp.unlink(missing_ok=True)
+            return False
+
         chosen = False
         # 第1段: メインDBの検証と採用
-        if drive_db.exists():
-            try:
-                shutil.copy2(drive_db, working_db)
-                if cls.is_duckdb_healthy(working_db):
-                    logger.info(
-                        f"✅ [Pull: 第1段] Google Drive から健全なメイン DB をロードしました: {working_db}"
-                    )
-                    chosen = True
-                else:
-                    logger.warning(
-                        "⚠️ [Pull] Drive 上のメイン DB が破損しているか不正です。バックアップからの復旧を試みます..."
-                    )
-                    if working_db.exists():
-                        working_db.unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ [Pull] Drive メイン DB のコピー失敗 ({e})。バックアップ復旧を試みます..."
-                )
-                if working_db.exists():
-                    working_db.unlink(missing_ok=True)
+        if drive_db.exists() and _try_restore(drive_db, "メイン DB"):
+            logger.info(
+                f"✅ [Pull: 第1段] Google Drive から健全なメイン DB をロードしました: {working_db}"
+            )
+            chosen = True
 
         # 第2段: バックアップ (.bak) の検証と採用
-        if not chosen and drive_bak.exists():
-            try:
-                shutil.copy2(drive_bak, working_db)
-                if cls.is_duckdb_healthy(working_db):
-                    logger.warning(
-                        f"⚠️ [Pull: 第2段] メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました: {working_db}"
-                    )
-                    chosen = True
-                else:
-                    logger.warning("⚠️ [Pull] バックアップ DB (.bak) も破損しています。")
-                    if working_db.exists():
-                        working_db.unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ [Pull] Drive バックアップ DB のコピー失敗 ({e})。"
-                )
-                if working_db.exists():
-                    working_db.unlink(missing_ok=True)
-
-        # 第3段: 新規初期化フォールバック
-        if not chosen:
+        if not chosen and drive_bak.exists() and _try_restore(drive_bak, "バックアップ DB (.bak)"):
             logger.warning(
-                f"ℹ️ [Pull: 第3段] 既存DB未存在または全破損のため、新規に空の DB を初期化します: {working_db}"
+                f"⚠️ [Pull: 第2段] メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました: {working_db}"
             )
-            if working_db.exists():
+            chosen = True
+
+        # 第3段: Drive に復元元が無い場合
+        if not chosen:
+            if cls.is_duckdb_healthy(working_db):
+                # Drive 未マウント・同期失敗後の再実行など。作業層の既存 DB を消さずに継続利用する
+                logger.warning(
+                    f"⚠️ [Pull: 第3段] Drive に復元可能な DB が無いため、作業層の既存 DB を継続利用します: {working_db}"
+                )
+                chosen = True
+            else:
+                logger.warning(
+                    f"ℹ️ [Pull: 第3段] 既存DB未存在または全破損のため、新規に空の DB を初期化します: {working_db}"
+                )
                 working_db.unlink(missing_ok=True)
-            if working_cache_db.exists():
                 working_cache_db.unlink(missing_ok=True)
-            return working_db
+                return working_db
 
         # working_db と working_cache_db の両方を同期（二重参照の完全安全化）
         if working_db != working_cache_db and working_db.exists():

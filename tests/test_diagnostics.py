@@ -4,9 +4,11 @@ import duckdb
 
 from src.utils.diagnostics import (
     DIAGNOSTICS_FILENAME,
+    SOURCE_COMPLETED,
     build_run_summary,
     record_fetch_stat,
     scrub,
+    stamp_run,
     write_run_summary,
 )
 
@@ -39,6 +41,7 @@ def test_scrub_masks_secrets():
 
 def test_summary_contains_key_sections_and_excludes_secrets(tmp_path):
     ctx = _Ctx()
+    stamp_run(ctx)
     record_fetch_stat(ctx, "sub_batches", 196)
     record_fetch_stat(ctx, "empty_responses")
     ctx.config["fetch_missing_codes"] = ["1432", "1445", "1432"]
@@ -49,8 +52,11 @@ def test_summary_contains_key_sections_and_excludes_secrets(tmp_path):
         drive_dir=tmp_path / "drive",
         elapsed_sec=908.4,
         extra={"取得コード指定(TARGET_BRANCH)": "v1.2.0"},
+        source=SOURCE_COMPLETED,
     )
-    assert "調査用サマリ" in text and "完了" in text and "908" in text
+    assert "調査用サマリ" in text and "Step 3 完了" in text and "908" in text
+    assert "JST" in text
+    assert "実行時のコード版" in text and "開始時刻" in text
     assert "fetch_profile: colab" in text
     assert "sub_batches: 196" in text and "empty_responses: 1" in text
     assert "取得できなかった銘柄: 2 件" in text  # 重複は除外
@@ -82,7 +88,7 @@ def test_failure_summary_includes_traceback(tmp_path):
             tmp_path / "output" / DIAGNOSTICS_FILENAME, context=_Ctx(), error=e
         )
     text = path.read_text(encoding="utf-8")
-    assert "失敗 (中断)" in text
+    assert "Step 3 失敗 (中断)" in text
     assert "RuntimeError" in text and "データベース不整合のため停止" in text
 
 
@@ -108,3 +114,28 @@ def test_summary_is_read_only(tmp_path):
     text = build_run_summary(_Ctx(), working_dir=work, drive_dir=drive)
     assert "作業層DB: なし" in text
     assert not work.exists() and not drive.exists()
+
+
+def test_manual_summary_is_labeled_and_distinguishes_run_record():
+    """「困ったときは」セルで後から作ったサマリは、結果を『完了』と誤表示しない"""
+    no_run = build_run_summary(_Ctx())
+    assert "Step 3 の実行記録なし" in no_run
+    assert "Step 3 完了" not in no_run
+
+    ctx = _Ctx()
+    stamp_run(ctx)
+    stale = build_run_summary(ctx)
+    assert "直近の Step 3 実行記録" in stale
+    assert "実行時のコード版" in stale
+
+
+def test_drive_unmounted_is_reported(tmp_path):
+    """Colab で Drive がアンマウントされている場合、『ファイルなし』ではなく未マウントと表示する"""
+    from pathlib import Path
+
+    if Path("/content/drive/MyDrive").exists():
+        import pytest
+
+        pytest.skip("Drive がマウントされた環境では検証できない")
+    text = build_run_summary(_Ctx(), drive_dir=Path("/content/drive/MyDrive/StockAnalyzer"))
+    assert "未マウント" in text
