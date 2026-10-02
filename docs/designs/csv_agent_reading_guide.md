@@ -12,7 +12,7 @@
 
 | ファイルパス | 収録対象 | 件数目安 | 主な特徴・責務 |
 | :--- | :--- | :---: | :--- |
-| `daily_report.csv` | **スクリーニング対象銘柄**（第1層 Pre-Filter を通過した全銘柄） | **約 2,100 社** | 24 カラム。**必須の識別・判定列（`Code` / `Verdict` / `Score`）は欠損ゼロ**。<br>指標列（PER・配当利回りなど）は、元データが無い場合に**推定値で埋めず `-`（欠損）**で出力する。 |
+| `daily_report.csv` | **スクリーニング対象銘柄**（第1層 Pre-Filter を通過した全銘柄） | **約 2,100 社** | 26 カラム。**必須の識別・判定列（`Code` / `Verdict` / `Score`）は欠損ゼロ**。<br>指標列（PER・配当利回りなど）は、元データが無い場合に**推定値で埋めず `-`（欠損）**で出力する。 |
 | `uncalculable_stocks.csv` | **除外・算出不能銘柄** | **約 1,800 社** | 第1層（極小流動性、商いゼロ、ボロ株、債務超過、致命的CF枯渇）や、市場データを取得できなかった銘柄。元データの列に加え、除外理由 `filter_reason` と詳細 `filter_detail` を明記。 |
 
 > [!IMPORTANT]
@@ -27,7 +27,7 @@
 両 CSV ともコメント行は無く、**第1行がヘッダー**（UTF-8 BOM 付き）である。
 
 ```csv
-Rank,Code,Name,Sector,Market,Market_Cap_Src,Market_Cap,Verdict,Score,PER_Src,PER,PBR_Src,PBR,Div_Yield_Src,Div_Yield,ROE_Src,ROE,Sales_Growth,Profit_Growth,Operating_Margin,Equity_Ratio,RSI,Trend,Report_Timestamp
+Rank,Code,Name,Sector,Market,Market_Cap_Src,Market_Cap,Verdict,Score,Price,Price_Date,PER_Src,PER,PBR_Src,PBR,Div_Yield_Src,Div_Yield,ROE_Src,ROE,Sales_Growth,Profit_Growth,Operating_Margin,Equity_Ratio,RSI,Trend,Report_Timestamp
 1,3306,日本製麻,卸売業,Standard,stored,3181029376,Grade B,73.7,stored,5.55,stored,1.3,stored,0.55,stored,27.41,2.03,-64.7,-1.48,59.72,63.3,3,2026-10-02 16:35:05
 ```
 
@@ -58,7 +58,7 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 
 ## 4. 全カラム定義
 
-### 4.1 `daily_report.csv`（全 24 カラム）
+### 4.1 `daily_report.csv`（全 26 カラム）
 
 | カラム名 | データ型 | 説明 | 具体例 |
 | :--- | :--- | :--- | :--- |
@@ -71,6 +71,8 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 | **Market_Cap** | Integer | 時価総額 (円) | `3181029376` |
 | **Verdict** | String | 機械判定グレード (`Grade S` / `Grade A` / `Grade B` / `Grade C`、レガシー設定時: `STRONG_BUY` / `BUY` / `WATCH` / `PASS`) | `Grade A` |
 | **Score** | Float | クオンツ総合スコア (0〜100) | `73.7` |
+| **Price** | Float | 評価に使った終値 (円)。PER・PBR・配当利回り・時価総額の計算にもこの値を使う | `2856.5` |
+| **Price_Date** | String | `Price` の日付 (YYYY-MM-DD)。取引時間中に実行しても、確定前の当日の値は使わない | `2026-10-02` |
 | **PER_Src** / **PER** | String / Float | 株価収益率 (倍) と出所 | `stored` / `5.55` |
 | **PBR_Src** / **PBR** | String / Float | 株価純資産倍率 (倍) と出所 | `calc` / `1.3` |
 | **Div_Yield_Src** / **Div_Yield** | String / Float | 配当利回り (**%表記**。`0.55` は 0.55%) と出所 | `calc` / `0.55` |
@@ -80,7 +82,7 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 | **Operating_Margin** | Float | 営業利益率 (%) | `-1.48` |
 | **Equity_Ratio** | Float | 自己資本比率 (%) | `59.72` |
 | **RSI** | Float | 14日相対力指数 (0〜100) | `63.3` |
-| **Trend** | Integer | トレンドスコア (0〜3。大きいほど上昇基調) | `3` |
+| **Trend** | Integer | トレンドスコア (0〜4。大きいほど上昇基調) | `3` |
 | **Report_Timestamp** | String | レポート生成日時 | `2026-10-02 16:35:05` |
 
 **`*_Src`（出所）の値**
