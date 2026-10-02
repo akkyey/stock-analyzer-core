@@ -8,6 +8,7 @@
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional, Union
 
@@ -181,6 +182,11 @@ class ColabSyncManager:
         except Exception as e:
             return False, f"DuckDBファイル破損または読み込みエラー: {e}"
 
+    @staticmethod
+    def _is_colab() -> bool:
+        """利用者向け案内文の出し分け専用 (取得挙動の切替には使わない)。"""
+        return "google.colab" in sys.modules or bool(os.environ.get("COLAB_RELEASE_TAG"))
+
     @classmethod
     def enforce_integrity(
         cls,
@@ -206,11 +212,14 @@ class ColabSyncManager:
         print("   安全のために処理を中断しました。")
         print()
         print("👉 【対処方法】")
-        print("   ■ Google Colab: Step 0 の「reset_database」を ON (True) にして Step 0 から再実行してください。")
-        print("   ■ CLI / ローカル: 次を実行してキャッシュをリセットし、再実行してください。")
-        print("     >>> from pathlib import Path")
-        print("     >>> from src.utils.colab_sync import ColabSyncManager")
-        print("     >>> ColabSyncManager.reset_cache(<Drive保存先 または base_dir>, <作業ディレクトリ>)")
+        if cls._is_colab():
+            print("   Step 0 のセルにある「reset_database」を ON (チェック) にして、Step 0 から順に実行し直してください。")
+            print("   （データベースが作り直されます。完了後は「reset_database」のチェックを外してください）")
+        else:
+            print("   次を実行してキャッシュをリセットし、再実行してください。")
+            print("     >>> from pathlib import Path")
+            print("     >>> from src.utils.colab_sync import ColabSyncManager")
+            print("     >>> ColabSyncManager.reset_cache(<Drive保存先 または base_dir>, <作業ディレクトリ>)")
         print("❌" * 35)
         print()
         raise RuntimeError(f"データベース不整合を検知したため安全に中断しました: {reason}")

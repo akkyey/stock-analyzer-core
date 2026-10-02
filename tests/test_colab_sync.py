@@ -333,16 +333,27 @@ def test_reset_cache_removes_tmp_leftovers(tmp_path):
     assert not w_tmp.exists()
 
 
-def test_enforce_integrity_guides_for_colab_and_cli(tmp_path, capsys):
-    """不整合時は Colab / CLI 双方の対処方法を案内して RuntimeError で中断する。閾値は共通定数"""
+def test_enforce_integrity_guides_by_environment(tmp_path, capsys, monkeypatch):
+    """不整合時は実行環境に合う対処方法だけを案内して RuntimeError で中断する。閾値は共通定数"""
     db_file = tmp_path / "cache" / "stock_analyzer.duckdb"
     _create_valid_duckdb(db_file)  # 銘柄 1 件・履歴 5 日 → 既定閾値では不整合
 
+    # Colab: reset_database の手順のみ (コード例は出さない)
+    monkeypatch.setenv("COLAB_RELEASE_TAG", "test")
     with pytest.raises(RuntimeError, match="データベース不整合を検知したため安全に中断しました"):
         ColabSyncManager.enforce_integrity(db_file)
     out = capsys.readouterr().out
-    assert "reset_database" in out  # Colab 向け
-    assert "reset_cache" in out  # CLI 向け
+    assert "reset_database" in out
+    assert "reset_cache" not in out
+
+    # CLI: reset_cache の手順のみ
+    monkeypatch.delenv("COLAB_RELEASE_TAG", raising=False)
+    monkeypatch.delitem(__import__("sys").modules, "google.colab", raising=False)
+    with pytest.raises(RuntimeError):
+        ColabSyncManager.enforce_integrity(db_file)
+    out = capsys.readouterr().out
+    assert "reset_cache" in out
+    assert "reset_database" not in out
 
     # 既定値は共通定数と一致 (verify / pull / enforce で不揃いにならない)
     valid, _ = ColabSyncManager.verify_database_integrity(
