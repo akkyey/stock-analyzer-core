@@ -221,9 +221,12 @@ def test_verify_database_integrity_and_reset(tmp_path):
     assert "株価時系列履歴 (daily_metrics) が不足しています" in msg_thin
 
     # 5. pull_database(..., validate_integrity=True) のフェイルセーフ動作
+    drive_cache_dir = drive_dir / "cache"
+    drive_cache_dir.mkdir(parents=True, exist_ok=True)
+    _create_valid_duckdb(drive_cache_dir / "stock_analyzer.duckdb")
     with pytest.raises(RuntimeError, match="データベース不整合を検知したため安全に中断しました"):
         ColabSyncManager.pull_database(
-            tmp_path / "drive",
+            drive_dir,
             working_dir,
             validate_integrity=True,
             min_stocks=1000,
