@@ -1,8 +1,8 @@
 """市場データ取得プロファイル (標準 / Colab)
 
-Colab は共用 IP のため Yahoo Finance の 429 を受けやすく、標準 (専用 IP 想定) と
-同じ取得経路では 429 → 事後バックオフが多発して遅く、バッチ欠落も起きやすい。
-そこで Colab 専用に「バッチ間の事前インターバル」と「リトライ拡大」を持つ。
+Colab は共用 IP のため Yahoo Finance の 429 を受けるリスクがあるとして、Colab 専用に
+リトライ拡大 (回数・バックオフ) を持つ。実測では 429 は発生しておらず、事前インターバルは
+標準と同値 (下記 COLAB の注記を参照)。
 
 選択順: context.config["fetch_profile"] → 環境変数 STOCK_ANALYZER_FETCH_PROFILE → standard
 (Colab ノートブックが config で明示する。環境の推測判定は行わない)
@@ -25,8 +25,11 @@ class FetchProfile:
 
 
 STANDARD = FetchProfile("standard", 0.2, 3, 5.0, 10.0)
-# インターバル初期値はベンチマーク設計書 §6.2 の推奨 (1〜2秒) の下限。Colab 実測で調整する。
-COLAB = FetchProfile("colab", 1.0, 5, 8.0, 15.0)
+# Colab 実測 (2026-10-02, 差分モード 197 サブバッチ) で、事前インターバル 1.0 秒と 0.2 秒の
+# いずれも 429 (空応答・例外) は 0 件。1.0 秒は取得時間を約 150 秒延ばすだけだったため標準と同値に戻す。
+# Colab の遅さの主因は 429 ではなく通信 1 回あたりの遅延 (約 2.3 秒/サブバッチ。専用環境は約 0.5 秒)。
+# リトライ回数・バックオフの拡大は、429 が発生しない限りコストが無いため保険として残す。
+COLAB = FetchProfile("colab", 0.2, 5, 8.0, 15.0)
 
 _PROFILES = {p.name: p for p in (STANDARD, COLAB)}
 

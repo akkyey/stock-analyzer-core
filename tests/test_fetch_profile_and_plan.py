@@ -28,8 +28,10 @@ def test_profile_selection_order(monkeypatch):
 
 
 def test_colab_profile_is_more_conservative():
-    assert COLAB.inter_batch_sleep > STANDARD.inter_batch_sleep
+    # 事前インターバルは実測 (429 なし) により標準と同値。リトライ予算のみ拡大
+    assert COLAB.inter_batch_sleep == STANDARD.inter_batch_sleep
     assert COLAB.max_retries > STANDARD.max_retries
+    assert COLAB.empty_backoff_base >= STANDARD.empty_backoff_base
     # 標準は従来値 (CLI 挙動を変えない)
     assert (STANDARD.inter_batch_sleep, STANDARD.max_retries) == (0.2, 3)
 
