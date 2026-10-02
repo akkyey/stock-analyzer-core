@@ -94,7 +94,17 @@ class EvaluationPhase(BasePhase):
         self.log_info("Applying Layer 2: QuantEvaluator scoring...")
         evaluable_df = self._apply_quant_evaluator(evaluable_df)
 
-        # 9. スコア降順ソート
+        # 9. スコアの保存 (スコア算出前の保存では quant_score が常に空だった)
+        try:
+            self.context.duck_repo.save_metrics(
+                evaluable_df.select(["code", "entry_date", "quant_score"]).filter(
+                    pl.col("entry_date").is_not_null()
+                )
+            )
+        except Exception as e:
+            self.log_warn(f"スコアの保存に失敗しました (継続): {e}")
+
+        # 10. スコア降順ソート
         final_df = evaluable_df.sort("quant_score", descending=True)
 
         self.log_info(
@@ -242,6 +252,14 @@ class EvaluationPhase(BasePhase):
             f_cols = [c for c in df_fundamentals.columns if c != "code"]
             df = self._clean_columns(df, f_cols)
             df = df.join(df_fundamentals, on="code", how="left")
+
+        # 株式分割の後に書類が提出されていない銘柄の 1 株当たり指標を補正する
+        try:
+            splits = self.context.duck_repo.load_splits()
+            if isinstance(splits, pl.DataFrame) and not splits.is_empty():
+                df = FinancialRepairService.apply_split_adjustment(df, splits)
+        except Exception as e:
+            self.log_warn(f"株式分割の補正に失敗しました (継続): {e}")
 
         # 結合後に万一混入した _right サフィックス列をパージ (Schema Isolation Guard)
         right_cols = [c for c in df.columns if c.endswith("_right")]

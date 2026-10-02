@@ -1,16 +1,19 @@
 """FinancialRepairService の単体テスト (境界値・比率スケーリング・冪等性検証)"""
 
+from datetime import date
+
 import polars as pl
 import pytest
 
 from src.services.financial_repair import FinancialRepairService
 
 
-def test_financial_repair_equity_ratio_idempotency_and_scaling():
-    """自己資本比率のスケーリング（<=1.0 -> *100）と2回適用時の冪等性を検証する。"""
-    # 銀行株や低自己資本株：
-    # 5% (0.05) -> 5.0%
-    # すでに % 単位の 5.0% -> 5.0% のまま維持（500% に暴走しないこと）
+def test_financial_repair_equity_ratio_idempotency_without_scaling():
+    """自己資本比率は % 表記のまま扱い (1 未満でも 100 倍しない)、2 回適用しても変わらない。
+
+    財務データ (シード・EDINET 取り込み) は常に % 表記で保存される。1% 未満の実在値
+    (債務超過寸前の企業など) を 100 倍すると、健全な企業として扱ってしまう。
+    """
     df = pl.DataFrame(
         {
             "code": ["8306", "8316", "9984"],
@@ -22,13 +25,13 @@ def test_financial_repair_equity_ratio_idempotency_and_scaling():
 
     repaired_1 = FinancialRepairService.repair(df)
     # 1回目の検証
-    assert repaired_1["equity_ratio"][0] == 5.0
+    assert repaired_1["equity_ratio"][0] == 0.05
     assert repaired_1["equity_ratio"][1] == 5.0
     assert repaired_1["equity_ratio"][2] == 35.0
 
     # 2回目の適用（冪等性の実証）
     repaired_2 = FinancialRepairService.repair(repaired_1)
-    assert repaired_2["equity_ratio"][0] == 5.0
+    assert repaired_2["equity_ratio"][0] == 0.05
     assert repaired_2["equity_ratio"][1] == 5.0
     assert repaired_2["equity_ratio"][2] == 35.0
 
@@ -47,8 +50,8 @@ def test_financial_repair_boundary_values():
     repaired = FinancialRepairService.repair(df)
     # 1.0 は 1% 表記とみなして 1.0 のまま維持
     assert repaired["equity_ratio"][0] == 1.0
-    # 0.99 は 99.0% にスケーリング
-    assert repaired["equity_ratio"][1] == 99.0
+    # 0.99 は 0.99% のまま (100 倍しない)
+    assert repaired["equity_ratio"][1] == 0.99
     # 0.0 はそのまま 0.0
     assert repaired["equity_ratio"][2] == 0.0
     # 負の比率はクリップされて 0.0
@@ -150,3 +153,40 @@ def test_financial_repair_nan_inf_safety():
 
 
 
+
+
+def test_split_adjustment_applies_only_to_documents_before_split():
+    """分割前に提出された書類の 1 株当たり指標だけを、分割比率で補正する"""
+    df = pl.DataFrame(
+        {
+            "code": ["8227", "7946", "1001"],
+            "eps": [900.0, 50.0, 10.0],
+            "bps": [9000.0, 500.0, 100.0],
+            "dps": [300.0, 20.0, 5.0],
+            "shares_outstanding": [36_000_000.0, 1_000_000.0, 100.0],
+            # 7946 は分割後に提出された書類 (分割後の基準)、8227 は分割前
+            "submitted_at": ["2025-05-20 10:00", "2026-06-25 10:00", None],
+            "bs_submitted_at": ["2025-05-20 10:00", "2026-06-25 10:00", None],
+        }
+    )
+    splits = pl.DataFrame(
+        {
+            "code": ["8227", "7946"],
+            "split_date": [date(2026, 2, 19), date(2026, 3, 5)],
+            "ratio": [3.0, 5.0],
+        }
+    )
+    out = FinancialRepairService.apply_split_adjustment(df, splits).sort("code")
+    rows = {r["code"]: r for r in out.to_dicts()}
+    assert rows["8227"]["eps"] == 300.0 and rows["8227"]["bps"] == 3000.0
+    assert rows["8227"]["dps"] == 100.0 and rows["8227"]["shares_outstanding"] == 108_000_000.0
+    assert rows["7946"]["eps"] == 50.0 and rows["7946"]["shares_outstanding"] == 1_000_000.0
+    assert rows["1001"]["eps"] == 10.0  # 分割の記録が無い銘柄は変えない
+
+
+def test_split_adjustment_skips_values_with_unknown_basis():
+    """値の基準日が不明な場合は補正しない (分割後の値を二重に割らない)"""
+    df = pl.DataFrame({"code": ["8227"], "eps": [300.0], "submitted_at": [None], "bs_submitted_at": [None]})
+    splits = pl.DataFrame({"code": ["8227"], "split_date": [date(2026, 2, 19)], "ratio": [3.0]})
+    out = FinancialRepairService.apply_split_adjustment(df, splits)
+    assert out["eps"][0] == 300.0

@@ -202,13 +202,13 @@ class FinancialRepairService:
                 ]
             )
 
-        # [Step 5] 比率項目の自動スケーリング (#4, 指摘4)
-        # 自己資本比率が実数（0.0〜1.0 未満）で表記されている場合のみ百分率（%）へ100倍スケーリングする
-        # ※ 1.0 は「1%」として扱うのが安全なため < 1.0 で判定する。
-        # ※ current_ratio, debt_equity_ratio などの倍率指標は 1.0 を超えるのが通常なため対象外とする。
+        # [Step 5] 比率項目の自動スケーリング (既定は無効)
+        # 財務データは常に % 表記で保存されるため、既定 (0.0) では何もしない。
+        # 1 未満を一律 100 倍すると、自己資本比率 0.7% のような実在の値が 70% になってしまう。
+        # 設定 financial_repair.ratio_scaling_threshold を正の値にした場合のみ、その値未満を 100 倍する。
         from src.config_singleton import ConfigSingleton
 
-        threshold = ConfigSingleton.get("financial_repair.ratio_scaling_threshold", 1.0)
+        threshold = ConfigSingleton.get("financial_repair.ratio_scaling_threshold", 0.0)
 
         if "equity_ratio" in cols:
             df = df.with_columns(
@@ -246,6 +246,67 @@ class FinancialRepairService:
             f"✨ Deep financial repair completed. (Records: {initial_count}, Scaling Threshold: {threshold})"
         )
         return df
+
+    @staticmethod
+    def apply_split_adjustment(df: pl.DataFrame, splits: pl.DataFrame) -> pl.DataFrame:
+        """株式分割の後に提出された書類が無い銘柄の、1 株当たり指標を分割後の基準に直す。
+
+        EPS・BPS・DPS は書類の提出時点の株数が基準のため、その後に分割があると、分割後の
+        株価で割った PER・PBR・配当利回りが分割比率の分だけ割安に見える。
+        分割日が値の基準日 (書類の提出日時。同梱シード由来の値はシードの作成日時) より後なら、
+        EPS・BPS・DPS を比率で割り、発行済株式数に比率を掛ける。基準日が不明な値は
+        二重の補正を避けるため補正しない。
+
+        Args:
+            df: code, eps, bps, dps, shares_outstanding, submitted_at, bs_submitted_at を含む
+            splits: code, split_date, ratio (3:1 分割なら 3.0)
+        """
+        if df.is_empty() or splits is None or splits.is_empty() or "code" not in df.columns:
+            return df
+
+        def factor(basis_col: str) -> pl.DataFrame:
+            basis = (
+                df.select(
+                    pl.col("code").cast(pl.Utf8),
+                    (
+                        pl.col(basis_col).cast(pl.Utf8).str.slice(0, 10).str.to_date(strict=False)
+                        if basis_col in df.columns
+                        else pl.lit(None, dtype=pl.Date)
+                    ).alias("_basis"),
+                )
+                .unique("code")
+            )
+            return (
+                basis.join(
+                    splits.select(
+                        pl.col("code").cast(pl.Utf8),
+                        pl.col("split_date").cast(pl.Date),
+                        pl.col("ratio").cast(pl.Float64),
+                    ),
+                    on="code",
+                    how="inner",
+                )
+                .filter(pl.col("_basis").is_not_null() & (pl.col("split_date") > pl.col("_basis")))
+                .group_by("code")
+                .agg(pl.col("ratio").product().alias("_f"))
+            )
+
+        out = df.with_columns(pl.col("code").cast(pl.Utf8))
+        f_pl = factor("submitted_at").rename({"_f": "_f_pl"})
+        f_bs = factor("bs_submitted_at").rename({"_f": "_f_bs"})
+        out = out.join(f_pl, on="code", how="left").join(f_bs, on="code", how="left")
+        per_share = [c for c in ("eps", "bps", "dps") if c in out.columns]
+        exprs = [(pl.col(c) / pl.col("_f_pl").fill_null(1.0)).alias(c) for c in per_share]
+        if "shares_outstanding" in out.columns:
+            exprs.append(
+                (pl.col("shares_outstanding") * pl.col("_f_bs").fill_null(1.0)).alias(
+                    "shares_outstanding"
+                )
+            )
+        adjusted = out.filter(pl.col("_f_pl").is_not_null() | pl.col("_f_bs").is_not_null()).height
+        if adjusted:
+            logger.info(f"✂️ 株式分割に合わせて 1 株当たり指標を補正: {adjusted} 銘柄")
+        return out.with_columns(exprs).drop(["_f_pl", "_f_bs"])
 
     # エイリアス定義
     apply_deep_repair = repair

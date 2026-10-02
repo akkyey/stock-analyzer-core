@@ -241,6 +241,12 @@ class StockReporter:
             "Market_Cap": metrics["market_cap"][0],
             "Verdict": verdict,
             "Score": sort_score,
+            "Price": _s(latest_row.get("price")),
+            "Price_Date": _s(
+                str(latest_row["entry_date"])[:10]
+                if latest_row.get("entry_date") is not None
+                else None
+            ),
             "PER_Src": metrics["per"][1],
             "PER": metrics["per"][0],
             "PBR_Src": metrics["pbr"][1],

@@ -255,8 +255,11 @@ class PreFilter:
         if "zero_volume_days_5d" not in df.columns:
             df = df.with_columns(pl.lit(0).alias("zero_volume_days_5d"))
 
-        if "latest_trade_date" not in df.columns:
-            df = df.with_columns(pl.lit("2026-03-27").alias("latest_trade_date"))
+        # 時系列の集計 (最終取引日) が無い場合は、鮮度を判定できないため鮮度の足切りを行わない
+        # (以前は固定の日付を入れて判定を素通りさせていた)
+        has_freshness = "latest_trade_date" in df.columns
+        if not has_freshness:
+            df = df.with_columns(pl.lit(None, dtype=pl.String).alias("latest_trade_date"))
 
         if "is_recent_trade" not in df.columns:
             df = df.with_columns(pl.lit(True).alias("is_recent_trade"))
@@ -304,7 +307,7 @@ class PreFilter:
                 continue
 
             # 2. 取引日・市場データ欠損判定（最終取引日が存在しない、または取引停止）
-            if latest_trade_date is None or is_recent_trade is False:
+            if has_freshness and (latest_trade_date is None or is_recent_trade is False):
                 rejected_rows.append(
                     {
                         **row,
