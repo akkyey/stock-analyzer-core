@@ -239,6 +239,14 @@ class DuckDBRepository:
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS dps DOUBLE"
             )
+            # 財務値の出所となった書類の決算期末・提出日時。古い期の書類 (過年度の訂正報告書など)
+            # で新しい値を上書きしないための判定と、株式分割の調整に使う。
+            # period_end/submitted_at は損益・1 株当たり指標 (有価証券報告書)、
+            # bs_* は貸借対照表の項目 (有価証券報告書または半期報告書) の出所
+            for meta_col in ("period_end", "submitted_at", "bs_period_end", "bs_submitted_at"):
+                conn.execute(
+                    f"ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS {meta_col} VARCHAR"
+                )
             # 成長率 (旧スキーマには列が無く、シードの値が取り込み時に捨てられていた)
             for growth_col in ("sales_growth", "profit_growth", "profit_growth_raw"):
                 conn.execute(
@@ -261,8 +269,21 @@ class DuckDBRepository:
                 "ALTER TABLE edinet_documents ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'success'"
             )
             conn.execute(
+                "ALTER TABLE edinet_documents ADD COLUMN IF NOT EXISTS parser_version INTEGER"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_edinet_docs_code ON edinet_documents(code)"
             )
+            # 株式分割 (1 株当たりの財務指標を分割後の株価に合わせるために使う)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS stock_splits (
+                    code VARCHAR,
+                    split_date DATE,
+                    ratio DOUBLE,
+                    detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (code, split_date)
+                )
+            """)
 
             # [v27.2] 市場カレンダー・キャッシュ
             conn.execute("""
@@ -409,11 +430,22 @@ class DuckDBRepository:
                 [alert_id],
             )
 
-    def get_processed_edinet_doc_ids(self) -> set[str]:
-        """処理済みの EDINET doc_id セットを取得する (Colab セッション跨ぎ差分キャッシュ用)"""
+    def get_processed_edinet_doc_ids(self, min_parser_version: Optional[int] = None) -> set[str]:
+        """処理済みの EDINET doc_id セットを取得する (Colab セッション跨ぎ差分キャッシュ用)
+
+        Args:
+            min_parser_version: 指定すると、この版以上のパーサーで処理した書類だけを返す
+                (古い版で処理した書類は取り込み直す)
+        """
         try:
             with self.client.get_connection() as conn:
-                res = conn.execute("SELECT doc_id FROM edinet_documents").fetchall()
+                if min_parser_version is None:
+                    res = conn.execute("SELECT doc_id FROM edinet_documents").fetchall()
+                else:
+                    res = conn.execute(
+                        "SELECT doc_id FROM edinet_documents WHERE coalesce(parser_version, 0) >= ?",
+                        [min_parser_version],
+                    ).fetchall()
                 return {row[0] for row in res if row and row[0]}
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to fetch processed EDINET docs: {e}")
@@ -427,17 +459,35 @@ class DuckDBRepository:
         submit_date: Optional[str] = None,
         is_annual: bool = False,
         status: str = "success",
+        parser_version: Optional[int] = None,
     ) -> None:
-        """EDINET 書類の処理ステータスを記録する (success, parse_failed, error 等)"""
+        """EDINET 書類の処理ステータスを記録する (success, parse_failed, superseded, error 等)"""
         try:
             with self.client.get_connection() as conn:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO edinet_documents (doc_id, code, doc_type, submit_date, is_annual, status, processed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    INSERT OR REPLACE INTO edinet_documents
+                        (doc_id, code, doc_type, submit_date, is_annual, status, parser_version, processed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
-                    [doc_id, code, doc_type, submit_date, is_annual, status],
+                    [doc_id, code, doc_type, submit_date, is_annual, status, parser_version],
                 )
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to record EDINET doc {doc_id}: {e}")
 
+    def save_splits(self, rows: list[tuple[str, Any, float]]) -> None:
+        """株式分割 (code, split_date, ratio) を保存する。同じ日の分割は上書き。"""
+        if not rows:
+            return
+        with self.client.get_connection() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO stock_splits (code, split_date, ratio) VALUES (?, ?, ?)",
+                [[c, d, r] for c, d, r in rows],
+            )
+
+    def load_splits(self) -> pl.DataFrame:
+        """記録済みの株式分割を返す (code, split_date, ratio)。"""
+        with self.client.get_connection() as conn:
+            return conn.execute(
+                "SELECT code, split_date, ratio FROM stock_splits"
+            ).pl()

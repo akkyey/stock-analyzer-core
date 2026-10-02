@@ -48,6 +48,8 @@ def clean_database(db_conn):
         "daily_metrics",
         "fundamentals",
         "app_meta",
+        "edinet_documents",
+        "stock_splits",
     ]
     for table in tables:
         try:

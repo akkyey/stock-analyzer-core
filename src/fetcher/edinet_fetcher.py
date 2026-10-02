@@ -160,20 +160,20 @@ class EdinetFetcher:
                     self.logger.error(
                         f"❌ Failed to fetch EDINET documents for {date_str} after {max_retries} attempts: {e}"
                     )
-                    return {"results": []}
+                    return {"results": [], "failed": True}
             except requests.exceptions.JSONDecodeError as e:
                 self.logger.warning(
                     f"⚠️ EDINET API returned non-JSON response for {date_str} (HTTP {response.status_code}): {e}. Content preview: {response.text[:150]}"
                 )
-                return {"results": []}
+                return {"results": [], "failed": True}
             except Exception as e:
                 masked_err = mask_api_key(str(e))
                 self.logger.error(
                     f"❌ Failed to fetch EDINET documents for {date_str}: {masked_err}"
                 )
-                return {"results": []}
+                return {"results": [], "failed": True}
 
-        return {"results": []}
+        return {"results": [], "failed": True}
 
     def parse_code_listing(self) -> Dict[str, str]:
         """EdinetcodeDlInfo.csv を解析して {証券コード(4桁): EDINETコード} のマップを返す"""
