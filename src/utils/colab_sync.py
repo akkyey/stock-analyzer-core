@@ -172,6 +172,9 @@ class ColabSyncManager:
         drive_dir: Path,
         working_dir: Path,
         db_filename: Optional[str] = None,
+        validate_integrity: bool = False,
+        min_stocks: int = 1000,
+        min_history_dates: int = 20,
     ) -> Path:
         """【Pull Phase】Google Drive から作業層 SSD へ 3段構えの復元検証を行い DB を配置する。
 
@@ -261,9 +264,13 @@ class ColabSyncManager:
             except Exception as e:
                 logger.debug(f"working_cache_db sync notice: {e}")
 
-        # 実行前 DB 整合性検証 (破損・不整合時のフェイルセーフ)
-        if chosen and working_db.exists():
-            is_valid, reason = cls.verify_database_integrity(working_db)
+        # 実行前 DB 整合性検証 (明示指定時のフェイルセーフ)
+        if validate_integrity and chosen and working_db.exists():
+            is_valid, reason = cls.verify_database_integrity(
+                working_db,
+                min_stocks=min_stocks,
+                min_history_dates=min_history_dates,
+            )
             if not is_valid:
                 print("\n" + "❌" * 35)
                 print("⚠️ 【データベース不整合を検知しました】")

@@ -213,8 +213,25 @@ def test_verify_database_integrity_and_reset(tmp_path):
     assert valid is True
     assert "正常" in msg
 
-    # 4. キャッシュリセット -> ファイル削除確認
+    # 4. 時系列履歴不足の DB -> 不整合検知
+    valid_thin, msg_thin = ColabSyncManager.verify_database_integrity(
+        db_file, min_stocks=1, min_history_dates=10
+    )
+    assert valid_thin is False
+    assert "株価時系列履歴 (daily_metrics) が不足しています" in msg_thin
+
+    # 5. pull_database(..., validate_integrity=True) のフェイルセーフ動作
+    with pytest.raises(RuntimeError, match="データベース不整合を検知したため安全に中断しました"):
+        ColabSyncManager.pull_database(
+            tmp_path / "drive",
+            working_dir,
+            validate_integrity=True,
+            min_stocks=1000,
+        )
+
+    # 6. キャッシュリセット -> ファイル削除確認
     ColabSyncManager.reset_cache(drive_dir, working_dir)
     assert not db_file.exists()
+
 
 
