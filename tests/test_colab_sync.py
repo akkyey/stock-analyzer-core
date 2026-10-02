@@ -178,3 +178,34 @@ def test_resolve_drive_dir(monkeypatch):
     p_env = ColabSyncManager.resolve_drive_dir()
     assert p_env == Path("/custom/env/drive/StockAnalyzer")
 
+
+def test_verify_database_integrity_and_reset(tmp_path):
+    """DB 整合性チェックおよびキャッシュリセットのテスト"""
+    drive_dir = tmp_path / "drive"
+    working_dir = tmp_path / "working"
+    db_file = working_dir / "cache" / "stock_analyzer.duckdb"
+
+    # 1. 存在しない DB -> 新規として許可
+    valid, msg = ColabSyncManager.verify_database_integrity(db_file)
+    assert valid is True
+    assert "新規初期化" in msg
+
+    # 2. テーブル欠落 DB -> 不整合検知
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(db_file)) as conn:
+        conn.execute("CREATE TABLE stocks (code VARCHAR PRIMARY KEY)")
+    valid, msg = ColabSyncManager.verify_database_integrity(db_file)
+    assert valid is False
+    assert "必須テーブル" in msg
+
+    # 3. 健全な DB -> 正常判定
+    _create_valid_duckdb(db_file)
+    valid, msg = ColabSyncManager.verify_database_integrity(db_file)
+    assert valid is True
+    assert "正常" in msg
+
+    # 4. キャッシュリセット -> ファイル削除確認
+    ColabSyncManager.reset_cache(drive_dir, working_dir)
+    assert not db_file.exists()
+
+

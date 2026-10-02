@@ -75,6 +75,71 @@ class ColabSyncManager:
             return False
 
     @classmethod
+    def reset_cache(
+        cls,
+        drive_dir: Path,
+        working_dir: Path,
+        db_filename: Optional[str] = None,
+    ) -> None:
+        """Google Drive および作業層 SSD の DB キャッシュを安全に完全クリアする。"""
+        filename = db_filename or cls.DB_FILENAME
+        targets = [
+            drive_dir / "cache" / filename,
+            drive_dir / "cache" / f"{filename}.bak",
+            drive_dir / filename,
+            drive_dir / f"{filename}.bak",
+            working_dir / "cache" / filename,
+            working_dir / filename,
+            working_dir / "cache" / f"{filename}.bak",
+            working_dir / "output",
+        ]
+        for t in targets:
+            if t.is_dir():
+                shutil.rmtree(t, ignore_errors=True)
+            elif t.exists():
+                try:
+                    t.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"⚠️ キャッシュ削除失敗 ({t}): {e}")
+
+    @classmethod
+    def verify_database_integrity(
+        cls, db_path: Path
+    ) -> tuple[bool, str]:
+        """実行前 DB の整合性を検証する。
+
+        Returns:
+            tuple[bool, str]: (is_consistent, message)
+        """
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            return True, "新規初期化（キャッシュなし）"
+
+        try:
+            import duckdb
+
+            with duckdb.connect(str(db_path), read_only=True) as conn:
+                # 1. カタログ検証
+                conn.execute("SELECT count(*) FROM information_schema.tables").fetchall()
+                tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+
+                # 2. 必須テーブル存在確認
+                required_tables = {"stocks", "fundamentals"}
+                missing = required_tables - tables
+                if missing:
+                    return False, f"必須テーブル {missing} が欠落しています"
+
+                # 3. データの最低件数チェック (1社以上の存在確認)
+                stocks_count = conn.execute("SELECT count(*) FROM stocks").fetchone()[0]
+                funda_count = conn.execute("SELECT count(*) FROM fundamentals").fetchone()[0]
+
+                if stocks_count == 0 or funda_count == 0:
+                    return False, f"データが空です (stocks: {stocks_count}, fundamentals: {funda_count})"
+
+            return True, f"正常 (stocks: {stocks_count}社, fundamentals: {funda_count}件)"
+        except Exception as e:
+            return False, f"DuckDBファイル破損または読み込みエラー: {e}"
+
+    @classmethod
     def is_first_run(
         cls, drive_dir: Path, db_filename: Optional[str] = None
     ) -> bool:
