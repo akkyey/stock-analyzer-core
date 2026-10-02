@@ -272,17 +272,20 @@ class ColabSyncManager:
                 min_history_dates=min_history_dates,
             )
             if not is_valid:
-                print("\n" + "❌" * 35)
+                print()
+                print("❌" * 35)
                 print("⚠️ 【データベース不整合を検知しました】")
                 print(f"   詳細: {reason}")
                 print("   破損または不整合が生じた状態のまま実行すると、誤った分析やデータ破壊につながる恐れがあります。")
                 print("   安全のために処理を中断しました。")
-                print("\n👉 【対処方法】")
+                print()
+                print("👉 【対処方法】")
                 print("   Google Drive 上の古いキャッシュをリセットしてください。")
                 print("   Colab のセルで以下を実行してキャッシュをリセットし、再実行してください:")
                 print("   >>> from src.utils.colab_sync import ColabSyncManager")
                 print("   >>> ColabSyncManager.reset_cache(DRIVE_DIR, WORKING_DIR)")
-                print("❌" * 35 + "\n")
+                print("❌" * 35)
+                print()
                 raise RuntimeError(f"データベース不整合を検知したため安全に中断しました: {reason}")
 
         return working_db

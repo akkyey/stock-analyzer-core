@@ -237,4 +237,41 @@ def test_verify_database_integrity_and_reset(tmp_path):
     assert not db_file.exists()
 
 
+def test_colab_notebook_syntax():
+    """Google Colab ノートブックの全コードセルが構文エラーなく Python としてパース可能かを検証"""
+    import ast
+    import json
+
+    notebook_path = (
+        Path(__file__).resolve().parent.parent
+        / "notebooks"
+        / "stock_analyzer_colab.ipynb"
+    )
+    assert notebook_path.exists(), f"Notebook not found: {notebook_path}"
+
+    with open(notebook_path, "r", encoding="utf-8") as f:
+        nb = json.load(f)
+
+    for idx, cell in enumerate(nb.get("cells", [])):
+        if cell.get("cell_type") == "code":
+            source = "".join(cell.get("source", []))
+            # Jupyter マジックコマンド (! または %) をコメントアウトしてパース
+            cleaned_lines = []
+            for line in source.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("!") or stripped.startswith("%"):
+                    cleaned_lines.append("# " + line)
+                else:
+                    cleaned_lines.append(line)
+            cleaned_code = "\n".join(cleaned_lines)
+            try:
+                ast.parse(cleaned_code)
+            except SyntaxError as e:
+                pytest.fail(
+                    f"Syntax error in Colab notebook cell {idx} (line {e.lineno}): {e.msg}\n"
+                    f"Code:\n{e.text}"
+                )
+
+
+
 
