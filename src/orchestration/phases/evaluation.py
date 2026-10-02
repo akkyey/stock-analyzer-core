@@ -49,8 +49,17 @@ class EvaluationPhase(BasePhase):
         self.log_info("Executing Deep Financial Repair...")
         repaired_df = FinancialRepairService.repair(enriched_df)
 
-        # 6. DuckDB への永続化 (最新修復データを保存: entry_dateが存在する有効市場レコードのみ)
+        # 6. DuckDB への永続化 (時系列データの履歴蓄積 & 最新修復データ)
         try:
+            # 6-1. 時系列市場データ（全履歴）の永続化（次回実行時の差分更新 2d 判定用）
+            if (
+                processed_df is not None
+                and not processed_df.is_empty()
+                and hasattr(self.context, "duck_repo")
+            ):
+                self.context.duck_repo.save_metrics(processed_df)
+
+            # 6-2. 最新修復データの永続化 (財務指標等の確定値)
             valid_metrics_df = repaired_df.filter(pl.col("entry_date").is_not_null())
             if not valid_metrics_df.is_empty():
                 self.context.duck_repo.save_metrics(valid_metrics_df)
