@@ -73,7 +73,8 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
         if _is_num(item.get("sales")) and _is_num(item.get("operating_income")) and item["sales"] > 0:
             record["operating_margin"] = item["operating_income"] / item["sales"] * 100.0
     elif kind == KIND_INTERIM:
-        if stored_bs and period_end and period_end <= stored_bs:
+        # 同じ期の再適用は同じ値になるため許容し、古い期だけを除く
+        if stored_bs and period_end and period_end < stored_bs:
             return None
         if stored_pl and period_end and period_end <= stored_pl:
             return None

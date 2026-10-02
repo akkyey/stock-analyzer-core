@@ -20,7 +20,7 @@ from src.fetcher.incremental import (
     adjustment_ratio,
     apply_split_adjustments,
     drop_unsettled_today,
-    find_split_jump,
+    is_plausible_split_ratio,
     merge_history,
     plan_period,
 )
@@ -45,6 +45,8 @@ class AcquisitionPhase(BasePhase):
     # EDINET の走査期間の上限 (日)。前回の走査から間が空いても、これより前は遡らない
     MAX_EDINET_SCAN_DAYS = 365
     EDINET_SCAN_META_KEY = "edinet_last_scan_date"
+    # 株式分割を記録するための全期間の取り直しを済ませたか (DB ごとに 1 回)
+    SPLIT_BACKFILL_META_KEY = "split_history_backfilled"
     # 旧版の EDINET 取り込みで NULL になった項目の復旧 (実施済みかどうかの記録キー)
     RESTORE_META_KEY = "fundamentals_restored_parser_v2"
     RESTORE_COLUMNS = (
@@ -126,7 +128,9 @@ class AcquisitionPhase(BasePhase):
         (固定の 2 日では、間の日付が永久に欠落していた)。
         """
         cfg = getattr(self.context, "config", None) or {}
-        force_full = bool(cfg.get("is_first_run", False))
+        force_full = bool(cfg.get("is_first_run", False)) or bool(
+            cfg.get("_force_full_history", False)
+        )
         today = today or get_current_time().date()
 
         by_period: Dict[str, list] = {}
@@ -324,6 +328,18 @@ class AcquisitionPhase(BasePhase):
             flush=True,
         )
 
+        # 1-5. 株式分割の記録が無い DB (v1.3.0 より前に作成) は、1 回だけ全銘柄を全期間で取り直す。
+        # 過去 1 年の分割を記録し (1 株当たり指標の補正用)、履歴に残った分割の段差を調整するため
+        try:
+            needs_split_backfill = repo.get_meta(self.SPLIT_BACKFILL_META_KEY) is None
+        except Exception:
+            needs_split_backfill = False
+        if needs_split_backfill is True and not self.context.config.get("is_first_run"):
+            self.context.config["_force_full_history"] = True
+            self.log_info(
+                "ℹ️ 株式分割の記録を作るため、今回は全銘柄の株価を 1 年分取り直します (初回のみ)。"
+            )
+
         # 2. DB から過去履歴を一括ロード (テクニカル指標の計算用)
         # 初回 (1y 取得) と同じ長さの履歴で計算しないと、MA75 (75 営業日必要) が計算できず、
         # RSI 等の値も初回と 2 回目以降で食い違う。3 か月 (約 63 営業日) では不足していた
@@ -387,31 +403,27 @@ class AcquisitionPhase(BasePhase):
             except Exception as e:
                 self.log_warn(f"株式分割の記録を読めませんでした (継続): {e}")
 
-            # 今回の取得で見つかった分割イベント (株価の段差を確認するまでは記録しない)
-            candidates: Dict[str, list] = {}
-
             def _collect_splits() -> None:
+                # Yahoo が過去に遡って調整済みの分割 (株価に段差が無い) も、1 株当たり指標の
+                # 補正のために記録する。異常な比率は market_fetcher で除外済み
                 found = fetcher.market_fetcher.pop_detected_splits()
                 if not isinstance(found, dict):
                     return
                 for code, events in found.items():
-                    known = splits_by_code.get(code, [])
+                    known = splits_by_code.setdefault(code, [])
                     for d, r in events:
+                        if not is_plausible_split_ratio(r):
+                            continue
                         if all(abs((d - kd).days) > 10 for kd, _ in known):
-                            candidates.setdefault(code, []).append((d, r))
+                            known.append((d, r))
+                            new_splits.append((code, d, r))
 
             def _adjust(code: str, df: pl.DataFrame) -> pl.DataFrame:
-                # Yahoo は日本株の分割を過去に遡って調整しないため、分割前の値を自前で調整する。
-                # 新しいイベントは、履歴に比率どおりの段差がある場合だけ分割として記録する
-                # (Yahoo は異常な分割イベントを返すことがあるため)
-                for d, r in candidates.pop(code, []):
-                    if find_split_jump(df, d, r) is not None:
-                        splits_by_code.setdefault(code, []).append((d, r))
-                        new_splits.append((code, d, r))
-                    else:
-                        self.log_info(f"分割イベントを採用しませんでした ({code} {d} 比率 {r:g}): 株価に対応する段差がありません")
+                # Yahoo は日本株の分割を過去に遡って調整しないことがある (8227・7946 で確認。
+                # 調整済みの銘柄もある) ため、株価に段差が残っている分割だけを自前で調整する
                 events = splits_by_code.get(code)
                 return apply_split_adjustments(df, events) if events else df
+
             try:
                 batches = self._plan_fetch_batches(target_codes, db_hist_by_code)
 
@@ -544,6 +556,15 @@ class AcquisitionPhase(BasePhase):
                 )
 
         stop_event.set()  # 正常終了時も確実にセット
+
+        # 全期間の取り直し (株式分割の記録) が十分に済んだら記録する。取得率が低い実行
+        # (通信障害など) では記録せず、次回もう一度取り直す
+        if needs_split_backfill is True and num_targets and len(all_data_map) >= num_targets * 0.7:
+            try:
+                repo.set_meta(self.SPLIT_BACKFILL_META_KEY, get_current_time().date().isoformat())
+            except Exception as e:
+                self.log_warn(f"株式分割の記録状態を保存できませんでした: {e}")
+        self.context.config.pop("_force_full_history", None)
 
         try:
             tracked = update_no_data_tracking(

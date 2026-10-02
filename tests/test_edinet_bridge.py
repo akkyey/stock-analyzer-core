@@ -115,8 +115,10 @@ def test_legacy_results_are_ignored_and_removed(bridge, db_conn):
 
 def test_build_record_interim_older_than_stored_is_skipped():
     item = {"code": "1", "kind": "interim", "period_end": "2026-03-31", "net_assets": 1.0}
-    assert build_record(item, {"bs_period_end": "2026-03-31"}) is None
+    assert build_record(item, {"bs_period_end": "2026-06-30"}) is None
     assert build_record(item, {"period_end": "2026-03-31"}) is None
+    # 同じ期の再適用は許容する (毎回の取り込みで「古い書類」と記録しない)
+    assert build_record(item, {"bs_period_end": "2026-03-31"}) is not None
 
 
 # --- 書類の選択 -------------------------------------------------------------
