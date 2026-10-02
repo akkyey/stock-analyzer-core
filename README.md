@@ -71,10 +71,14 @@ Google Drive/
 └── StockAnalyzer/                     # 保存先フォルダ（カスタマイズ可能）
     ├── output/daily_report.csv        # 本日のスクリーニング合格銘柄一覧
     ├── output/uncalculable_stocks.csv # 足切り除外銘柄一覧（理由付き）
-    ├── cache/stock_analyzer.duckdb    # 差分更新用キャッシュDB（2回目以降を爆速化）
+    ├── cache/stock_analyzer.duckdb    # 時系列キャッシュDB（過去履歴の蓄積・差分更新用）
     └── config/custom_config.json      # 独自カスタマイズ設定（任意）
 ```
+- **所要時間の目安**: 
+  - **ローカル / 専用サーバー**: 平常差分時は **約 1分40秒**（独立IPによる大バッチ並列取得）
+  - **Google Colab（環境制約）**: 初回・2回目以降ともに **約 8〜10分**（共用IPでの Yahoo Finance 429レート制限を回避するための小バッチ安全取得）
 - **保存先の変更方法**: Step 0 のセル上部にある入力フォーム **`drive_folder_name`** にフォルダ名（例: `MyStock`）や相対パス（例: `Portfolio/Japan`）、共有ドライブ（例: `/content/drive/Shareddrives/...`）を入力するだけで自由に変更可能です。
+
 
 ### 2. ローカル環境でのインストール・実行
 
