@@ -158,8 +158,14 @@ class AcquisitionPhase(BasePhase):
                         )
                         break
 
-                    # DB履歴が薄い場合は 1y、十分なら 2d (差分) を取得
-                    is_db_thin = df_db_hist_all.height < (len(target_codes) * 10)
+                    # DB履歴が薄い（未存在）場合は 1y、差分モード（2回目以降）なら 2d を取得
+                    is_db_thin = df_db_hist_all.is_empty()
+                    if (
+                        hasattr(self.context, "config")
+                        and self.context.config
+                        and "is_first_run" in self.context.config
+                    ):
+                        is_db_thin = bool(self.context.config["is_first_run"])
                     period_to_use = "1y" if is_db_thin else "2d"
 
                     try:
