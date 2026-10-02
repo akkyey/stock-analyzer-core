@@ -75,8 +75,8 @@ Google Drive/
     └── config/custom_config.json      # 独自カスタマイズ設定（任意）
 ```
 - **所要時間の目安**: 
-  - **ローカル / 専用サーバー**: 平常差分時は **約 1分40秒**（独立IPによる大バッチ並列取得）
-  - **Google Colab（環境制約）**: 初回・2回目以降ともに **約 8〜10分**（共用IPでの Yahoo Finance 429レート制限を回避するための小バッチ安全取得）
+  - **ローカル / 専用サーバー**: 平常差分時は **約 1分40秒**（専用IPでは Yahoo Finance の 429 が発生しにくいため）
+  - **Google Colab（環境制約）**: 初回・2回目以降ともに **約 8〜10分**（共用IPでの Yahoo Finance 429レート制限に備えた Colab 専用の安全待機インターバル付き取得）
 - **保存先の変更方法**: Step 0 のセル上部にある入力フォーム **`drive_folder_name`** にフォルダ名（例: `MyStock`）や相対パス（例: `Portfolio/Japan`）、共有ドライブ（例: `/content/drive/Shareddrives/...`）を入力するだけで自由に変更可能です。
 
 

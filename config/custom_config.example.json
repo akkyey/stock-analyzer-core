@@ -32,7 +32,7 @@
   "_comment_verdict_mode": "判定表記モード: 'grade' (客観的格付け Grade S/A/B/C: デフォルト・金商法配慮), 'legacy' (Qiita Part 2 互換 STRONG_BUY/BUY/WATCH/PASS)",
   "verdict_mode": "grade",
 
-  "_comment_gdrive": "Google Drive 保存先設定（Colab環境用）。未指定時はマイドライブ直下の StockAnalyzer フォルダが使用されます。",
+  "_comment_gdrive": "Google Drive 保存先設定。Colab の保存先は Step 0 の drive_folder_name フォーム（または環境変数 STOCK_ANALYZER_DRIVE_DIR）で指定します（この JSON は Drive 上にあり Step 0 より後に読まれるため、drive_dir は現状 Colab の保存先には反映されません）。未指定時はマイドライブ直下の StockAnalyzer フォルダが使用されます。",
   "gdrive": {
     "_comment_drive_dir": "カスタム保存先パス。フォルダ名 ('MyStockAnalyzer')、相対パス ('Portfolio/Japan')、または共有ドライブ等のフルパス ('/content/drive/Shareddrives/Team/StockAnalyzer') を指定可能。デフォルト: null",
     "drive_dir": null
