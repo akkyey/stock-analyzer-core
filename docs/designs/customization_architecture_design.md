@@ -92,7 +92,8 @@ stock-analyzer-core/
     - `cache/`: 実行中の DuckDB (`stock_analyzer.duckdb`)、一時展開生 ZIP（パース直後に即時削除）
     - `output/`: 生成直後の CSV
   - **永続層（Google Drive: `/content/drive/MyDrive/StockAnalyzer/` 等）**:
-    - ※ Colab フォーム `drive_folder_name` や設定 `gdrive.drive_dir`（環境変数 `STOCK_ANALYZER_DRIVE_DIR`）により任意のフォルダ名・相対パス・共有ドライブへ変更可能。
+    - ※ Colab フォーム `drive_folder_name`（または環境変数 `STOCK_ANALYZER_DRIVE_DIR`）により任意のフォルダ名・相対パス・共有ドライブへ変更可能。`custom_config.json` の `gdrive.drive_dir` は Drive 上のファイルであり Step 0（Pull）より後に読まれるため、現状 Colab の保存先には反映されない。
+    - ※ `gdrive.shared_folder_id` / `GDRIVE_SHARED_FOLDER_ID` は CLI / サーバー向けのサービスアカウント経由アップロード（`ColabTools.upload_file_to_drive`）の保存先フォルダ ID であり、Colab の Drive 同期（`ColabSyncManager`）とは別経路。
     - `cache/`: `stock_analyzer.duckdb`（＋バックアップ `.bak`、安全同期用 `.tmp`）
     - `output/`: `daily_report.csv`, `uncalculable_stocks.csv`
     - `config/`: `custom_config.json`（ユーザー独自設定）

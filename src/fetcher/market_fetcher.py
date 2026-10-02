@@ -13,7 +13,10 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
+from src.utils.diagnostics import record_fetch_stat
+
 from .base import FetcherBase
+from .fetch_profile import resolve_fetch_profile
 
 # ユーザー体験向上のため、未上場・欠落銘柄の個別 404/Missing エラーを抑制
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
@@ -70,6 +73,8 @@ class MarketFetcher(FetcherBase):
         if not MarketFetcher._warmed_up:
             self._warm_up()
 
+        profile = resolve_fetch_profile(context)
+
         def download_sub_batch(
             sub_symbols: list[str], end_date: str | None = None
         ) -> tuple[pd.DataFrame, float]:
@@ -79,8 +84,9 @@ class MarketFetcher(FetcherBase):
             time.sleep(random.uniform(0.1, 0.5))
 
             df = pd.DataFrame()
+            record_fetch_stat(context, "sub_batches")
             # [v30.4] Increased retries with exponential backoff
-            for attempt in range(3):
+            for attempt in range(profile.max_retries):
                 try:
                     df = yf.download(
                         tickers=sub_symbols,
@@ -94,24 +100,27 @@ class MarketFetcher(FetcherBase):
                     )
 
                     if not df.empty:
-                        # Success: small break before returning
-                        time.sleep(0.2)
+                        record_fetch_stat(context, "sub_batches_ok")
+                        # Success: プロファイル別の事前インターバル (429 の未然防止)
+                        time.sleep(profile.inter_batch_sleep)
                         break
 
                     # If empty, it might be 429 or simply no data
-                    wait_time = (2**attempt) * 5 + random.uniform(1, 3)
+                    record_fetch_stat(context, "empty_responses")
+                    wait_time = (2**attempt) * profile.empty_backoff_base + random.uniform(1, 3)
                     self.logger.warning(
-                        f"⚠️ Batch {sub_symbols[:2]}... empty. Backoff {wait_time:.1f}s (Attempt {attempt + 1}/3)"
+                        f"⚠️ Batch {sub_symbols[:2]}... empty. Backoff {wait_time:.1f}s (Attempt {attempt + 1}/{profile.max_retries})"
                     )
                     time.sleep(wait_time)
 
                 except Exception as e:
-                    wait_time = (2**attempt) * 10 + random.uniform(2, 5)
+                    record_fetch_stat(context, "download_exceptions")
+                    wait_time = (2**attempt) * profile.error_backoff_base + random.uniform(2, 5)
                     self.logger.error(
                         f"❌ Error downloading {sub_symbols[:2]}...: {e}. Retry in {wait_time:.1f}s"
                     )
                     time.sleep(wait_time)
-                    if attempt == 2:
+                    if attempt == profile.max_retries - 1:
                         raise e
 
             return df, time.time() - t_sub_start
@@ -151,6 +160,20 @@ class MarketFetcher(FetcherBase):
                     self.logger.warning(
                         f"⚠️ Market sub-batch fetch issue for {batch_symbols[:3]}: {e}"
                     )
+
+        # 取得できなかった銘柄を集計 (429 によるバッチ欠落の可視化)
+        requested = {sym.split(".")[0] for sym in full_symbols}
+        missing = sorted(requested - set(results))
+        if context is not None and hasattr(context, "config"):
+            try:
+                acc = context.config.setdefault("fetch_missing_codes", [])
+                acc.extend(missing)
+            except Exception:
+                pass
+        if missing:
+            self.logger.warning(
+                f"⚠️ [{profile.name}] 取得できなかった銘柄: {len(missing)}/{len(requested)} 件"
+            )
 
         elapsed_method = time.time() - t_method_start
         if (

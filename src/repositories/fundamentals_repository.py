@@ -1,4 +1,5 @@
 from logging import getLogger
+from pathlib import Path
 from typing import Any, Optional
 
 import polars as pl
@@ -39,6 +40,41 @@ class FundamentalsRepository:
         except Exception as e:
             self.logger.error(f"Error fetching all fundamentals: {e}")
             return pl.DataFrame()
+
+    GROWTH_COLUMNS = ("sales_growth", "profit_growth", "profit_growth_raw")
+
+    def backfill_growth_from_seed(self, seed_path: Path) -> int:
+        """成長率が未登録の既存 DB に、バンドルされたシードの成長率を補う。
+
+        旧スキーマには成長率の列が無く、シード取り込み時に値が捨てられていた。
+        既に成長率が 1 件でも登録されている場合は何もしない (EDINET 等で更新済みの値を上書きしない)。
+        UPSERT は入力に含まれる列だけを更新するため、他の財務指標は変更されない。
+
+        Returns:
+            補った銘柄数 (対象外・シード無しは 0)。
+        """
+        if not seed_path.exists():
+            return 0
+        cols = " OR ".join(f"{c} IS NOT NULL" for c in self.GROWTH_COLUMNS)
+        with self.duck_repo.client.get_connection() as conn:
+            already = conn.execute(
+                f"SELECT count(*) FROM fundamentals WHERE {cols}"
+            ).fetchall()[0][0]
+        if already:
+            return 0
+
+        seed = pl.read_parquet(str(seed_path))
+        present = [c for c in self.GROWTH_COLUMNS if c in seed.columns]
+        if "code" not in seed.columns or not present:
+            return 0
+        growth = seed.select(["code", *present]).filter(
+            pl.any_horizontal([pl.col(c).is_not_null() for c in present])
+        )
+        if growth.is_empty():
+            return 0
+        self.duck_repo.save_fundamentals(growth)
+        self.logger.info(f"Backfilled growth rates for {growth.height} stocks from seed.")
+        return growth.height
 
     def get_count(self) -> int:
         """登録されている財務データ件数を取得する。"""

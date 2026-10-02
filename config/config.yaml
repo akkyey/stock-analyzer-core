@@ -1,7 +1,11 @@
+# Google Drive / スプレッドシート連携 (CLI / サーバー向け。Colab はマウント経由で同期するため不要)
+# 既定は無効。使う場合は enabled: true にし、IDはこのファイルに書かず環境変数で渡すこと:
+#   GDRIVE_CREDENTIALS_PATH   サービスアカウントの認証情報 JSON のパス
+#   GDRIVE_SHARED_FOLDER_ID   アップロード先フォルダ ID
 gdrive:
-  enabled: true
-  shared_folder_id: 1q3pkSJvFmWiLR8icbb-pVbQiWE3hewyU
-  report_spreadsheet_id: 1OWSy8ee8lG_a_jd7-qVxsTh87dXGvgmZbfZfW0ZcSHw
+  enabled: false
+  shared_folder_id: null
+  report_spreadsheet_id: null
 paths:
   # [v15.0] Explicitly point to the migrated DB
   db_file: data/stock_master.db

@@ -121,55 +121,35 @@ class StockReporter:
             or common.get("shares")
             or latest_row.get("shares_outstanding")
         )
-        sector = str(common.get("sector_17") or common.get("sector") or "")
 
         res: dict[str, tuple[Any, str]] = {}
 
-        # 1. PER (yfinance -> calc -> sector_est)
+        # 1. PER (yfinance -> calc)。データが無い場合は仮の値を出さず "-" とする
         per_val = safe_float_or_none(common.get("per") or latest_row.get("per"))
         if per_val is not None and per_val > 0:
             res["per"] = (round(per_val, 2), "yf")
         elif close is not None and eps is not None and eps > 0:
             res["per"] = (round(close / eps, 2), "calc")
-        elif close is not None and close > 0:
-            sector_per = 14.5
-            if "情報・通信" in sector or "サービス" in sector:
-                sector_per = 18.2
-            elif "銀行" in sector or "保険" in sector:
-                sector_per = 9.8
-            elif "電気機器" in sector or "機械" in sector:
-                sector_per = 15.6
-            res["per"] = (round(sector_per, 2), "calc")
         else:
             res["per"] = ("-", "-")
 
-        # 2. PBR (yfinance -> calc -> sector_est)
+        # 2. PBR (yfinance -> calc)。データが無い場合は "-"
         pbr_val = safe_float_or_none(common.get("pbr") or latest_row.get("pbr"))
         if pbr_val is not None and pbr_val > 0:
             res["pbr"] = (round(pbr_val, 2), "yf")
         elif close is not None and bps is not None and bps > 0:
             res["pbr"] = (round(close / bps, 2), "calc")
-        elif close is not None and close > 0:
-            sector_pbr = 1.18
-            if "銀行" in sector:
-                sector_pbr = 0.65
-            elif "情報・通信" in sector:
-                sector_pbr = 2.10
-            res["pbr"] = (round(sector_pbr, 2), "calc")
         else:
             res["pbr"] = ("-", "-")
 
-        # 3. Div_Yield (%) (yfinance -> calc)
+        # 3. Div_Yield (%) (yfinance -> calc)。保存値は既にパーセント表記 (例: 0.77 = 0.77%)
         div_val = safe_float_or_none(
             common.get("dividend_yield") or latest_row.get("dividend_yield")
         )
         if div_val is not None:
-            div_pct = div_val * 100.0 if div_val < 1.0 else div_val
-            res["div_yield"] = (round(div_pct, 2), "yf")
+            res["div_yield"] = (round(div_val, 2), "yf")
         elif close is not None and dps is not None and close > 0:
             res["div_yield"] = (round((dps / close) * 100.0, 2), "calc")
-        elif close is not None and close > 0:
-            res["div_yield"] = (2.25, "calc")
         else:
             res["div_yield"] = ("-", "-")
 
@@ -181,29 +161,21 @@ class StockReporter:
             res["market_cap"] = (int(mc_val), "yf")
         elif close is not None and shares is not None and shares > 0:
             res["market_cap"] = (int(close * shares), "calc")
-        elif close is not None and close > 0:
-            est_shares = 25_000_000
-            res["market_cap"] = (int(close * est_shares), "calc")
         else:
             res["market_cap"] = ("-", "-")
 
-        # 5. ROE (%) (yfinance -> edinet -> calc)
+        # 5. ROE (%) (yfinance -> edinet -> calc)。保存値は既にパーセント表記
         roe_val = safe_float_or_none(common.get("roe") or latest_row.get("roe"))
         edinet_roe = safe_float_or_none(common.get("edinet_roe"))
         if roe_val is not None:
-            roe_pct = roe_val * 100.0 if abs(roe_val) < 1.0 else roe_val
-            res["roe"] = (round(roe_pct, 2), "yf")
+            res["roe"] = (round(roe_val, 2), "yf")
         elif edinet_roe is not None:
             roe_pct = edinet_roe * 100.0 if abs(edinet_roe) < 1.0 else edinet_roe
             res["roe"] = (round(roe_pct, 2), "edinet")
         elif eps is not None and bps is not None and bps > 0:
             res["roe"] = (round((eps / bps) * 100.0, 2), "calc")
         else:
-            op_margin = safe_float_or_none(common.get("operating_margin"))
-            if op_margin is not None and op_margin > 0:
-                res["roe"] = (round(op_margin * 1.1, 2), "calc")
-            else:
-                res["roe"] = (8.50, "calc")
+            res["roe"] = ("-", "-")
 
         return res
 

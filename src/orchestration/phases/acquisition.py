@@ -12,10 +12,57 @@ import pandas as pd
 import polars as pl
 
 from src.orchestration.phases.base import BasePhase
+from src.utils.diagnostics import record_fetch_stat
 
 
 class AcquisitionPhase(BasePhase):
     """データ取得フェーズ (v10: yfinance financials 排除 / EDINET Turbo 統合)"""
+
+    # 流動性指標 (直近20日平均売買代金) の算出に必要な最低履歴行数。
+    # これ未満の銘柄は 1y、十分な銘柄は 2d (差分) で取得する。
+    MIN_HISTORY_ROWS = 20
+    FETCH_BATCH_SIZE = 20  # OHLCVのみなのでバッチサイズ拡大
+
+    def _plan_fetch_batches(
+        self,
+        target_codes: list,
+        db_hist_by_code: Dict[Any, Any],
+    ) -> list:
+        """銘柄ごとに履歴の厚みで取得期間を決め、(codes, period) のバッチ列を返す。
+
+        - 履歴が MIN_HISTORY_ROWS 未満 (新規・過去の取得欠落) → "1y"
+        - 十分 → "2d" (差分)
+        - config["is_first_run"] が True の場合は全銘柄 "1y"
+
+        リクエスト総数は増えず (銘柄を 2 グループに分けるだけ)、429 などで
+        欠落した銘柄も次回は自動的に 1y で取り直される。
+        """
+        cfg = getattr(self.context, "config", None) or {}
+        force_full = bool(cfg.get("is_first_run", False))
+
+        thin, enough = [], []
+        for code in target_codes:
+            df_db = db_hist_by_code.get((code,))
+            rows = 0 if df_db is None else df_db.height
+            if force_full or rows < self.MIN_HISTORY_ROWS:
+                thin.append(code)
+            else:
+                enough.append(code)
+
+        size = self.FETCH_BATCH_SIZE
+        batches: list[tuple[list, str]] = []
+        for codes, period in ((thin, "1y"), (enough, "2d")):
+            batches.extend(
+                (codes[i : i + size], period) for i in range(0, len(codes), size)
+            )
+        self.log_info(
+            f"Fetch plan: {len(thin)} stocks -> 1y, {len(enough)} stocks -> 2d "
+            f"({len(batches)} batches)"
+        )
+        record_fetch_stat(self.context, "plan_stocks_1y", len(thin))
+        record_fetch_stat(self.context, "plan_stocks_2d", len(enough))
+        record_fetch_stat(self.context, "plan_batches", len(batches))
+        return batches
 
     def execute(self, df: Optional[pl.DataFrame] = None) -> Any:
         self.log_info("🚀 Starting Turbo Data Acquisition Phase...")
@@ -62,12 +109,12 @@ class AcquisitionPhase(BasePhase):
 
         # 1-2. 財務データの初期シード (全件ベースラインデータ未登録時はバンドルされたシードデータから自動投入)
         funda_repo = FundamentalsRepository(repo)
+        seed_parquet = (
+            Path(__file__).resolve().parent.parent.parent
+            / "resources"
+            / "fundamentals_seed.parquet"
+        )
         if funda_repo.get_count() < 3000:
-            seed_parquet = (
-                Path(__file__).resolve().parent.parent.parent
-                / "resources"
-                / "fundamentals_seed.parquet"
-            )
             if seed_parquet.exists():
                 self.log_info(
                     "ℹ️ 財務ベースラインデータが未登録/不足しています。バンドルされたシードデータから初期登録を実行します..."
@@ -81,6 +128,14 @@ class AcquisitionPhase(BasePhase):
                     )
                 except Exception as e:
                     self.log_error(f"❌ 財務データの初期登録に失敗しました: {e}")
+
+        # 1-3. 既存 DB への成長率の補完 (旧スキーマでは成長率がシードから取り込まれていなかった)
+        try:
+            backfilled = funda_repo.backfill_growth_from_seed(seed_parquet)
+            if backfilled:
+                self.log_info(f"ℹ️ 成長率を {backfilled} 銘柄分、シードから補完しました。")
+        except Exception as e:
+            self.log_error(f"❌ 成長率の補完に失敗しました (継続): {e}")
 
         # [Phase 0/1] 財務データの正典同期 (Fundamental Truth Sync)
         fetcher_cfg = self.context.config.get("fetcher", {})
@@ -144,29 +199,14 @@ class AcquisitionPhase(BasePhase):
             """Hybrid Producer: 市場価格データのみを取得"""
             self.log_info("📡 Market Data Producer started...")
             try:
-                FETCH_BATCH_SIZE = 20  # OHLCVのみなのでバッチサイズ拡大
+                batches = self._plan_fetch_batches(target_codes, db_hist_by_code)
 
-                batches = [
-                    target_codes[i : i + FETCH_BATCH_SIZE]
-                    for i in range(0, num_targets, FETCH_BATCH_SIZE)
-                ]
-
-                for i, b in enumerate(batches):
+                for i, (b, period_to_use) in enumerate(batches):
                     if stop_event.is_set():
                         self.log_warn(
                             "Producer received stop signal. Aborting further fetches."
                         )
                         break
-
-                    # DB履歴が薄い（未存在）場合は 1y、差分モード（2回目以降）なら 2d を取得
-                    is_db_thin = df_db_hist_all.is_empty()
-                    if (
-                        hasattr(self.context, "config")
-                        and self.context.config
-                        and "is_first_run" in self.context.config
-                    ):
-                        is_db_thin = bool(self.context.config["is_first_run"])
-                    period_to_use = "1y" if is_db_thin else "2d"
 
                     try:
                         # [v10] fetch_stock_data は内部で yf.download(threads=True) を呼ぶため、ここは軽量

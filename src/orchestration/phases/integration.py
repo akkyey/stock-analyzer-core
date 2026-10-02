@@ -137,7 +137,11 @@ class IntegrationPhase(BasePhase):
         try:
             csv_path = report_paths.get("main_csv")
             if csv_path:
-                drive_url = ColabTools.upload_file_to_drive(csv_path)
+                gdrive_cfg = self.context.config.get("gdrive", {}) or {}
+                upload_kwargs = {}
+                if gdrive_cfg.get("shared_folder_id"):
+                    upload_kwargs["parent_folder_id"] = gdrive_cfg["shared_folder_id"]
+                drive_url = ColabTools.upload_file_to_drive(csv_path, **upload_kwargs)
                 if drive_url:
                     self.log_info(f"✅ Report uploaded to GDrive: {drive_url}")
                     self.context.report_url = drive_url

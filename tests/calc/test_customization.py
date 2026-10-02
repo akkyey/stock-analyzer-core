@@ -333,6 +333,11 @@ def test_colab_sync_manager_three_tier_recovery():
         with open(bak_db, "wb") as f:
             f.write(b"CORRUPTED_BAK_INVALID")
 
+        # 作業層に健全な DB (Case 2 で復元済み) があれば、消さずに継続利用する
         res3 = ColabSyncManager.pull_database(drive_dir, work_dir)
-        # 破損ファイルは破棄され、新規初期化用のパスが返る
-        assert not res3.exists() or res3.stat().st_size == 0
+        assert ColabSyncManager.is_duckdb_healthy(res3)
+
+        # 作業層にも健全な DB が無ければ、新規初期化用のパスが返る
+        res3.unlink()
+        res4 = ColabSyncManager.pull_database(drive_dir, work_dir)
+        assert not res4.exists() or res4.stat().st_size == 0

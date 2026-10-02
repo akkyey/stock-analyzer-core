@@ -25,7 +25,7 @@ Qiitaの前後編記事（データ取得編・3層クオンツ判定編）を�
 - **CPU**: 2 vCPU
 - **パイプライン適合性**:
   - 本システムのメモリ消費量は Polars の最適化により最大でも約 1.5 GB 程度であり、無料枠の 12 GB で十分に余裕がある。
-  - 処理時間は平常時約 1 分 40 秒（新着書類多数時でも約 5 分）のため、Colab のアイドル切断制限（約90分無操作）に抵触することなく安全に完走可能。
+  - 処理時間は Colab 上で初回・2回目以降とも約 8〜10 分（通信 1 回あたりの遅延が大きいため。§3.3 参照）。専用 IP のローカル / サーバーでは平常時約 1 分 40 秒（新着書類多数時でも約 5 分）。いずれも Colab のアイドル切断制限（約90分無操作）に抵触することなく安全に完走可能。
   - ※なお、Colab 無料枠には「アイドル切断（90分）」のほかに「セッション最大継続時間（約12時間で強制切断）」が存在するが、本バッチは数分で終了するため影響を受けない。
 
 ### 2.2 Colab 固有のストレージ制約と「データ格納の 3 大リスク」
@@ -48,7 +48,7 @@ Colab のランタイムと Google Drive 連携においては、一般的なロ
 flowchart TD
     subgraph Persistent_Layer ["【永続層】Google Drive (/content/drive/MyDrive/StockAnalyzer/)"]
         direction TB
-        P_DB[("stock_analyzer.duckdb<br>(財務・開示メタデータ単一DB: 数MB〜数十MB)")]
+        P_DB[("stock_analyzer.duckdb<br>(財務・株価履歴の単一DB: 約290MB。.bak と合わせて約580MB)")]
         P_Out["最終レポート CSV<br>(daily_report.csv / uncalculable_stocks.csv)"]
     end
 
@@ -70,7 +70,7 @@ flowchart TD
 | 領域 | パス | 格納対象 | 特徴・管理方針 |
 | :--- | :--- | :--- | :--- |
 | **作業層**<br>(Local SSD) | `/content/working/` | ・実行用 DuckDB (`cache/stock_analyzer.duckdb`)<br>・ダウンロードした生 ZIP<br>・Polars 中間テーブル | **Colab 内蔵 高速ローカル SSD**。<br>すべての高頻度 I/O はここで行い、生 ZIP はパース直後に即時削除（`unlink`）してディスクを圧迫させない。セッション切断で破棄される前提の一時領域。 |
-| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/`<br>（※`drive_folder_name` により任意のフォルダ名・相対階層・共有ドライブへ変更可能） | ・`cache/stock_analyzer.duckdb`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB を消費させない（数十MB未満）。 |
+| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/`<br>（※`drive_folder_name` により任意のフォルダ名・相対階層・共有ドライブへ変更可能） | ・`cache/stock_analyzer.duckdb`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB（約290MB。直前の世代 `.bak` と合わせて約580MB）と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB に対しては十分に小さい（約4%）。 |
 
 ### 3.2 同期ライフサイクル（Stage-and-Sync 規約）
 1. **[Pull Phase: 実行開始時 & 整合性検証（3段構えの復元）]**:
@@ -78,7 +78,9 @@ flowchart TD
    - **整合性検証と 3 段構えの自動復旧**:
      - **第1段（メインDB検証）**: Drive 上にメイン DB が存在する場合、作業層（`/content/working/cache/`）へコピーし、主要テーブル（`stocks` 等）の読み込み検証を実行。正常であればそのまま採用。
      - **第2段（.bak 検証と復元）**: メイン DB が存在しない、または検証で破損が検知された場合、Drive 上のバックアップ `cache/stock_analyzer.duckdb.bak` を作業層へコピーし、**この `.bak` に対しても健全性検証を実行**。健全であれば警告ログ（`⚠️ メインDB破損を検知したため、健全なバックアップ (.bak) から復元しました`）を出力して採用。
-     - **第3段（新規初期化フォールバック）**: メイン DB・バックアップともに未存在、または**両方とも破損している場合**は、破損ファイルを破棄して初期シードから新規 DuckDB を初期化作成（`⚠️ バックアップDBも破損または未存在のため、DBを新規初期化します`）。
+     - **第3段（作業層の既存 DB 継続 / 新規初期化）**: メイン DB・バックアップともに未存在、または**両方とも破損している場合**、作業層に健全な DB があれば**消さずに継続利用**する（Step 3 の同期確定で Drive がアンマウントされた後に Step 1 を再実行した場合や、同期失敗後の再実行で、最新データを失わないため）。作業層にも無ければ新規初期化とし、スキーマ作成はパイプライン（`ensure_schema`）が行う。
+     - **検証前に作業層 DB を上書きしない**: Drive からのコピーは一時ファイル（`.pulltmp`）へ行い、健全性を確認してから `os.replace` で作業層 DB と置き換える。Drive 側が破損していても作業層の既存 DB は保たれる。
+     - Step 1 は冒頭で Drive が未マウントなら再マウントする（Step 3 と同じガード）。
 2. **[Execution Phase: パイプライン実行中]**:
    - パイプライン本体には作業層のローカルパス（`/content/working/`）のみを環境変数 `STOCK_ANALYZER_BASE_DIR` として渡す（※Google Driveのパスは絶対に渡さない）。
    - すべての DuckDB トランザクション、ZIP 展開、Polars 集計はローカル SSD の爆速 I/O で完結。
@@ -88,11 +90,69 @@ flowchart TD
      - コピー前に `CHECKPOINT` クエリを明示的に実行し、WAL の変更を確実にメインDBファイルへ完全にフラッシュ結合させた上でコピーを行う。
    - **安全な世代退避とアトミック書き込み**:
      - 既存の健全 DB を上書き・移動するのではなく、Drive 上で `cache/stock_analyzer.duckdb.bak` へ**コピー（`shutil.copy2`）して 1 世代分退避**（置き換え処理中の無保護な隙間時間をゼロにする）。
+     - **退避は「既存の Drive DB が健全な場合のみ」行う**。破損した Drive DB で健全な `.bak` を上書きしないよう、コピー前に健全性を検証し、破損時は既存の `.bak` を保護して退避をスキップする。
      - 作業層の最新 DB を Drive 上の `.tmp` ファイル（`stock_analyzer.duckdb.tmp`）に書き出した上で、`os.replace` によりアトミックに本番ファイルへ置き換える（Drive 直下への不要な重複コピーは行わない）。
    - **非同期アップロードの完了保証（フラッシュと副作用への配慮）**:
      - FUSE 経由の書き込みはバックグラウンドで非同期にクラウドへ同期されるため、Push 完了直後に `from google.colab import drive; drive.flush_and_unmount()` を呼び出し、Google Drive クラウド側へのアップロード完了を確実に待機・保証する。
      - **アンマウントに伴う重要規約**: `flush_and_unmount()` 実行後は `/content/drive` へのアクセスが遮断される。そのため、**後続の Step 4（プレビュー）および Step 5（ダウンロード）は必ずローカル作業層（`/content/working/output/`）を参照する**設計とする。
      - また、同一セッションで条件を変更して Step 3 だけを再実行するケースに備え、Step 3 冒頭に「未マウント時のみ再マウントするガード処理」を配備する。
+
+### 3.3 取得プロファイルと差分取得仕様（Colab 専用ルート）
+
+#### 3.3.1 なぜ Colab 専用ルートか
+市場データ取得（`MarketFetcher`）のコード経路は CLI / Colab で同一（20 銘柄ずつのサブバッチ・1 並列）である。専用環境では約 1 分 40 秒（約 0.5 秒/サブバッチ）だが、Colab では約 2.3 秒/サブバッチかかり、差分モードでも約 8 分を要する。1 分 40 秒は Colab では達成できない前提とする。
+
+**実測（2026-10-02、Colab、差分モード 197 サブバッチ、yfinance 0.2.66）**:
+
+| プロファイル（事前インターバル） | 全体 | 市場データ取得 | 空応答・例外（429 の疑い） | 取得不能銘柄 |
+| :--- | ---: | ---: | :---: | :---: |
+| `colab` 初期値（1.0 秒） | 664 秒 | 607 秒 | 0 | 120 |
+| `standard`（0.2 秒、直前の実行に続く不利な条件） | 499 秒 | 454 秒 | 0 | 120 |
+
+- 取得時間の差（153 秒）は事前インターバルの差（0.8 秒 × 197 ≒ 158 秒）でほぼ説明でき、**429 は当日の 4 回の実行すべてで 0 件**。Colab の遅さの主因は 429 ではなく**通信 1 回あたりの遅延**であり、事前インターバルは効果が無かった。
+- このため `colab` の事前インターバルは標準と同値（0.2 秒）とし、**リトライ回数・バックオフの拡大のみ**を Colab 専用の保険として残す（429 が発生しない限りコストは無い）。
+- 取得不能の 120 銘柄はすべて取引が止まっている銘柄（2 日分の取得は 0 件、1 年分でも最終日が 9 月以前）で、429 による欠落ではない。
+- さらなる短縮には並列化（`MAX_WORKERS` > 1）やサブバッチ拡大が考えられるが、429 リスクが変わるため Colab 実測を伴う別検討とする。
+
+| プロファイル | 選択方法 | サブバッチ成功後の事前インターバル | リトライ回数 | バックオフ基準 (空応答 / 例外) |
+| :--- | :--- | :---: | :---: | :---: |
+| `standard`（CLI 既定） | 未指定 | 0.2 秒 | 3 | 5 秒 / 10 秒 |
+| `colab` | ノートブックが `context.config["fetch_profile"] = "colab"` を設定（環境変数 `STOCK_ANALYZER_FETCH_PROFILE` でも指定可） | 0.2 秒 | 5 | 8 秒 / 15 秒 |
+
+- 選択順は `context.config["fetch_profile"]` → 環境変数 → `standard`。**環境の推測判定（`/content` の有無など）は行わず、ノートブックが明示する**。
+- 値は上記の実測に基づく（実装: `src/fetcher/fetch_profile.py`）。開発者の検証用に、ノートブックで Step 3 の前に `fetch_profile = "standard"` を定義すると切り替えられる。
+- 取得できなかった銘柄は `context.config["fetch_missing_codes"]` に集計され、Step 3 の完了時に件数が表示される（上場廃止銘柄を含む）。
+
+#### 3.3.2 差分取得（1y / 2d）の判定は銘柄単位
+- DB 全体の単一フラグではなく、**銘柄ごとの DB 履歴行数**で取得期間を決める。履歴が `MIN_HISTORY_ROWS`（20 行、直近 20 日平均売買代金の算出に必要な最低行数）未満の銘柄は `1y`、十分な銘柄は `2d`（差分）。
+- 取得前に銘柄を 2 グループに分け、それぞれ別のバッチ列で取得する。**リクエスト総数は増えない**ため 429 リスクは変わらない。
+- 新規上場や、前回の 429 で欠落した銘柄は、次回実行で自動的に `1y` で取り直される（欠落の自己修復）。
+- `context.config["is_first_run"]` が True の場合は全銘柄 `1y`。CLI のように未設定でも、履歴が無ければ全銘柄 `1y` になる。
+
+### 3.4 DB 整合性検証仕様（Colab / CLI 共通）
+- 閾値は `ColabSyncManager.MIN_STOCKS = 1000`（銘柄マスタ・財務データ）、`MIN_HISTORY_DATES = 20`（`daily_metrics` の日数）の**単一定義**。必須テーブルは `stocks` / `fundamentals` / `daily_metrics`。
+- 検証・案内・中断は `ColabSyncManager.enforce_integrity()` に集約し、Step 1・Step 3・`pull_database(validate_integrity=True)` はすべてこれを呼ぶ。不整合時は Colab 向け（`reset_database` を ON）と CLI 向け（`reset_cache` を実行）の両方の対処を案内して `RuntimeError` で中断する。
+- **初回判定**: ノートブック Step 1 は `pull_database(validate_integrity=True)` の後、**実際に使う DB が健全かどうか**で初回を判定する（Drive が見えないだけで初回扱いにしない）。既存 DB を使う場合は整合性を検証し、新規（初回・`reset_database` 直後）は検証しない。`is_first_run()`（Drive 上のメイン**または** `.bak` の有無で判定）は Step 3 を単独実行した場合の補助判定に使う。
+- Step 3 が正常完了したら `is_first_run = False` に更新し、同一セッションでの Step 3 単独再実行は差分モードかつ検証ありで動作する。
+- `reset_cache` は DB・`.bak` に加え、Push 中断で残る `.tmp` も削除する。
+
+### 3.5 リリース・タグ運用
+- 開発は `main` 1 本で行う。ブランチは分けない。
+- Colab が取得するコードは、ノートブック Step 1 の `TARGET_BRANCH`（検証済みタグ）で固定する。**「Open in Colab」バッジは `main` のノートブックを開く**ため、ノートブックを変更するときは `TARGET_BRANCH` を新タグへ上げる。
+- **公開済みタグは付け替えない**。修正のたびに新しい番号（機能追加は `v1.x.0`、修正のみは `v1.x.y`）の注釈付きタグを発行する。
+- リリース手順: ① `main` で修正・Colab 動作確認 → ② ノートブックの `TARGET_BRANCH` を新タグへ更新してコミット → ③ そのコミットに注釈付きタグを付け、`main` と一緒に push。
+- ノートブックが呼ぶ `ColabSyncManager` のメソッドが `TARGET_BRANCH` 時点のコードに存在することは `tests/test_colab_sync.py::test_notebook_uses_only_existing_sync_methods` が検証する（タグ作成後に有効）。
+- タグの clone に失敗して `main` へフォールバックした場合、ノートブックは警告を表示する。
+
+### 3.6 調査用サマリ（トラブル時のサポート情報）
+- 購入者の環境で問題が起きたとき、サポートへ添付できる 1 つのテキスト `diagnostics_summary.txt`（`src/utils/diagnostics.py`）を生成する。Colab / CLI 共通。
+- **生成タイミング**: Step 3 の正常完了時（Drive 同期結果を含む）と、パイプラインが例外で中断したとき（traceback を含む）。Step 3 より前の失敗に備え、末尾の「困ったときは」セルが未作成のサマリをその場で生成する。
+- **取得は任意操作**: 通常は意識させない。困ったときだけ「困ったときは」セルを実行すると、内容を表示しファイルとしてダウンロードする。
+- **内容**: 実行環境（Colab / CLI、Python、コード版 = `git describe`、主要ライブラリ版）、取得コード指定（`TARGET_BRANCH`）、実行モード、設定の主要項目（ホワイトリスト）、市場データ取得の統計（サブバッチ数・空応答・例外・1y/2d の計画銘柄数）、取得できなかった銘柄、時間内訳、DB 統計（各テーブル件数・日付範囲・サイズ。**中身は含めない**）、Drive キャッシュの有無と更新時刻、記録されたエラーと中断時の traceback。
+- **含めない情報**: API キー、メールアドレス、認証情報、設定ファイル全体、DB の中身。API キー様の文字列とメールアドレスは出力時に自動で伏せる（`scrub`）。ファイル冒頭に「含まれない情報」を明記し、添付前の確認を促す。
+- **堅牢性**: 各セクションの収集失敗は握りつぶし、取れた範囲だけ出力する。診断はファイルシステムに副作用を持たない（読み取り専用）。
+- **取り違え防止**: Step 3 開始時に `stamp_run` で実行時のコード版と開始時刻を記録し、サマリには「実行時のコード版」と「サマリ作成時点のコード版」を分けて載せる。結果欄は生成元で区別する（Step 3 完了 / Step 3 失敗 / 「困ったときは」セルで作成＝結果不明）。時刻は JST、Drive 未マウント時はその旨を表示する。
+- 取得統計は `context.config["fetch_stats"]`（`record_fetch_stat`）に加算され、`fetch_missing_codes` と合わせて出力される。
 
 ## 4. Colab ノートブック セル構成と UX 設計 (Step-by-Step Flow)
 
@@ -116,13 +176,13 @@ flowchart TD
   - 相対パス（`Portfolio/Japan` 等）の場合は `/content/drive/MyDrive/<相対パス>`
   - 絶対パス（`/content/drive/Shareddrives/...` 等）の場合はそのまま採用（共有ドライブ対応）
 - 解決された永続用フォルダ配下の `cache/`, `output/`, `config/` の存在を確認し、なければ自動作成。
-- **Stage-and-Sync (Pull)**: 3.2 節の 3 段構え検証（メイン DB -> .bak -> 新規作成）に基づき、健全な DB を Colab の高速ローカル SSD（`/content/working/cache/`）へ配置。
+- **Stage-and-Sync (Pull)**: 実際の DB 配置（`pull_database`）はリポジトリ取得後に必要となるため **Step 1 で実行**する。3.2 節の 3 段構え検証（メイン DB -> .bak -> 新規作成）に基づき、健全な DB を Colab の高速ローカル SSD（`/content/working/cache/`）へ配置。Step 0 は Drive マウント・フォルダ作成・作業層準備と `reset_database` スイッチの定義まで。
 
 #### 【Step 1】環境セットアップ（安定リリースタグの取得 ＆ 依存解決）
 - **公開 Git リポジトリからの安定バージョン取得**:
   - トークンや認証を一切不要とし、`!git clone` を実行。
-  - **バージョン固定戦略**: 開発中の破壊的変更が購入者環境に直撃するのを防ぐため、デフォルトでは**検証済みの最新安定リリースタグ（例: `--branch v1.0.0`）**をチェックアウトする。
-  - **ノートブックの整合性保証**: 「Open in Colab」バッジの URL も、`main` ではなく同一タグのパス（`https://colab.research.google.com/github/<ユーザー名>/stock-analyzer-core/blob/v1.0.0/notebooks/stock_analyzer_colab.ipynb`）を指すように設定し、セル構成とコードのバージョンの不一致を完全に防止する。
+  - **バージョン固定戦略**: 開発中の破壊的変更が購入者環境に直撃するのを防ぐため、デフォルトでは**検証済みの最新安定リリースタグ（例: `--branch v1.2.0`）**をチェックアウトする。タグの運用規約は §3.5。
+  - **ノートブックの整合性保証**: 「Open in Colab」バッジは `main` のノートブックを開く。購入者向け記事のリンクを変えずに検証済みコードだけを届けるため、取得するコードのバージョンはノートブック内の `TARGET_BRANCH` で固定し、ノートブック更新時に新タグへ上げる（§3.5）。
 - **依存ライブラリの自動インストール**:
   - `polars`, `yfinance`, `requests` 等を静音インストール（`-q`）。
   - 所要時間：約 20〜30 秒。
@@ -134,14 +194,14 @@ import shutil
 
 repo_url = "https://github.com/<ユーザー名>/stock-analyzer-core.git"
 target_dir = "/content/stock-analyzer-core"
-target_version = "v1.0.0"  # 安定タグ指定 (必要に応じて "main" に変更可能)
+target_version = "v1.2.0"  # 安定タグ指定 (公開済みタグは付け替えず、更新時は新タグへ上げる)
 
 if os.path.exists(target_dir):
     shutil.rmtree(target_dir)
 
 !git clone --depth 1 --branch {target_version} {repo_url} {target_dir}
 %cd {target_dir}
-!pip install -q -r requirements.txt
+!pip install -q -r requirements-colab.txt
 ```
 
 #### 【Step 2】EDINET API キーの設定（セキュリティ設計）
@@ -179,7 +239,7 @@ os.environ["EDINET_API_KEY"] = edinet_api_key
   ```
 - 作業層（`/content/working/`）上でパイプラインを実行。すべての DuckDB 書き込み・生 ZIP 展開パース・Polars 演算を超高速 SSD 上で完結させる。
   - 初回実行時：東証全3,920社の市場データ初期取得・スクリーニング（約 8〜10 分）
-  - 2回目以降：Google Drive 差分キャッシュ活用（約 1 分 40 秒 ※専用環境実測目安）
+  - 2回目以降：Google Drive 差分キャッシュ活用。ただし全銘柄を取得し、Colab は通信 1 回あたりの遅延が大きいため Colab 上でも約 8〜10 分（専用 IP のローカル / サーバーでは約 1 分 40 秒）。取得は Colab 専用プロファイル（§3.3）で実行
 - **Stage-and-Sync (Push)**:
   - DuckDB `CHECKPOINT` を実行し WAL を完全フラッシュ。
   - Drive 上の既存 DB を `.bak` へコピー退避（`shutil.copy2`）した上で、`.tmp` 経由でアトミックに最新 DB と CSV 2 ファイルを Google Drive へ同期。
@@ -209,7 +269,7 @@ CSV を開かなくても、Colab 上で即座に分析結果を確認できる�
 | **404 Not Found (ノートブック未検出)** | バッジ URL と GitHub ブランチの不整合 | バッジリンクを検証済みの `main` または安定リリース用タグに固定。反映待ち時は Colab の「ノートブックを開く」ダイアログにある「ブランチ」プルダウンから該当ブランチを選択して開くようガイド。 |
 | **Unknown accelerator: None** | `.ipynb` メタデータスキーマの不整合 | `.ipynb` 生成時に無効な `"accelerator": "None"` キーを完全排除（標準 CPU スキーマに準拠）。過去セッションのキャッシュが残った場合は「ランタイム」➔「ランタイムのタイプを変更」➔「CPU」を選択保存することで即時リカバリ。 |
 | **401 Unauthorized** | EDINET API キーの間違い、未登録 | 実行直前にメタデータ API へ 1 件テスト通信を実施。**HTTP ステータスコード（401）だけでなく、JSON レスポンスボディ内のエラーコード（`statusCode` や `message` 等）の両方を判定**し、認証不備時は「APIキーが正しくありません」と日本語で即時案内。また、Colab シークレット（🔑）への永続登録手順を案内して次回以降の入力を自動化。 |
-| **429 Too Many Requests** | yfinance / Yahoo のレート制限（※特に Google Cloud IP 帯は厳格制限を受けやすい） | バッチ取得時のチャンクサイズ調整、指数バックオフ（Retry with Exponential Backoff）の組み込み。**フェーズ 2 の実証検証において最優先で負荷検証を行う**。 |
+| **429 Too Many Requests** | yfinance / Yahoo のレート制限（※特に Google Cloud IP 帯は厳格制限を受けやすい） | Colab 専用取得プロファイル（§3.3: リトライ回数・バックオフの拡大）、指数バックオフ（Retry with Exponential Backoff）。取得できなかった銘柄は件数を表示し、次回実行で自動的に 1 年分で取り直す。**フェーズ 2 の実証検証において最優先で負荷検証を行う**。 |
 | **Drive 容量不足** | 生 ZIP などの肥大化データ残存 | Google Drive へは単一の SQLite/DuckDB と最終 CSV（2ファイル）のみを同期し、生 ZIP は作業層（`/content/working/`）でパース直後に即時削除（`unlink`）して永続層に一切持ち込ませない。 |
 | **セッション切断** | ブラウザを閉じた、ランタイムタイムアウト等 | 実行中の途中経過（未コミット分）は失われるが、**前回正常終了時点の DB が Google Drive に安全に保持されている**ため、再接続時も前日までのキャッシュを引き継いですぐに再実行が可能（全件再取得にはならない）。 |
 

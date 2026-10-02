@@ -275,3 +275,149 @@ def test_colab_notebook_syntax():
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Colab / CLI 両立の追加検証
+# ---------------------------------------------------------------------------
+
+
+def test_is_first_run_considers_bak(tmp_path):
+    """メインが破損でも健全な .bak があれば初回扱いにしない (pull_database の復元順序と一致)"""
+    drive_dir = tmp_path / "drive"
+    cache = drive_dir / "cache"
+    cache.mkdir(parents=True)
+
+    # 何も無い → 初回
+    assert ColabSyncManager.is_first_run(drive_dir) is True
+
+    # メイン破損 + 健全な .bak → 初回ではない
+    (cache / "stock_analyzer.duckdb").write_bytes(b"CORRUPTED")
+    _create_valid_duckdb(cache / "stock_analyzer.duckdb.bak")
+    assert ColabSyncManager.is_first_run(drive_dir) is False
+
+    # 両方破損 → 初回
+    (cache / "stock_analyzer.duckdb.bak").write_bytes(b"CORRUPTED")
+    assert ColabSyncManager.is_first_run(drive_dir) is True
+
+
+def test_push_preserves_bak_when_drive_db_is_corrupt(tmp_path):
+    """Drive 上のメイン DB が破損していても、健全な .bak を上書きしない"""
+    drive_dir = tmp_path / "drive"
+    working_dir = tmp_path / "working"
+    cache = drive_dir / "cache"
+    cache.mkdir(parents=True)
+
+    _create_valid_duckdb(cache / "stock_analyzer.duckdb.bak")
+    good_bak = (cache / "stock_analyzer.duckdb.bak").read_bytes()
+    (cache / "stock_analyzer.duckdb").write_bytes(b"CORRUPTED_MAIN")
+    _create_valid_duckdb(working_dir / "cache" / "stock_analyzer.duckdb")
+
+    assert ColabSyncManager.push_artifacts(working_dir, drive_dir, flush_unmount=False)
+    assert (cache / "stock_analyzer.duckdb.bak").read_bytes() == good_bak
+    assert ColabSyncManager.is_duckdb_healthy(cache / "stock_analyzer.duckdb")
+
+
+def test_reset_cache_removes_tmp_leftovers(tmp_path):
+    """reset_cache は Push 中断で残った .tmp も削除する"""
+    drive_dir = tmp_path / "drive"
+    working_dir = tmp_path / "working"
+    d_tmp = drive_dir / "cache" / "stock_analyzer.duckdb.tmp"
+    w_tmp = working_dir / "cache" / "stock_analyzer.duckdb.tmp"
+    for f in (d_tmp, w_tmp):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"partial")
+
+    ColabSyncManager.reset_cache(drive_dir, working_dir)
+    assert not d_tmp.exists()
+    assert not w_tmp.exists()
+
+
+def test_enforce_integrity_guides_by_environment(tmp_path, capsys, monkeypatch):
+    """不整合時は実行環境に合う対処方法だけを案内して RuntimeError で中断する。閾値は共通定数"""
+    db_file = tmp_path / "cache" / "stock_analyzer.duckdb"
+    _create_valid_duckdb(db_file)  # 銘柄 1 件・履歴 5 日 → 既定閾値では不整合
+
+    # Colab: reset_database の手順のみ (コード例は出さない)
+    monkeypatch.setenv("COLAB_RELEASE_TAG", "test")
+    with pytest.raises(RuntimeError, match="データベース不整合を検知したため安全に中断しました"):
+        ColabSyncManager.enforce_integrity(db_file)
+    out = capsys.readouterr().out
+    assert "reset_database" in out
+    assert "reset_cache" not in out
+
+    # CLI: reset_cache の手順のみ
+    monkeypatch.delenv("COLAB_RELEASE_TAG", raising=False)
+    monkeypatch.delitem(__import__("sys").modules, "google.colab", raising=False)
+    with pytest.raises(RuntimeError):
+        ColabSyncManager.enforce_integrity(db_file)
+    out = capsys.readouterr().out
+    assert "reset_cache" in out
+    assert "reset_database" not in out
+
+    # 既定値は共通定数と一致 (verify / pull / enforce で不揃いにならない)
+    valid, _ = ColabSyncManager.verify_database_integrity(
+        db_file,
+        min_stocks=1,
+        min_history_dates=ColabSyncManager.MIN_HISTORY_DATES,
+    )
+    assert valid is False  # 履歴 5 日 < 20 日
+    ColabSyncManager.enforce_integrity(db_file, min_stocks=1, min_history_dates=5)
+
+
+def test_notebook_uses_only_existing_sync_methods():
+    """ノートブックが呼ぶ ColabSyncManager のメソッドが実在し、固定タグ時点のコードにも存在する"""
+    import json
+    import re
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    nb = json.loads(
+        (root / "notebooks" / "stock_analyzer_colab.ipynb").read_text(encoding="utf-8")
+    )
+    code = "\n".join(
+        "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+    )
+    called = set(re.findall(r"ColabSyncManager\.(\w+)", code))
+    assert called, "ノートブックから ColabSyncManager 呼び出しが検出できません"
+    for name in called:
+        assert hasattr(ColabSyncManager, name), f"未実装メソッド: {name}"
+
+    tag = re.search(r'TARGET_BRANCH = "([^"]+)"', code).group(1)
+    res = subprocess.run(
+        ["git", "show", f"{tag}:src/utils/colab_sync.py"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        pytest.skip(f"タグ {tag} が未作成のためタグ時点の検証をスキップ")
+    for name in called:
+        assert f"def {name}(" in res.stdout, f"{tag} に {name} が存在しません"
+
+
+def test_pull_keeps_working_db_when_drive_unavailable(tmp_path):
+    """Drive 未マウント (Step 3 の flush_and_unmount 後に Step 1 だけ再実行) でも作業層 DB を消さない"""
+    drive_dir = tmp_path / "drive_not_mounted"  # 存在しない
+    working_dir = tmp_path / "working"
+    working_db = working_dir / "cache" / "stock_analyzer.duckdb"
+    _create_valid_duckdb(working_db)
+    before = working_db.read_bytes()
+
+    res = ColabSyncManager.pull_database(drive_dir, working_dir)
+    assert res == working_db
+    assert working_db.read_bytes() == before
+
+
+def test_pull_does_not_clobber_working_db_with_corrupt_drive_copy(tmp_path):
+    """Drive 側が破損していても、検証前に作業層 DB を上書きしない"""
+    drive_dir = tmp_path / "drive"
+    (drive_dir / "cache").mkdir(parents=True)
+    (drive_dir / "cache" / "stock_analyzer.duckdb").write_bytes(b"CORRUPTED")
+    working_dir = tmp_path / "working"
+    working_db = working_dir / "cache" / "stock_analyzer.duckdb"
+    _create_valid_duckdb(working_db)
+
+    res = ColabSyncManager.pull_database(drive_dir, working_dir)
+    assert ColabSyncManager.is_duckdb_healthy(res)
+    assert not list((working_dir / "cache").glob("*.pulltmp"))
