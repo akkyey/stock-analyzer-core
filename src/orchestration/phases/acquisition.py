@@ -12,6 +12,7 @@ import pandas as pd
 import polars as pl
 
 from src.orchestration.phases.base import BasePhase
+from src.utils.diagnostics import record_fetch_stat
 
 
 class AcquisitionPhase(BasePhase):
@@ -58,6 +59,9 @@ class AcquisitionPhase(BasePhase):
             f"Fetch plan: {len(thin)} stocks -> 1y, {len(enough)} stocks -> 2d "
             f"({len(batches)} batches)"
         )
+        record_fetch_stat(self.context, "plan_stocks_1y", len(thin))
+        record_fetch_stat(self.context, "plan_stocks_2d", len(enough))
+        record_fetch_stat(self.context, "plan_batches", len(batches))
         return batches
 
     def execute(self, df: Optional[pl.DataFrame] = None) -> Any:

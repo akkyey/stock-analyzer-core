@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
+from src.utils.diagnostics import record_fetch_stat
+
 from .base import FetcherBase
 from .fetch_profile import resolve_fetch_profile
 
@@ -82,6 +84,7 @@ class MarketFetcher(FetcherBase):
             time.sleep(random.uniform(0.1, 0.5))
 
             df = pd.DataFrame()
+            record_fetch_stat(context, "sub_batches")
             # [v30.4] Increased retries with exponential backoff
             for attempt in range(profile.max_retries):
                 try:
@@ -97,11 +100,13 @@ class MarketFetcher(FetcherBase):
                     )
 
                     if not df.empty:
+                        record_fetch_stat(context, "sub_batches_ok")
                         # Success: プロファイル別の事前インターバル (429 の未然防止)
                         time.sleep(profile.inter_batch_sleep)
                         break
 
                     # If empty, it might be 429 or simply no data
+                    record_fetch_stat(context, "empty_responses")
                     wait_time = (2**attempt) * profile.empty_backoff_base + random.uniform(1, 3)
                     self.logger.warning(
                         f"⚠️ Batch {sub_symbols[:2]}... empty. Backoff {wait_time:.1f}s (Attempt {attempt + 1}/{profile.max_retries})"
@@ -109,6 +114,7 @@ class MarketFetcher(FetcherBase):
                     time.sleep(wait_time)
 
                 except Exception as e:
+                    record_fetch_stat(context, "download_exceptions")
                     wait_time = (2**attempt) * profile.error_backoff_base + random.uniform(2, 5)
                     self.logger.error(
                         f"❌ Error downloading {sub_symbols[:2]}...: {e}. Retry in {wait_time:.1f}s"
