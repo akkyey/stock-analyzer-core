@@ -239,6 +239,11 @@ class DuckDBRepository:
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS dps DOUBLE"
             )
+            # 成長率 (旧スキーマには列が無く、シードの値が取り込み時に捨てられていた)
+            for growth_col in ("sales_growth", "profit_growth", "profit_growth_raw"):
+                conn.execute(
+                    f"ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS {growth_col} DOUBLE"
+                )
 
             # EDINET 処理済み書類メタデータ (セッション跨ぎ差分キャッシュ用)
             conn.execute("""

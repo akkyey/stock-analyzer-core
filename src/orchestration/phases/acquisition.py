@@ -109,12 +109,12 @@ class AcquisitionPhase(BasePhase):
 
         # 1-2. 財務データの初期シード (全件ベースラインデータ未登録時はバンドルされたシードデータから自動投入)
         funda_repo = FundamentalsRepository(repo)
+        seed_parquet = (
+            Path(__file__).resolve().parent.parent.parent
+            / "resources"
+            / "fundamentals_seed.parquet"
+        )
         if funda_repo.get_count() < 3000:
-            seed_parquet = (
-                Path(__file__).resolve().parent.parent.parent
-                / "resources"
-                / "fundamentals_seed.parquet"
-            )
             if seed_parquet.exists():
                 self.log_info(
                     "ℹ️ 財務ベースラインデータが未登録/不足しています。バンドルされたシードデータから初期登録を実行します..."
@@ -128,6 +128,14 @@ class AcquisitionPhase(BasePhase):
                     )
                 except Exception as e:
                     self.log_error(f"❌ 財務データの初期登録に失敗しました: {e}")
+
+        # 1-3. 既存 DB への成長率の補完 (旧スキーマでは成長率がシードから取り込まれていなかった)
+        try:
+            backfilled = funda_repo.backfill_growth_from_seed(seed_parquet)
+            if backfilled:
+                self.log_info(f"ℹ️ 成長率を {backfilled} 銘柄分、シードから補完しました。")
+        except Exception as e:
+            self.log_error(f"❌ 成長率の補完に失敗しました (継続): {e}")
 
         # [Phase 0/1] 財務データの正典同期 (Fundamental Truth Sync)
         fetcher_cfg = self.context.config.get("fetcher", {})

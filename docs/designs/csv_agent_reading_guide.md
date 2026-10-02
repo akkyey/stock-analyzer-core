@@ -1,10 +1,10 @@
-# 定量分析レポート (daily_report.csv / uncalculable_stocks.csv) エージェント解析・活用ガイドライン (v2.4)
+# 定量分析レポート (daily_report.csv / uncalculable_stocks.csv) エージェント解析・活用ガイドライン (v3.0)
 
 ## 1. 概要 (Overview)
 
 本ドキュメントは、[stock-analyzer-core](file:///home/irom/dev/stock-analyzer-core) によって生成される定量スクリーニング・分析レポート CSV 群のファイル構造、各カラムの厳密な定義、**3層アーキテクチャ（第1層 Pre-Filter ➔ 第2層 リニア傾斜配点 ➔ 第3層 多層ゲートキーパー）**の算出基準、および AI エージェント（LLM）が本データを高精度に解析・活用するための標準運用仕様を規定したマニュアルである。
 
-本システムでは、東証全上場銘柄（約3,900社）を対象として実行時に最初から **「完全評価可能銘柄レポート」** と **「論理的算出不能・事前足切り銘柄レポート」** の2ファイルへ直接分離出力するアーキテクチャを採用している。
+本システムでは、東証全上場銘柄（約3,900社）を対象として実行時に最初から **「スクリーニング対象銘柄レポート」** と **「論理的算出不能・事前足切り銘柄レポート」** の2ファイルへ直接分離出力するアーキテクチャを採用している。
 
 ---
 
@@ -12,109 +12,113 @@
 
 | ファイルパス | 収録対象 | 件数目安 | 主な特徴・責務 |
 | :--- | :--- | :---: | :--- |
-| [data/output/daily_report.csv](file:///home/irom/dev/stock-analyzer-core/data/output/daily_report.csv) | **完全評価可能銘柄** | **約 2,320 社** | 全19カラムにおいて**欠損値・空白ゼロ（欠損率 0.00%）**。<br>第1層の流動性・破綻リスク足切りを通過し、十分な出来高と健全財務・確定PERを持つ客観的スクリーニング適格データ。<br>※`Investment_Thesis`, `Risk_Factors`, `Time_Horizon` はスキーマ互換維持のため空文字（`""`）固定。 |
-| [data/output/uncalculable_stocks.csv](file:///home/irom/dev/stock-analyzer-core/data/output/uncalculable_stocks.csv) | **除外・論理的算出不能銘柄** | **約 1,600 社** | 第1層（極小流動性、商いゼロ、ボロ株、債務超過、致命的CF枯渇）および財務未定義（当期純損失、上場廃止、有報未開示等）の全社に**具体的数値と理由**を明記。 |
+| `daily_report.csv` | **スクリーニング対象銘柄**（第1層 Pre-Filter を通過した全銘柄） | **約 2,100 社** | 24 カラム。**必須の識別・判定列（`Code` / `Verdict` / `Score`）は欠損ゼロ**。<br>指標列（PER・配当利回りなど）は、元データが無い場合に**推定値で埋めず `-`（欠損）**で出力する。 |
+| `uncalculable_stocks.csv` | **除外・算出不能銘柄** | **約 1,800 社** | 第1層（極小流動性、商いゼロ、ボロ株、債務超過、致命的CF枯渇）や、市場データを取得できなかった銘柄。元データの列に加え、除外理由 `filter_reason` と詳細 `filter_detail` を明記。 |
 
 > [!IMPORTANT]
 > 出力ファイル名には日時は付与せず、固定名（`daily_report.csv` / `uncalculable_stocks.csv`）を維持する。
-> 生成日時は、各CSVの第1行目にコメントヘッダー（`# Generated At: YYYY-MM-DD HH:MM:SS`）として付与される。
+> 生成日時は `daily_report.csv` の `Report_Timestamp` 列（各行）に記録される。
 
 ---
 
 ## 3. ファイル構造と安全なパース仕様
 
-### 3.1 メタデータ・コメント行の仕様
-両CSVともに、**第1行目は `#` で始まるコメント行** である。
+### 3.1 構造
+両 CSV ともコメント行は無く、**第1行がヘッダー**（UTF-8 BOM 付き）である。
 
 ```csv
-# Generated At: 2026-09-22 15:44:57
-Rank,Code,Name,Sector,Market,Verdict,Agent_Score,Price,RSI_14,MACD_Status,MA25_Divergence,PER,PBR,ROE,Equity_Ratio,Triggers,Investment_Thesis,Risk_Factors,Time_Horizon
-1,2767,円谷フィールズホールディングス,卸売業,Prime,BUY,77.0,1418.0,42.2,Bullish (Above Signal),-1.3,5.1,1.47,19.7,64.0,"高ROE (19.7%), 健全財務 (自己資本比率 64.0%), 低PER割安水準 (5.1倍)",,,
+Rank,Code,Name,Sector,Market,Market_Cap_Src,Market_Cap,Verdict,Score,PER_Src,PER,PBR_Src,PBR,Div_Yield_Src,Div_Yield,ROE_Src,ROE,Sales_Growth,Profit_Growth,Operating_Margin,Equity_Ratio,RSI,Trend,Report_Timestamp
+1,3306,日本製麻,卸売業,Standard,yf,3181029376,Grade B,73.7,yf,5.55,yf,1.3,calc,0.55,yf,27.41,-,-,-1.48,59.72,63.3,3,2026-10-02 16:35:05
 ```
 
-### 3.2 推奨読み込みコード (Python)
+### 3.2 `-`（欠損）の扱い（重要）
+- **`-` は「データなし／算出不能」を意味する**。0 や推定値ではない。
+- `-` を数値として読み込むと型エラーになるため、**必ず欠損値として読み込む**。
+- 指標が `-` の銘柄は、その指標について**言及・比較・ランキングの対象にしない**（推測で補わない）。
+
+### 3.3 推奨読み込みコード (Python)
 
 #### Pandas での読み込み
 ```python
 import pandas as pd
 
-# コメント行スキップ
-df_eval = pd.read_csv("data/output/daily_report.csv", comment="#")
-df_uncalc = pd.read_csv("data/output/uncalculable_stocks.csv", comment="#")
+df_eval = pd.read_csv("data/output/daily_report.csv", na_values=["-"])
+df_uncalc = pd.read_csv("data/output/uncalculable_stocks.csv", na_values=["-"])
 ```
 
 #### Polars での読み込み
 ```python
 import polars as pl
 
-# コメント行プレフィックス指定
-df_eval = pl.read_csv("data/output/daily_report.csv", comment_prefix="#")
-df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", comment_prefix="#")
+df_eval = pl.read_csv("data/output/daily_report.csv", null_values=["-"])
+df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"])
 ```
 
 ---
 
 ## 4. 全カラム定義
 
-### 4.1 評価可能銘柄レポート (`daily_report.csv`: 全19カラム)
-**欠損値ゼロ（100% 網羅）** が保証されている。
+### 4.1 `daily_report.csv`（全 24 カラム）
 
 | カラム名 | データ型 | 説明 | 具体例 |
 | :--- | :--- | :--- | :--- |
-| **Rank** | Integer | 総合スコア（`Agent_Score`）降順の順位 (1〜N) | `1`, `52` |
-| **Code** | String | 銘柄コード (英字サフィックス含む) | `7203`, `2767`, `415A` |
-| **Name** | String | 正式企業名 | `円谷フィールズホールディングス`, `トヨタ自動車` |
-| **Sector** | String | 東証33業種分類 | `卸売業`, `情報・通信業`, `サービス業` |
+| **Rank** | Integer | `Score` 降順の順位 (1〜N) | `1`, `52` |
+| **Code** | String | 銘柄コード (英字サフィックス含む) | `7203`, `415A` |
+| **Name** | String | 正式企業名 | `トヨタ自動車` |
+| **Sector** | String | 東証33業種分類 | `卸売業`, `情報・通信業` |
 | **Market** | String | 上場市場区分 | `Prime`, `Standard`, `Growth`, `Other` |
-| **Verdict** | String | 機械判定グレード (`Grade S` / `Grade A` / `Grade B` / `Grade C`、レガシー設定時: `STRONG_BUY` / `BUY` / `WATCH` / `PASS`) | `Grade S`, `Grade A` |
-| **Agent_Score** | Float | 多変量連続グラデーションクオンツスコア (15.0〜98.0) | `77.0`, `68.5` |
-| **Price** | Float | 最新株価 (円) | `1418.0` |
-| **RSI_14** | Float | 14日相対力指数 (0.0〜100.0) | `42.2`, `55.8` |
-| **MACD_Status** | String | MACD状態 (`Bullish (Above Signal)` / `Bearish (Below Signal)` / `Neutral`) | `Bullish (Above Signal)` |
-| **MA25_Divergence** | Float | 25日移動平均乖離率 (%) | `-1.3`, `5.2` |
-| **PER** | Float | 株価収益率 (倍) | `5.1` |
-| **PBR** | Float | 株価純資産倍率 (倍) | `1.47` |
-| **ROE** | Float | 自己資本利益率 (%) | `19.7` |
-| **Equity_Ratio** | Float | 自己資本比率 (%) | `64.0` |
-| **Triggers** | String | 点灯した着目シグナル一覧 (なし時は `"特になし"`) | `高ROE (19.7%), 健全財務 (自己資本比率 64.0%), 低PER割安水準 (5.1倍)` |
-| **Investment_Thesis**| String | （定型文廃止・互換性維持のため空文字 `""` 固定） | `""` |
-| **Risk_Factors** | String | （定型文廃止・互換性維持のため空文字 `""` 固定） | `""` |
-| **Time_Horizon** | String | （定型文廃止・互換性維持のため空文字 `""` 固定） | `""` |
+| **Market_Cap_Src** | String | `Market_Cap` の出所（下記参照） | `yf`, `calc`, `-` |
+| **Market_Cap** | Integer | 時価総額 (円) | `3181029376` |
+| **Verdict** | String | 機械判定グレード (`Grade S` / `Grade A` / `Grade B` / `Grade C`、レガシー設定時: `STRONG_BUY` / `BUY` / `WATCH` / `PASS`) | `Grade A` |
+| **Score** | Float | クオンツ総合スコア (0〜100) | `73.7` |
+| **PER_Src** / **PER** | String / Float | 株価収益率 (倍) と出所 | `yf` / `5.55` |
+| **PBR_Src** / **PBR** | String / Float | 株価純資産倍率 (倍) と出所 | `calc` / `1.3` |
+| **Div_Yield_Src** / **Div_Yield** | String / Float | 配当利回り (**%表記**。`0.55` は 0.55%) と出所 | `calc` / `0.55` |
+| **ROE_Src** / **ROE** | String / Float | 自己資本利益率 (**%表記**) と出所 | `yf` / `27.41` |
+| **Sales_Growth** | Float | 売上高成長率 (%) | `2.03` |
+| **Profit_Growth** | Float | 利益成長率 (%) | `-64.7` |
+| **Operating_Margin** | Float | 営業利益率 (%) | `-1.48` |
+| **Equity_Ratio** | Float | 自己資本比率 (%) | `59.72` |
+| **RSI** | Float | 14日相対力指数 (0〜100) | `63.3` |
+| **Trend** | Integer | トレンドスコア (0〜3。大きいほど上昇基調) | `3` |
+| **Report_Timestamp** | String | レポート生成日時 | `2026-10-02 16:35:05` |
+
+**`*_Src`（出所）の値**
+- `yf`: 外部データ（yfinance・同梱ベースライン）の値をそのまま使用。
+- `calc`: 株価と財務データ（EPS・BPS・DPS・発行済株式数など）から本システムが算出した値。
+- `-`: 元データが無く算出もできないため欠損（このとき数値列も `-`）。
+
+> [!NOTE]
+> 旧版は、元データが無い場合に業種別の仮の PER・PBR、配当利回り 2.25%、推定株式数（2,500万株）、ROE 8.5% を `calc` として出力していた。これらは**実データではない**ため廃止し、`-` とした。過去に生成した CSV を扱う場合は、`calc` の値が仮の値である可能性に注意する。
 
 ---
 
-### 4.2 除外・算出不能銘柄レポート (`uncalculable_stocks.csv`: 全10カラム)
+### 4.2 `uncalculable_stocks.csv`（全 64 カラム）
 
-| カラム名 | データ型 | 説明 |
-| :--- | :--- | :--- |
-| **Code** | String | 銘柄コード |
-| **Name** | String | 会社名 |
-| **Sector** | String | 業種分類 |
-| **Market** | String | 市場区分 |
-| **Price** | Float | 最新株価 |
-| **ROE** | Float | 自己資本利益率 (赤字時はマイナス値) |
-| **PBR** | Float | 株価純資産倍率 (債務超過時はマイナス値) |
-| **Equity_Ratio** | Float | 自己資本比率 |
-| **Uncalculable_Reason** | String | **除外・算出不能理由カテゴリ** |
-| **Detail** | String | **赤字額・不足売買代金・出来高ゼロ日数等の詳細** |
+銘柄の元データ（`code`, `market`, `entry_date`, `price`, 出来高、テクニカル指標、`per` / `pbr` / `roe` / `equity_ratio` 等の財務指標など）に、**除外理由の 2 列**を末尾に付与した構造である。主な列は次のとおり。
 
-#### `Uncalculable_Reason` の分類一覧
+| カラム名 | 説明 |
+| :--- | :--- |
+| **code** / **name** / **sector** / **market** | 銘柄コード・会社名・業種・市場 |
+| **entry_date** / **price** | 最新の取引日と株価 (**市場データを取得できなかった銘柄は空**) |
+| **avg_trading_value_20d** | 直近20営業日の平均売買代金 (円) |
+| **zero_volume_days_5d** | 直近5営業日の出来高ゼロ日数 |
+| **filter_reason** | **除外・算出不能理由カテゴリ** |
+| **filter_detail** | **不足売買代金・ゼロ日数・CF赤字幅等の詳細** |
 
-##### A. 第1層（Pre-Filter: 事前足切り）による地雷株除外
-1. **第1層足切り: 極小流動性トラップ**: 直近20営業日の1日平均売買代金（株数 × 株価）が 3,000万円未満（スリッページ・注文不能リスク）。`Detail` に「20日平均売買代金不足 (〇〇万円 < 3,000万円)」を明記。
-2. **第1層足切り: 商い不成立**: 直近5営業日以内に出来高・売買代金ゼロの日が1日でもある銘柄。`Detail` にゼロ日数（例: 5日）を明記。
-3. **第1層足切り: 致命的キャッシュ枯渇**: 営業CFマージン（営業CF ÷ 売上高）< -10% の資金ショート危機銘柄（※金融等免除業種除く）。`Detail` にマージン率を明記。
-4. **第1層足切り: 超低位ボロ株**: 最新株価 < 50円の整理・ボロ株。
-5. **第1層足切り: 構造的破綻 (債務超過)**: 自己資本比率 <= 0%（純資産マイナス / 資本欠損）。
+#### `filter_reason` の分類一覧
 
-##### B. 財務指標上の論理的算出不能
-6. **当期純損失 (最終赤字)**: 国際基準（東証/ブルームバーグ）に従い、赤字企業は回収年数（PER）が未定義。赤字額またはマイナスROEを明記。
-7. **債務超過 (純資産マイナス)**: 純資産マイナスのためPBR・自己資本比率が定義不能。
+##### A. 第1層（Pre-Filter: 事前足切り）による除外
+1. **極小流動性トラップ**: 直近20営業日の1日平均売買代金が 3,000万円未満（スリッページ・注文不能リスク）。`filter_detail` に「20日平均売買代金不足 (〇〇万円 < 3,000万円)」を明記。
+2. **商い不成立**: 直近5営業日以内に出来高・売買代金ゼロの日がある銘柄。`filter_detail` にゼロ日数を明記。
+3. **致命的キャッシュ枯渇**: 営業CFマージン（営業CF ÷ 売上高）< -10%（※金融等免除業種除く）。
+4. **超低位ボロ株**: 最新株価 < 50円。
+5. **構造的破綻 (債務超過)**: 自己資本比率 <= 0%。
+6. **データ鮮度不足 (取引停止)**: 最新の取引日が古く、取引が止まっている。
+
+##### B. 論理的算出不能
+7. **市場データ取得不能**: Yahoo Finance から株価を取得できなかった銘柄（上場廃止・整理ポスト・新規上場直後など。**取得失敗の一時的な不具合ではなく、多くは取引が存在しない銘柄**）。
 8. **重要指標未開示/算出不能**: PBR・ROE・自己資本比率のいずれかが未開示または算出不能。
-9. **新規IPO直後**: 上場直後のため通期有報XBRLが未開示。
-10. **有報未開示/上場廃止・整理ポスト**: 開示書類なし、またはTOB成立等による上場廃止。
-11. **開示利益情報欠落/株式数取得不可**: 株式数データまたは確定利益データの取得不能。
-12. **当期利益ゼロ**: 純利益が0円のため除算不能。
 
 ---
 
@@ -128,7 +132,7 @@ flowchart TD
     B -- 地雷除外（約1,480社） --> C["uncalculable_stocks.csv<br>（理由・数値付き）"]
     B -- 第1層通過・適格群（約2,430社） --> D["【第2層】Quant Scoring（リニア連続傾斜配点）<br>ROE (30点) + バリュー (25点) + 財務 (15点) + 還元 (10点) + テクニカル (20点)"]
     D --> E["【第3層】Multi-layer Gatekeeper（多層ゲートキーパー）<br>本業赤字・実績赤字・下降トレンドのキャップ制限"]
-    E --> F["daily_report.csv<br>（完全評価可能・欠損ゼロ 約2,320社）"]
+    E --> F["daily_report.csv<br>（スクリーニング対象 約2,100社）"]
 ```
 
 ---
@@ -229,17 +233,25 @@ AI エージェントが本レポートを基にユーザーへスクリーニ�
 1. **メインスクリーニング対象**:
    - `daily_report.csv` に収録されている銘柄は、すでに第1層の流動性トラップ（売買代金不足・商い不成立）や債務超過、致命的CF枯渇が物理排除されているため、**客観的上位群（`Rank <= 50` かつ `Verdict in ['Grade S', 'Grade A']`）を中心に客観的ファクトを提示可能**である（特定の売買推奨・投資助言表現は避けること）。
 2. **インサイトの根拠提示**:
-   - `Triggers` 列の点灯シグナル（例: `"高ROE (19.7%), 健全財務 (自己資本比率 64.0%), 低PER割安水準 (5.1倍)"`）および各指標の実数値（ROE、PER、PBR、自己資本比率、乖離率など）を直接参照して、LLM自身が具体的で客観的な財務分析根拠を提示する（※`Investment_Thesis` 等の定型文列は廃止・空文字化されているため参照不要）。
+   - 各指標の実数値（ROE、PER、PBR、配当利回り、自己資本比率、営業利益率、RSI など）を直接参照して、LLM 自身が具体的で客観的な財務分析根拠を提示する。
+   - **指標が `-`（欠損）の銘柄は、その指標で比較・ランキング・評価をしない**。推定や補完をせず、「データなし」と明示する。
+   - 数値の出所は `*_Src` 列で確認できる（`yf` = 外部データ、`calc` = 本システムの算出値）。
+   - `Div_Yield` / `ROE` などは **%表記**（`0.55` は 0.55%）。100 倍して読まない。
 3. **除外・未算出銘柄の問い合わせ対応**:
-   - ユーザーから「○○社のPERはなぜ載っていないのか？」「なぜこの銘柄がレポートにないのか？」と問われた際は、[uncalculable_stocks.csv](file:///home/irom/dev/stock-analyzer-core/data/output/uncalculable_stocks.csv) を照会し、`Uncalculable_Reason`（例: `第1層足切り: 極小流動性トラップ`）および `Detail`（例: `20日平均売買代金不足 (1,123万円 < 3,000万円)`）を即座に回答する。
+   - ユーザーから「○○社のPERはなぜ載っていないのか？」「なぜこの銘柄がレポートにないのか？」と問われた際は、[uncalculable_stocks.csv](file:///home/irom/dev/stock-analyzer-core/data/output/uncalculable_stocks.csv) を照会し、`filter_reason`（例: `極小流動性トラップ`）および `filter_detail`（例: `20日平均売買代金不足 (1,123万円 < 3,000万円)`）を即座に回答する。
+   - `daily_report.csv` で指標が `-` の場合は、「その指標の元データが無く、算出もできないため」と回答する（推定値は出力していない）。
 
 ---
 
 ## 7. 改訂履歴 (Revision History)
 
+- **v3.0 (2026-10-02)**: **現行スキーマへ全面改訂**。
+  - `daily_report.csv` を実際の 24 カラム、`uncalculable_stocks.csv` を実際の 64 カラム（`filter_reason` / `filter_detail`）の定義に合わせた。コメント行（`# Generated At`）・`Triggers` 列などの廃止済み記述を削除。
+  - 指標の欠損を `-` とする仕様を明文化（仮の PER・PBR・配当利回り・時価総額・ROE の出力を廃止）。配当利回り・ROE の 100 倍表示バグを修正。
+  - `*_Src`（出所）列の意味を定義。
 - **v1.0 (2026-09-20)**: 初版作成（旧スキーマ・`_Src` 列形式）。
 - **v2.0 (2026-09-21)**: **メジャー改訂**。
-  - `daily_report.csv`（完全評価可能・欠損ゼロ）と `uncalculable_stocks.csv`（算出不能・理由付き）の2ファイル完全分離アーキテクチャの仕様を規定。
+  - `daily_report.csv`（完全評価可能・欠損ゼロ。※v3.0 で仕様変更）と `uncalculable_stocks.csv`（算出不能・理由付き）の2ファイル完全分離アーキテクチャの仕様を規定。
   - 全19カラムの完全クリーン仕様および全7大算出不能理由カテゴリを定義。
   - 連続グラデーション（リニア傾斜配点）クオンツモデルの配点構造を明文化。
 - **v2.1 (2026-09-21)**: **評価エンジン正式昇格・指標判定死角の解消**。

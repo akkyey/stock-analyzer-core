@@ -48,7 +48,7 @@ Colab のランタイムと Google Drive 連携においては、一般的なロ
 flowchart TD
     subgraph Persistent_Layer ["【永続層】Google Drive (/content/drive/MyDrive/StockAnalyzer/)"]
         direction TB
-        P_DB[("stock_analyzer.duckdb<br>(財務・開示メタデータ単一DB: 数MB〜数十MB)")]
+        P_DB[("stock_analyzer.duckdb<br>(財務・株価履歴の単一DB: 約290MB。.bak と合わせて約580MB)")]
         P_Out["最終レポート CSV<br>(daily_report.csv / uncalculable_stocks.csv)"]
     end
 
@@ -70,7 +70,7 @@ flowchart TD
 | 領域 | パス | 格納対象 | 特徴・管理方針 |
 | :--- | :--- | :--- | :--- |
 | **作業層**<br>(Local SSD) | `/content/working/` | ・実行用 DuckDB (`cache/stock_analyzer.duckdb`)<br>・ダウンロードした生 ZIP<br>・Polars 中間テーブル | **Colab 内蔵 高速ローカル SSD**。<br>すべての高頻度 I/O はここで行い、生 ZIP はパース直後に即時削除（`unlink`）してディスクを圧迫させない。セッション切断で破棄される前提の一時領域。 |
-| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/`<br>（※`drive_folder_name` により任意のフォルダ名・相対階層・共有ドライブへ変更可能） | ・`cache/stock_analyzer.duckdb`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB を消費させない（数十MB未満）。 |
+| **永続層**<br>(Google Drive) | `/content/drive/MyDrive/StockAnalyzer/`<br>（※`drive_folder_name` により任意のフォルダ名・相対階層・共有ドライブへ変更可能） | ・`cache/stock_analyzer.duckdb`<br>・`output/daily_report.csv`<br>・`output/uncalculable_stocks.csv`<br>・`config/custom_config.json` | **ユーザーの Google Drive**。<br>細切れファイルは一切置かず、単一 DB（約290MB。直前の世代 `.bak` と合わせて約580MB）と最終 CSV（2ファイル）のみを保持。ユーザーの無料枠 15GB に対しては十分に小さい（約4%）。 |
 
 ### 3.2 同期ライフサイクル（Stage-and-Sync 規約）
 1. **[Pull Phase: 実行開始時 & 整合性検証（3段構えの復元）]**:
