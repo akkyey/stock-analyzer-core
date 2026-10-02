@@ -158,9 +158,9 @@ class AcquisitionPhase(BasePhase):
                         )
                         break
 
-                    # DB履歴が薄い場合は 1y、十分なら 2d (差分) を取得
+                    # DB履歴が薄い場合は 3mo（約60日、RSI/MA算出に十分かつ高速）、十分なら 2d (差分) を取得
                     is_db_thin = df_db_hist_all.height < (len(target_codes) * 10)
-                    period_to_use = "1y" if is_db_thin else "2d"
+                    period_to_use = "3mo" if is_db_thin else "2d"
 
                     try:
                         # [v10] fetch_stock_data は内部で yf.download(threads=True) を呼ぶため、ここは軽量
