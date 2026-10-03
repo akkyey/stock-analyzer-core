@@ -257,6 +257,9 @@ class DuckDBRepository:
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS bps DOUBLE"
             )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_fundamentals_code ON fundamentals(code)"
+            )
             # 財務値の出所となった書類の決算期末・提出日時。古い期の書類 (過年度の訂正報告書など)
             # で新しい値を上書きしないための判定と、株式分割の調整に使う。
             # period_end/submitted_at は損益・1 株当たり指標 (有価証券報告書)、
