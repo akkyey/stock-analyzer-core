@@ -10,7 +10,7 @@
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypeGuard
 
 from src.fetcher.xbrl_parser import (
     KIND_ANNUAL,
@@ -35,7 +35,7 @@ ANNUAL_PL_FIELDS = (
 INTERIM_FIELDS = XbrlParser.INTERIM_FIELDS
 
 
-def _is_num(v: Any) -> bool:
+def _is_num(v: Any) -> TypeGuard[float]:
     return isinstance(v, (int, float)) and v == v  # NaN を除く
 
 

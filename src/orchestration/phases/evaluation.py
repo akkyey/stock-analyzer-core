@@ -259,9 +259,11 @@ class EvaluationPhase(BasePhase):
         else:
             funda_repo = FundamentalsRepository()
         if hasattr(funda_repo, "load_all"):
-            return funda_repo.load_all()
+            res = funda_repo.load_all()
+            return res if isinstance(res, pl.DataFrame) else pl.DataFrame()
         if hasattr(funda_repo, "get_all_pl"):
-            return funda_repo.get_all_pl()
+            res = funda_repo.get_all_pl()
+            return res if isinstance(res, pl.DataFrame) else pl.DataFrame()
         return pl.DataFrame()
 
     def _join_fundamentals(self, df: pl.DataFrame, df_fundamentals: pl.DataFrame) -> pl.DataFrame:

@@ -239,10 +239,10 @@ class AcquisitionPhase(BasePhase):
         target_codes = self._select_targets(repo, target_codes)
         return self._fetch_market_data(repo, fetcher, market_repo, target_codes)
 
-    def _ensure_stock_master(self, repo: Any, fetcher: Any) -> list:
+    def _ensure_stock_master(self, repo: Any, fetcher: Any) -> list[str]:
         """銘柄マスタを用意し (未登録なら JPX から初期登録、月次で JPX と同期)、取得対象のコードを返す。"""
         # 1. ターゲット銘柄の特定 (未登録時は JPX から自動初期シード)
-        target_codes = repo.get_all_codes()
+        target_codes: list[str] = list(repo.get_all_codes() or [])
         if not target_codes:
             self.log_info(
                 "ℹ️ 銘柄マスタが未登録です。JPX銘柄リストから初期登録を実行します..."
@@ -254,7 +254,7 @@ class AcquisitionPhase(BasePhase):
                         jpx_df[["code", "name", "sector", "market"]]
                     ).with_columns(pl.lit(True).alias("is_active"))
                     repo.save_stocks(df_pl)
-                    target_codes = repo.get_all_codes()
+                    target_codes = list(repo.get_all_codes() or [])
                     print(
                         f"   ✅ 銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。",
                         flush=True,
@@ -275,7 +275,7 @@ class AcquisitionPhase(BasePhase):
                 )
                 record_fetch_stat(self.context, "master_added", res.added)
                 record_fetch_stat(self.context, "master_delisted", res.delisted)
-                target_codes = repo.get_all_codes()
+                target_codes = list(repo.get_all_codes() or [])
             elif res.status in ("skipped_unsafe", "failed"):
                 self.log_warn(f"銘柄マスタの更新をスキップしました: {res.detail}")
 
