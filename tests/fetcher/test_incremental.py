@@ -218,12 +218,15 @@ def test_surge_with_widened_limit_is_not_a_consolidation():
 
     df = pl.DataFrame(
         {
-            "Date": [datetime(2026, 2, d) for d in (9, 10, 12, 13)],
-            "Close": [198.0, 248.0, 328.0, 648.0],  # 前日までに 50 円・80 円 (制限値幅いっぱい) のストップ高
+            "Date": [datetime(2026, 2, d) for d in (6, 9, 10, 12, 13)],
+            "Close": [196.0, 198.0, 248.0, 328.0, 648.0],  # 50 円・80 円 (制限値幅いっぱい) のストップ高が連続
         }
     )
-    assert limit_may_be_widened(df["Close"].to_list(), 3)
+    assert limit_may_be_widened(df["Close"].to_list(), 4)
     assert infer_unrecorded_splits(df) == []
+    # 前日だけが制限値幅まで動いた (連続していない) 場合は、拡大とはみなさない
+    one_day = [330.0, 331.0, 332.0, 412.0, 824.0]
+    assert not limit_may_be_widened(one_day, 4)
     # 前日が静かなら、同じ 2 倍の段差は併合とみなす
     quiet = pl.DataFrame({"Date": [datetime(2026, 2, d) for d in (9, 10, 12, 13)], "Close": [328.0, 330.0, 329.0, 648.0]})
     assert infer_unrecorded_splits(quiet) == [(date(2026, 2, 13), 0.5)]

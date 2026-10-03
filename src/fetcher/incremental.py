@@ -140,7 +140,7 @@ def daily_price_limit(price: float) -> float:
     return float(price) * 0.3
 
 
-# 前日にこの割合以上、制限値幅まで動いた銘柄は、制限値幅が拡大している可能性がある
+# 制限値幅の 80% 以上動いた日を、「制限値幅まで動いた日」とみなす割合
 LIMIT_HIT_RATIO = 0.8
 
 
@@ -149,20 +149,33 @@ def exceeds_daily_limit(prev: float, cur: float) -> bool:
     return abs(cur - prev) > daily_price_limit(prev)
 
 
+def _hit_limit(closes: list, j: int) -> int:
+    """j 日目に制限値幅まで動いたか。上げなら +1、下げなら -1、そうでなければ 0。"""
+    if j < 1:
+        return 0
+    prev, cur = closes[j - 1], closes[j]
+    if not prev or not cur or prev <= 0 or cur <= 0:
+        return 0
+    if abs(cur - prev) < LIMIT_HIT_RATIO * daily_price_limit(prev):
+        return 0
+    return 1 if cur > prev else -1
+
+
 def limit_may_be_widened(closes: list, i: int) -> bool:
     """i 日目の制限値幅が、拡大されている可能性があるか。
 
     東証は、2 営業日連続でストップ高 (安) となり売買が成立しなかった銘柄の制限値幅を、
-    翌営業日から拡大する (通常の 2 倍など)。前日に制限値幅まで動いていれば、当日の変化額が
-    通常の制限値幅を超えても、値動きでありうる (6072 は Kaihou との提携発表の後、
-    4 日連続のストップ高となり、328 円 → 648 円と 1 日で約 2 倍になった。併合ではない)。
+    翌営業日から拡大する (通常の 2 倍など)。直前の 2 日が続けて同じ向きに制限値幅まで
+    動いていれば、当日の変化額が通常の制限値幅を超えても、値動きでありうる。
+    - 6072: Kaihou との提携発表の後、4 日連続のストップ高。328 円 → 648 円と 1 日で約 2 倍
+    - 4316: 出来高がほぼ無いままストップ安が続き、387 円 → 192 円
+    どちらも併合ではない。出来高は見ていない (取得できない場合があるため近似)。
     """
-    if i < 2:
+    if i < 3:
         return False
-    pp, p = closes[i - 2], closes[i - 1]
-    if not pp or not p or pp <= 0 or p <= 0:
-        return False
-    return abs(p - pp) >= LIMIT_HIT_RATIO * daily_price_limit(pp)
+    d1, d2 = _hit_limit(closes, i - 1), _hit_limit(closes, i - 2)
+    return d1 != 0 and d1 == d2
+
 
 _PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Adj Close")
 
