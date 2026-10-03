@@ -225,25 +225,22 @@ class AcquisitionPhase(BasePhase):
     def execute(self, df: Optional[pl.DataFrame] = None) -> Any:
         self.log_info("🚀 Starting Turbo Data Acquisition Phase...")
 
-        from pathlib import Path
-
-        from src.fetcher.edinet_fetcher import (
-            EdinetAuthenticationError,
-            EdinetFetcher,
-            mask_api_key,
-        )
         from src.fetcher.facade import DataFetcher
-        from src.fetcher.turbo_acquisition import TurboAcquisitionManager
-        from src.fetcher.xbrl_parser import XbrlParser
         from src.repositories.duck_repository import DuckDBRepository
-        from src.repositories.fundamentals_repository import FundamentalsRepository
         from src.repositories.market_data_repository import MarketDataRepository
-        from src.services.edinet_bridge import EdinetBridge
 
         repo = DuckDBRepository()
         fetcher = DataFetcher(self.context.config)
         market_repo = MarketDataRepository()
 
+        target_codes = self._ensure_stock_master(repo, fetcher)
+        self._ensure_fundamentals(repo)
+        self._sync_edinet(repo)
+        target_codes = self._select_targets(repo, target_codes)
+        return self._fetch_market_data(repo, fetcher, market_repo, target_codes)
+
+    def _ensure_stock_master(self, repo: Any, fetcher: Any) -> list:
+        """銘柄マスタを用意し (未登録なら JPX から初期登録、月次で JPX と同期)、取得対象のコードを返す。"""
         # 1. ターゲット銘柄の特定 (未登録時は JPX から自動初期シード)
         target_codes = repo.get_all_codes()
         if not target_codes:
@@ -281,6 +278,14 @@ class AcquisitionPhase(BasePhase):
                 target_codes = repo.get_all_codes()
             elif res.status in ("skipped_unsafe", "failed"):
                 self.log_warn(f"銘柄マスタの更新をスキップしました: {res.detail}")
+
+        return target_codes
+
+    def _ensure_fundamentals(self, repo: Any) -> None:
+        """財務データの初期シード・成長率の補完・旧版で消えた値の復旧 (いずれも必要な場合のみ)。"""
+        from pathlib import Path
+
+        from src.repositories.fundamentals_repository import FundamentalsRepository
 
         # 1-2. 財務データの初期シード (全件ベースラインデータ未登録時はバンドルされたシードデータから自動投入)
         funda_repo = FundamentalsRepository(repo)
@@ -326,6 +331,18 @@ class AcquisitionPhase(BasePhase):
         except Exception as e:
             self.log_error(f"❌ 財務値の復旧に失敗しました (継続): {e}")
 
+
+    def _sync_edinet(self, repo: Any) -> None:
+        """EDINET から最新の財務データを取り込む (前回の走査日以降の書類)。"""
+        from src.fetcher.edinet_fetcher import (
+            EdinetAuthenticationError,
+            EdinetFetcher,
+            mask_api_key,
+        )
+        from src.fetcher.turbo_acquisition import TurboAcquisitionManager
+        from src.fetcher.xbrl_parser import XbrlParser
+        from src.services.edinet_bridge import EdinetBridge
+
         # [Phase 0/1] 財務データの正典同期 (Fundamental Truth Sync)
         fetcher_cfg = self.context.config.get("fetcher", {})
         if fetcher_cfg.get("enable_edinet_turbo", True):
@@ -362,12 +379,15 @@ class AcquisitionPhase(BasePhase):
                     f"❌ EDINET sync failed (Skipped): {mask_api_key(str(e))}"
                 )
 
+
+    def _select_targets(self, repo: Any, target_codes: list) -> list:
+        """取得対象を、件数の上限と再取得の一時停止 (市場データが提供されない銘柄) で絞る。"""
         if self.context.limit:
             target_codes = target_codes[: self.context.limit]
 
         # 市場データを提供しない銘柄 (PRO Market 等) は、連続して取得できなかった場合に
         # 一定期間 (30日) 再取得を止める。除外銘柄リストには「取得不能」として残る
-        from src.services.stock_master import get_cooling_codes, update_no_data_tracking
+        from src.services.stock_master import get_cooling_codes
 
         try:
             cooling = get_cooling_codes(repo)
@@ -380,6 +400,14 @@ class AcquisitionPhase(BasePhase):
                 f"⏭️ 市場データが提供されない銘柄 {len(cooling)} 件は再取得を一時停止しています (30日ごとに再確認)。"
             )
             record_fetch_stat(self.context, "skipped_no_data_stocks", len(cooling))
+
+        return target_codes
+
+    def _fetch_market_data(
+        self, repo: Any, fetcher: Any, market_repo: Any, target_codes: list
+    ) -> Dict[str, Any]:
+        """株価を取得し、DB の履歴と結合・株式分割を調整した銘柄ごとの履歴を返す。"""
+        from src.services.stock_master import update_no_data_tracking
 
         print(
             f"📡 全 {len(target_codes)} 銘柄の市場データ取得を開始します...",
@@ -518,6 +546,44 @@ class AcquisitionPhase(BasePhase):
         producer_thread.start()
 
         # 4. Consumer 集約 (指摘7-3: タイムアウト耐性とプロデューサー生存確認)
+        all_data_map = self._consume(result_queue, producer_thread, stop_event, num_targets)
+
+        stop_event.set()  # 正常終了時も確実にセット
+
+        # 全期間の取り直し (株式分割の記録) が十分に済んだら記録する。取得率が低い実行
+        # (通信障害など) では記録せず、次回もう一度取り直す
+        if needs_split_backfill and num_targets and len(all_data_map) >= num_targets * 0.7:
+            try:
+                repo.set_meta(self.SPLIT_BACKFILL_META_KEY, get_current_time().date().isoformat())
+            except Exception as e:
+                self.log_warn(f"株式分割の記録状態を保存できませんでした: {e}")
+
+        try:
+            tracked = update_no_data_tracking(
+                repo,
+                fetched=set(all_data_map),
+                attempted=list(target_codes),
+                codes_with_history={str(k[0]) for k in db_hist_by_code},
+            )
+            record_fetch_stat(self.context, "no_data_failed", tracked["failed"])
+            record_fetch_stat(self.context, "no_data_cooled", tracked["cooled"])
+        except Exception as e:
+            self.log_warn(f"取得不能銘柄の記録に失敗しました (継続): {e}")
+
+        print(
+            f"✅ 市場データ取得完了: 全 {len(all_data_map)} 銘柄のデータを準備しました。",
+            flush=True,
+        )
+        return all_data_map
+
+    def _consume(
+        self,
+        result_queue: queue.Queue,
+        producer_thread: threading.Thread,
+        stop_event: threading.Event,
+        num_targets: int,
+    ) -> Dict[str, Any]:
+        """Producer から届いた銘柄ごとの履歴を集める (タイムアウト耐性とプロデューサー生存確認)。"""
         all_data_map: Dict[str, Any] = {}
         processed_count = 0
         last_item_at = time.monotonic()
@@ -557,30 +623,4 @@ class AcquisitionPhase(BasePhase):
                     flush=True,
                 )
 
-        stop_event.set()  # 正常終了時も確実にセット
-
-        # 全期間の取り直し (株式分割の記録) が十分に済んだら記録する。取得率が低い実行
-        # (通信障害など) では記録せず、次回もう一度取り直す
-        if needs_split_backfill and num_targets and len(all_data_map) >= num_targets * 0.7:
-            try:
-                repo.set_meta(self.SPLIT_BACKFILL_META_KEY, get_current_time().date().isoformat())
-            except Exception as e:
-                self.log_warn(f"株式分割の記録状態を保存できませんでした: {e}")
-
-        try:
-            tracked = update_no_data_tracking(
-                repo,
-                fetched=set(all_data_map),
-                attempted=list(target_codes),
-                codes_with_history={str(k[0]) for k in db_hist_by_code},
-            )
-            record_fetch_stat(self.context, "no_data_failed", tracked["failed"])
-            record_fetch_stat(self.context, "no_data_cooled", tracked["cooled"])
-        except Exception as e:
-            self.log_warn(f"取得不能銘柄の記録に失敗しました (継続): {e}")
-
-        print(
-            f"✅ 市場データ取得完了: 全 {len(all_data_map)} 銘柄のデータを準備しました。",
-            flush=True,
-        )
         return all_data_map

@@ -56,55 +56,65 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
     Returns:
         書き込む項目 (code を含む)。古い期の書類などで書き込むものが無ければ None。
     """
-    code = item["code"]
-    kind = item.get("kind")
     period_end = item.get("period_end") or ""
     submitted = item.get("submit_date") or None
     stored_pl = stored.get("period_end") or ""
     stored_bs = stored.get("bs_period_end") or ""
-    record: Dict[str, Any] = {"code": code}
-
-    def put(fields: tuple) -> None:
-        for f in fields:
-            if _is_num(item.get(f)):
-                record[f] = float(item[f])
+    kind = item.get("kind")
 
     if kind == KIND_ANNUAL:
         if _before(period_end, stored_pl):
             return None
-        put(ANNUAL_PL_FIELDS)
-        record["period_end"] = period_end or None
-        record["submitted_at"] = submitted
-        if not _before(period_end, stored_bs):
-            put(BALANCE_SHEET_FIELDS)
-            record["bs_period_end"] = period_end or None
-            record["bs_submitted_at"] = submitted
-        # 報告値が無い場合のみ計算で補う
-        if "roe" not in record and _is_num(item.get("net_profit")) and _is_num(item.get("net_assets")) and item["net_assets"] > 0:
-            record["roe"] = item["net_profit"] / item["net_assets"] * 100.0
-        if _is_num(item.get("sales")) and _is_num(item.get("operating_income")) and item["sales"] > 0:
-            record["operating_margin"] = item["operating_income"] / item["sales"] * 100.0
+        record = _annual_record(item, period_end, submitted, update_bs=not _before(period_end, stored_bs))
     elif kind == KIND_INTERIM:
         # 同じ期の再適用は同じ値になるため許容し、古い期だけを除く
         if _before(period_end, stored_bs) or _before(period_end, stored_pl, or_equal=True):
             return None
-        put(INTERIM_FIELDS)
-        record["bs_period_end"] = period_end or None
-        record["bs_submitted_at"] = submitted
+        record = _pick(item, INTERIM_FIELDS)
+        record.update(bs_period_end=period_end or None, bs_submitted_at=submitted)
     else:
         return None
 
+    _fill_equity_ratio(record)
+    if not record:
+        return None
+    return {"code": item["code"], **record}
+
+
+def _pick(item: Dict[str, Any], fields: tuple) -> Dict[str, Any]:
+    """item の項目のうち、数値のものだけを取り出す。"""
+    return {f: float(item[f]) for f in fields if _is_num(item.get(f))}
+
+
+def _annual_record(
+    item: Dict[str, Any], period_end: str, submitted: Optional[str], update_bs: bool
+) -> Dict[str, Any]:
+    """有価証券報告書から書き込む項目 (貸借対照表は、半期報告書の方が新しくなければ更新)。"""
+    record = _pick(item, ANNUAL_PL_FIELDS)
+    record.update(period_end=period_end or None, submitted_at=submitted)
+    if update_bs:
+        record.update(_pick(item, BALANCE_SHEET_FIELDS))
+        record.update(bs_period_end=period_end or None, bs_submitted_at=submitted)
+    # 報告値が無い場合のみ計算で補う
+    net_profit, net_assets = item.get("net_profit"), item.get("net_assets")
+    if "roe" not in record and _is_num(net_profit) and _is_num(net_assets) and net_assets > 0:
+        record["roe"] = net_profit / net_assets * 100.0
+    sales, operating_income = item.get("sales"), item.get("operating_income")
+    if _is_num(sales) and _is_num(operating_income) and sales > 0:
+        record["operating_margin"] = operating_income / sales * 100.0
+    return record
+
+
+def _fill_equity_ratio(record: Dict[str, Any]) -> None:
+    """自己資本比率の報告が無ければ、純資産 / 総資産 で補う。"""
+    net_assets, total_assets = record.get("net_assets"), record.get("total_assets")
     if (
         "equity_ratio" not in record
-        and _is_num(record.get("net_assets"))
-        and _is_num(record.get("total_assets"))
-        and record["total_assets"] > 0
+        and _is_num(net_assets)
+        and _is_num(total_assets)
+        and total_assets > 0
     ):
-        record["equity_ratio"] = record["net_assets"] / record["total_assets"] * 100.0
-
-    if len(record) <= 1:
-        return None
-    return record
+        record["equity_ratio"] = net_assets / total_assets * 100.0
 
 
 class EdinetBridge:

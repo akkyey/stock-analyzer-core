@@ -213,81 +213,13 @@ class XbrlParser:
             self.logger.warning(f"⚠️ XML parse failed: {e}")
             return {}
 
-        # (要素名, コンテキスト) -> 値。同じ組の重複は先勝ち (値は同一)
-        facts: dict[tuple[str, str], Optional[float]] = {}
-        period_ends: dict[str, str] = {}
-        for el in tree.iter():
-            if not isinstance(el.tag, str):
-                continue
-            local = et.QName(el).localname
-            if local == "context":
-                ctx_id = el.get("id", "")
-                end = el.find(".//{*}instant")
-                if end is None:
-                    end = el.find(".//{*}endDate")
-                if end is not None and end.text:
-                    period_ends[ctx_id] = end.text.strip()
-                continue
-            ctx = el.get("contextRef")
-            if ctx is None:
-                continue
-            facts.setdefault((local, ctx), self._to_float(el.text))
-
-        contexts_used = {ctx for _, ctx in facts}
-        # 当期の期間コンテキストがある種類 (有価証券報告書を優先)。どちらも無い書類は対象外
-        kind = next(
-            (
-                k
-                for k, c in _CONTEXTS.items()
-                if any(ctx.startswith(c["duration"]) for ctx in contexts_used)
-            ),
-            None,
-        )
+        facts, period_ends = self._collect_facts(tree)
+        kind = self._detect_kind(facts)
         if kind is None:
             return {}
         ctxs = _CONTEXTS[kind]
-
-        # 要約表に連結 (メンバー無し) の値が 1 つでもあれば連結、無ければ単体の会社
-        consolidated = any(
-            name.endswith("SummaryOfBusinessResults") and ctx in (ctxs["duration"], ctxs["instant"])
-            and value is not None
-            for (name, ctx), value in facts.items()
-        )
-        scope = "" if consolidated else NON_CONSOLIDATED
-
-        def lookup(names: tuple[str, ...], base_ctx: str, allow_non_consolidated: bool) -> Optional[float]:
-            candidates = [base_ctx + scope]
-            if allow_non_consolidated and scope == "":
-                candidates.append(base_ctx + NON_CONSOLIDATED)
-            for ctx in candidates:
-                for name in names:
-                    value = facts.get((name, ctx))
-                    if value is not None:
-                        return value
-            return None
-
-        extracted: Dict[str, Any] = {}
-        for field, period, names, allow_nc in self.SUMMARY_FIELDS:
-            value = lookup(names, ctxs[period], allow_nc)
-            if value is not None:
-                extracted[field] = value
-
-        operating_income = lookup(self.OPERATING_INCOME_TAGS, ctxs["duration"], False)
-        if operating_income is not None:
-            extracted["operating_income"] = operating_income
-
-        if kind == KIND_ANNUAL:
-            prev = lookup(self.NET_PROFIT_TAGS, ctxs["prior_duration"], False)
-            if prev is not None:
-                extracted["prev_net_profit"] = prev
-
-        for field in self.RATIO_FIELDS:
-            if field in extracted:
-                extracted[field] = extracted[field] * 100.0
-
-        if kind == KIND_INTERIM:
-            extracted = {k: v for k, v in extracted.items() if k in self.INTERIM_FIELDS}
-
+        consolidated = self._is_consolidated(facts, ctxs)
+        extracted = self._extract_fields(facts, ctxs, kind, "" if consolidated else NON_CONSOLIDATED)
         if not extracted:
             return {}
         return {
@@ -296,3 +228,88 @@ class XbrlParser:
             "consolidated": consolidated,
             **extracted,
         }
+
+    def _collect_facts(
+        self, tree: Any
+    ) -> tuple[dict[tuple[str, str], Optional[float]], dict[str, str]]:
+        """(要素名, コンテキスト) -> 値 と、コンテキスト -> 期末日 を集める。
+
+        同じ (要素名, コンテキスト) の重複は先勝ち (値は同一)。
+        """
+        facts: dict[tuple[str, str], Optional[float]] = {}
+        period_ends: dict[str, str] = {}
+        for el in tree.iter():
+            if not isinstance(el.tag, str):
+                continue
+            local = et.QName(el).localname
+            if local == "context":
+                end = el.find(".//{*}instant")
+                if end is None:
+                    end = el.find(".//{*}endDate")
+                if end is not None and end.text:
+                    period_ends[el.get("id", "")] = end.text.strip()
+                continue
+            ctx = el.get("contextRef")
+            if ctx is not None:
+                facts.setdefault((local, ctx), self._to_float(el.text))
+        return facts, period_ends
+
+    @staticmethod
+    def _detect_kind(facts: dict) -> Optional[str]:
+        """当期の期間コンテキストがある書類の種類 (有価証券報告書を優先)。どちらも無ければ None。"""
+        contexts_used = {ctx for _, ctx in facts}
+        return next(
+            (
+                k
+                for k, c in _CONTEXTS.items()
+                if any(ctx.startswith(c["duration"]) for ctx in contexts_used)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _is_consolidated(facts: dict, ctxs: dict[str, str]) -> bool:
+        """要約表に連結 (メンバー無し) の値が 1 つでもあれば連結、無ければ単体の会社。"""
+        return any(
+            name.endswith("SummaryOfBusinessResults")
+            and ctx in (ctxs["duration"], ctxs["instant"])
+            and value is not None
+            for (name, ctx), value in facts.items()
+        )
+
+    def _extract_fields(
+        self, facts: dict, ctxs: dict[str, str], kind: str, scope: str
+    ) -> Dict[str, Any]:
+        """要約表と財務諸表本体から項目を取り出す (比率は % に換算、半期は貸借対照表の項目だけ)。"""
+
+        def lookup(names: tuple[str, ...], base_ctx: str, allow_non_consolidated: bool) -> Optional[float]:
+            candidates = [base_ctx + scope]
+            if allow_non_consolidated and scope == "":
+                candidates.append(base_ctx + NON_CONSOLIDATED)
+            return next(
+                (
+                    facts[(name, ctx)]
+                    for ctx in candidates
+                    for name in names
+                    if facts.get((name, ctx)) is not None
+                ),
+                None,
+            )
+
+        lookups = [
+            (field, names, ctxs[period], allow_nc)
+            for field, period, names, allow_nc in self.SUMMARY_FIELDS
+        ]
+        lookups.append(("operating_income", self.OPERATING_INCOME_TAGS, ctxs["duration"], False))
+        if kind == KIND_ANNUAL:
+            lookups.append(("prev_net_profit", self.NET_PROFIT_TAGS, ctxs["prior_duration"], False))
+
+        extracted: Dict[str, Any] = {}
+        for field, names, base_ctx, allow_nc in lookups:
+            value = lookup(names, base_ctx, allow_nc)
+            if value is not None:
+                extracted[field] = value * 100.0 if field in self.RATIO_FIELDS else value
+
+        if kind == KIND_INTERIM:
+            extracted = {k: v for k, v in extracted.items() if k in self.INTERIM_FIELDS}
+        return extracted

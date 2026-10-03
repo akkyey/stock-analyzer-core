@@ -204,54 +204,9 @@ class EvaluationPhase(BasePhase):
 
     def _enrich_master_data(self, df: pl.DataFrame) -> pl.DataFrame:
         """業種・ファンダメンタルズ情報を結合する"""
-        from src.repositories.fundamentals_repository import FundamentalsRepository
-
-        # 銘柄マスタの結合 (context.stock_repo 優先、フォールバックとして duck_repo.load_stocks)
-        stocks_df = pl.DataFrame()
-        if hasattr(self.context, "stock_repo") and self.context.stock_repo:
-            try:
-                stocks_df = self.context.stock_repo.load_all()
-            except Exception:
-                stocks_df = self.context.duck_repo.load_stocks()
-        if stocks_df.is_empty():
-            stocks_df = self.context.duck_repo.load_stocks()
-
         df = df.with_columns(pl.col("code").cast(pl.Utf8))
-
-        if not stocks_df.is_empty():
-            stocks_df = stocks_df.with_columns(pl.col("code").cast(pl.Utf8))
-            candidate_cols = ["code", "name", "sector", "market", "status", "exclusion_reason"]
-            master_cols = [c for c in candidate_cols if c in stocks_df.columns]
-            # df側のマスター列重複をドロップ
-            df_metrics = df.drop(
-                [c for c in master_cols if c in df.columns and c != "code"]
-            )
-            # 銘柄マスタの全銘柄を保持するため、stocks_df を主として left join
-            # （時系列データのない銘柄も price=None として保持され、PreFilter で『市場データ取得不能』として隔離回収される）
-            df = stocks_df.select(master_cols).join(df_metrics, on="code", how="left")
-            if "sector" in df.columns:
-                df = df.with_columns([pl.col("sector").fill_null("Other")])
-            if "name" in df.columns:
-                df = df.with_columns([pl.col("name").fill_null("Unknown")])
-
-        # 財務データの結合 (context.funda_repo 優先)
-        if hasattr(self.context, "funda_repo") and self.context.funda_repo:
-            funda_repo = self.context.funda_repo
-        else:
-            funda_repo = FundamentalsRepository()
-
-        if hasattr(funda_repo, "load_all"):
-            df_fundamentals = funda_repo.load_all()
-        elif hasattr(funda_repo, "get_all_pl"):
-            df_fundamentals = funda_repo.get_all_pl()
-        else:
-            df_fundamentals = pl.DataFrame()
-
-        if not df_fundamentals.is_empty():
-            df_fundamentals = df_fundamentals.with_columns(pl.col("code").cast(pl.Utf8))
-            f_cols = [c for c in df_fundamentals.columns if c != "code"]
-            df = self._clean_columns(df, f_cols)
-            df = df.join(df_fundamentals, on="code", how="left")
+        df = self._join_master(df, self._load_stocks())
+        df = self._join_fundamentals(df, self._load_fundamentals())
 
         # 株式分割の後に書類が提出されていない銘柄の 1 株当たり指標を補正する
         try:
@@ -263,7 +218,56 @@ class EvaluationPhase(BasePhase):
 
         # 結合後に万一混入した _right サフィックス列をパージ (Schema Isolation Guard)
         right_cols = [c for c in df.columns if c.endswith("_right")]
-        if right_cols:
-            df = df.drop(right_cols)
+        return df.drop(right_cols) if right_cols else df
 
+    def _load_stocks(self) -> pl.DataFrame:
+        """銘柄マスタ (context.stock_repo 優先、フォールバックとして duck_repo.load_stocks)"""
+        stocks_df = pl.DataFrame()
+        if hasattr(self.context, "stock_repo") and self.context.stock_repo:
+            try:
+                stocks_df = self.context.stock_repo.load_all()
+            except Exception:
+                stocks_df = self.context.duck_repo.load_stocks()
+        if stocks_df.is_empty():
+            stocks_df = self.context.duck_repo.load_stocks()
+        return stocks_df
+
+    @staticmethod
+    def _join_master(df: pl.DataFrame, stocks_df: pl.DataFrame) -> pl.DataFrame:
+        if stocks_df.is_empty():
+            return df
+        stocks_df = stocks_df.with_columns(pl.col("code").cast(pl.Utf8))
+        candidate_cols = ["code", "name", "sector", "market", "status", "exclusion_reason"]
+        master_cols = [c for c in candidate_cols if c in stocks_df.columns]
+        # df側のマスター列重複をドロップ
+        df_metrics = df.drop([c for c in master_cols if c in df.columns and c != "code"])
+        # 銘柄マスタの全銘柄を保持するため、stocks_df を主として left join
+        # （時系列データのない銘柄も price=None として保持され、PreFilter で『市場データ取得不能』として隔離回収される）
+        df = stocks_df.select(master_cols).join(df_metrics, on="code", how="left")
+        if "sector" in df.columns:
+            df = df.with_columns([pl.col("sector").fill_null("Other")])
+        if "name" in df.columns:
+            df = df.with_columns([pl.col("name").fill_null("Unknown")])
         return df
+
+    def _load_fundamentals(self) -> pl.DataFrame:
+        """財務データ (context.funda_repo 優先)"""
+        from src.repositories.fundamentals_repository import FundamentalsRepository
+
+        if hasattr(self.context, "funda_repo") and self.context.funda_repo:
+            funda_repo = self.context.funda_repo
+        else:
+            funda_repo = FundamentalsRepository()
+        if hasattr(funda_repo, "load_all"):
+            return funda_repo.load_all()
+        if hasattr(funda_repo, "get_all_pl"):
+            return funda_repo.get_all_pl()
+        return pl.DataFrame()
+
+    def _join_fundamentals(self, df: pl.DataFrame, df_fundamentals: pl.DataFrame) -> pl.DataFrame:
+        if df_fundamentals.is_empty():
+            return df
+        df_fundamentals = df_fundamentals.with_columns(pl.col("code").cast(pl.Utf8))
+        f_cols = [c for c in df_fundamentals.columns if c != "code"]
+        df = self._clean_columns(df, f_cols)
+        return df.join(df_fundamentals, on="code", how="left")

@@ -206,35 +206,63 @@ class PreFilter:
             )
             return PreFilterResult(passed_df=df_candidates, rejected_df=empty_rejected)
 
-        # 設定値の反映（親和的フォールバック・未知キー検知）
+        th = cls._thresholds(config)
+        df, has_freshness = cls._attach_liquidity(df_candidates, df_liquidity)
+
+        # Python辞書走査による厳格・明示的な理由付与
+        passed_codes: list[Any] = []
+        rejections: list[dict[str, Any]] = []
+        for row in df.to_dicts():
+            rejection = cls._first_rejection(row, th, has_freshness)
+            if rejection is None:
+                passed_codes.append(row["code"])
+            else:
+                reason, detail = rejection
+                rejections.append(
+                    {"code": row["code"], "filter_reason": reason, "filter_detail": detail}
+                )
+
+        passed_df = df.filter(pl.col("code").is_in(passed_codes)) if passed_codes else df.clear()
+        reason_schema = {"filter_reason": pl.String, "filter_detail": pl.String}
+        if rejections:
+            reason_df = pl.DataFrame(rejections, schema={"code": pl.String, **reason_schema})
+            rejected_df = df.join(reason_df, on="code", how="inner")
+        else:
+            rejected_df = pl.DataFrame(schema={**df.schema, **reason_schema})
+
+        return PreFilterResult(passed_df=passed_df, rejected_df=rejected_df)
+
+    @classmethod
+    def _thresholds(cls, config: Optional[dict[str, Any]]) -> dict[str, Any]:
+        """設定値の反映（親和的フォールバック・未知キー検知）"""
         hf = (config or {}).get("hard_filters", {})
         unknown_keys = set(hf.keys()) - cls.KNOWN_HF_KEYS
         if unknown_keys:
             logger.warning(
                 f"⚠️ hard_filters に未知の設定キーが含まれています (無視されます): {unknown_keys}"
             )
+        return {
+            "min_tv_20d": float(hf.get("min_trading_value", cls.MIN_TRADING_VALUE_20D)),
+            "min_price": float(hf.get("min_price", cls.MIN_PRICE)),
+            "min_eq_ratio": float(hf.get("min_equity_ratio", cls.MIN_EQUITY_RATIO)),
+            "min_op_cf_margin": float(hf.get("min_op_cf_margin", cls.MIN_OP_CF_MARGIN)),
+            "target_markets": hf.get("target_markets", None),
+        }
 
-        min_tv_20d = float(hf.get("min_trading_value", cls.MIN_TRADING_VALUE_20D))
-        min_price = float(hf.get("min_price", cls.MIN_PRICE))
-        min_eq_ratio = float(hf.get("min_equity_ratio", cls.MIN_EQUITY_RATIO))
-        min_op_cf_margin = float(hf.get("min_op_cf_margin", cls.MIN_OP_CF_MARGIN))
-        target_markets = hf.get("target_markets", None)
+    LIQUIDITY_COLUMNS = (
+        "avg_trading_value_20d",
+        "zero_volume_days_5d",
+        "latest_trade_date",
+        "is_recent_trade",
+    )
 
-        # 流動性指標の結合
-        df = df_candidates
+    @classmethod
+    def _attach_liquidity(
+        cls, df: pl.DataFrame, df_liquidity: Optional[pl.DataFrame]
+    ) -> tuple[pl.DataFrame, bool]:
+        """流動性指標を結合し、無い列を既定値で補う。(結果, 鮮度を判定できるか) を返す。"""
         if df_liquidity is not None and not df_liquidity.is_empty():
-            cols_to_drop = [
-                c
-                for c in [
-                    "avg_trading_value_20d",
-                    "zero_volume_days_5d",
-                    "latest_trade_date",
-                    "is_recent_trade",
-                ]
-                if c in df.columns
-            ]
-            if cols_to_drop:
-                df = df.drop(cols_to_drop)
+            df = df.drop([c for c in cls.LIQUIDITY_COLUMNS if c in df.columns])
             df = df.join(df_liquidity, on="code", how="left")
             if "code_right" in df.columns:
                 df = df.drop("code_right")
@@ -245,9 +273,7 @@ class PreFilter:
             if "trading_value" in df.columns:
                 tv_expr = pl.col("trading_value").fill_null(0.0)
             if "volume" in df.columns and "price" in df.columns:
-                vp_expr = pl.col("volume").fill_null(0.0) * pl.col("price").fill_null(
-                    0.0
-                )
+                vp_expr = pl.col("volume").fill_null(0.0) * pl.col("price").fill_null(0.0)
                 # trading_value が未設定(0またはnull)の場合は volume * price を採用
                 tv_expr = pl.when(tv_expr > 0.0).then(tv_expr).otherwise(vp_expr)
             df = df.with_columns(tv_expr.alias("avg_trading_value_20d"))
@@ -263,204 +289,147 @@ class PreFilter:
 
         if "is_recent_trade" not in df.columns:
             df = df.with_columns(pl.lit(True).alias("is_recent_trade"))
+        return df, has_freshness
 
-        passed_rows = []
-        rejected_rows = []
+    @classmethod
+    def _first_rejection(
+        cls, row: dict[str, Any], th: dict[str, Any], has_freshness: bool
+    ) -> Optional[tuple[str, str]]:
+        """足切りルールを順に当て、最初に該当した (除外理由, 詳細) を返す。該当なしは None。"""
+        rules = (
+            cls._rule_delisted,
+            cls._rule_no_price,
+            cls._rule_freshness if has_freshness else None,
+            cls._rule_zero_volume,
+            cls._rule_liquidity,
+            cls._rule_low_price,
+            cls._rule_insolvent,
+            cls._rule_undisclosed,
+            cls._rule_cash_burn,
+            cls._rule_market,
+        )
+        for rule in rules:
+            if rule is not None:
+                rejection = rule(row, th)
+                if rejection is not None:
+                    return rejection
+        return None
 
-        # Python辞書走査による厳格・明示的な理由付与
-        records = df.to_dicts()
-        for row in records:
-            price = row.get("price")
-            equity_ratio = row.get("equity_ratio")
-            operating_cf = row.get("operating_cf")
-            sales = row.get("sales")
-            avg_tv = row.get("avg_trading_value_20d")
-            zero_days = row.get("zero_volume_days_5d")
-            latest_trade_date = row.get("latest_trade_date")
-            is_recent_trade = row.get("is_recent_trade")
-            sector = str(row.get("sector", "Other"))
+    # --- 足切りルール (この順に判定する) ------------------------------------------------
 
-            # 0. 上場廃止 (JPX 一覧から消えた銘柄。銘柄マスタの月次更新で status='delisted' になる)
-            if row.get("status") == "delisted":
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "上場廃止",
-                        "filter_detail": "JPX 上場銘柄一覧に掲載がありません (上場廃止・整理等)",
-                    }
-                )
-                continue
+    @staticmethod
+    def _rule_delisted(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 0. 上場廃止 (JPX 一覧から消えた銘柄。銘柄マスタの月次更新で status='delisted' になる)
+        if row.get("status") == "delisted":
+            return "上場廃止", "JPX 上場銘柄一覧に掲載がありません (上場廃止・整理等)"
+        return None
 
-            # 1. 株価データ欠損判定（市場データ取得不能: OHLCV未取得銘柄を最優先隔離）
-            if price is None:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "市場データ取得不能",
-                        "filter_detail": (
-                            "Yahoo Finance に株価データが提供されていません (PRO Market 等。30日ごとに再確認)"
-                            if str(row.get("exclusion_reason") or "").startswith("市場データ提供なし")
-                            else "市場価格データ欠損 (OHLCV未取得)"
-                        ),
-                    }
-                )
-                continue
-
-            # 2. 取引日・市場データ欠損判定（最終取引日が存在しない、または取引停止）
-            if has_freshness and (latest_trade_date is None or is_recent_trade is False):
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "データ鮮度不足 (取引停止)",
-                        "filter_detail": (
-                            "最終取引日データ欠損"
-                            if latest_trade_date is None
-                            else f"最終取引日 ({latest_trade_date}) が直近5営業日範囲外"
-                        ),
-                    }
-                )
-                continue
-
-            # 3. 売買不能判定（直近5営業日出来高データ欠損、または出来高ゼロ日あり）
-            if zero_days is None or zero_days > 0:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "商い不成立",
-                        "filter_detail": (
-                            "出来高時系列データ欠損"
-                            if zero_days is None
-                            else f"直近5営業日以内に出来高ゼロ日あり ({zero_days}日)"
-                        ),
-                    }
-                )
-                continue
-
-            # 4. 極小流動性トラップ判定（売買代金欠損、または20日平均売買代金 < 3,000万円）
-            if avg_tv is None or avg_tv < min_tv_20d:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "極小流動性トラップ",
-                        "filter_detail": (
-                            "売買代金データ欠損/算出不能"
-                            if avg_tv is None
-                            else f"20日平均売買代金不足 ({avg_tv / 10_000.0:,.0f}万円 < {min_tv_20d / 10_000.0:,.0f}万円)"
-                        ),
-                    }
-                )
-                continue
-
-            # 5. 超低位ボロ株判定（株価 < 50円）
-            if price < min_price:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "超低位ボロ株",
-                        "filter_detail": f"株価基準未満 ({price:,.0f}円 < {min_price:,.0f}円)",
-                    }
-                )
-                continue
-
-            # 6. 構造的破綻（債務超過判定）: 純資産マイナス または 自己資本比率 <= 0
-            net_assets = row.get("net_assets")
-            is_insolvent = False
-            insolvency_detail = ""
-
-            if net_assets is not None and net_assets <= 0:
-                is_insolvent = True
-                insolvency_detail = f"純資産マイナス ({net_assets:,.0f}円)"
-            elif equity_ratio is not None and equity_ratio <= min_eq_ratio:
-                is_insolvent = True
-                insolvency_detail = f"自己資本比率マイナス/ゼロ ({equity_ratio:.1f}% <= {min_eq_ratio:.1f}%)"
-
-            if is_insolvent:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "構造的破綻 (債務超過)",
-                        "filter_detail": insolvency_detail,
-                    }
-                )
-                continue
-
-            # 7. 重要財務指標未開示 / 算出不能判定（自己資本比率等の必須財務データ欠損）
-            if equity_ratio is None:
-                rejected_rows.append(
-                    {
-                        **row,
-                        "filter_reason": "重要指標未開示/算出不能",
-                        "filter_detail": "自己資本比率等の財務諸表データ未開示または欠損",
-                    }
-                )
-                continue
-
-            # 8. 致命的キャッシュ枯渇判定（営業CFマージン < -10%）
-            # 金融・保険セクターは構造上免除
-            if sector not in cls.CF_EXEMPT_SECTORS:
-                if operating_cf is not None and sales is not None and sales > 0:
-                    cf_margin = operating_cf / sales
-                    if cf_margin < min_op_cf_margin:
-                        margin_pct = cf_margin * 100.0
-                        limit_pct = min_op_cf_margin * 100.0
-                        rejected_rows.append(
-                            {
-                                **row,
-                                "filter_reason": "致命的キャッシュ枯渇",
-                                "filter_detail": f"営業CFマージン大幅赤字 ({margin_pct:.1f}% < {limit_pct:.1f}%)",
-                            }
-                        )
-                        continue
-
-            # 9. 対象外市場判定 (設定で target_markets が明示指定された場合のみ除外)
-            if target_markets is not None:
-                market = str(row.get("market", ""))
-                if market not in target_markets:
-                    rejected_rows.append(
-                        {
-                            **row,
-                            "filter_reason": "対象外市場",
-                            "filter_detail": f"指定対象市場 ({target_markets}) に含まれない市場 ({market})",
-                        }
-                    )
-                    continue
-
-            # すべての足切りをクリアした銘柄
-            passed_rows.append(row)
-
-        if passed_rows:
-            passed_codes = [r["code"] for r in passed_rows]
-            passed_df = df.filter(pl.col("code").is_in(passed_codes))
-        else:
-            passed_df = df.clear()
-
-        if rejected_rows:
-            reason_df = pl.DataFrame(
-                [
-                    {
-                        "code": r["code"],
-                        "filter_reason": r["filter_reason"],
-                        "filter_detail": r["filter_detail"],
-                    }
-                    for r in rejected_rows
-                ],
-                schema={
-                    "code": pl.String,
-                    "filter_reason": pl.String,
-                    "filter_detail": pl.String,
-                },
+    @staticmethod
+    def _rule_no_price(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 1. 株価データ欠損判定（市場データ取得不能: OHLCV未取得銘柄を最優先隔離）
+        if row.get("price") is not None:
+            return None
+        if str(row.get("exclusion_reason") or "").startswith("市場データ提供なし"):
+            return (
+                "市場データ取得不能",
+                "Yahoo Finance に株価データが提供されていません (PRO Market 等。30日ごとに再確認)",
             )
-            rejected_df = df.join(reason_df, on="code", how="inner")
-        else:
-            rejected_df = pl.DataFrame(
-                schema={
-                    **df.schema,
-                    "filter_reason": pl.String,
-                    "filter_detail": pl.String,
-                }
-            )
+        return "市場データ取得不能", "市場価格データ欠損 (OHLCV未取得)"
 
-        return PreFilterResult(passed_df=passed_df, rejected_df=rejected_df)
+    @staticmethod
+    def _rule_freshness(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 2. 取引日・市場データ欠損判定（最終取引日が存在しない、または取引停止）
+        latest_trade_date = row.get("latest_trade_date")
+        if latest_trade_date is None:
+            return "データ鮮度不足 (取引停止)", "最終取引日データ欠損"
+        if row.get("is_recent_trade") is False:
+            return (
+                "データ鮮度不足 (取引停止)",
+                f"最終取引日 ({latest_trade_date}) が直近5営業日範囲外",
+            )
+        return None
+
+    @staticmethod
+    def _rule_zero_volume(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 3. 売買不能判定（直近5営業日出来高データ欠損、または出来高ゼロ日あり）
+        zero_days = row.get("zero_volume_days_5d")
+        if zero_days is None:
+            return "商い不成立", "出来高時系列データ欠損"
+        if zero_days > 0:
+            return "商い不成立", f"直近5営業日以内に出来高ゼロ日あり ({zero_days}日)"
+        return None
+
+    @staticmethod
+    def _rule_liquidity(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 4. 極小流動性トラップ判定（売買代金欠損、または20日平均売買代金 < 3,000万円）
+        avg_tv, min_tv = row.get("avg_trading_value_20d"), th["min_tv_20d"]
+        if avg_tv is None:
+            return "極小流動性トラップ", "売買代金データ欠損/算出不能"
+        if avg_tv < min_tv:
+            return (
+                "極小流動性トラップ",
+                f"20日平均売買代金不足 ({avg_tv / 10_000.0:,.0f}万円 < {min_tv / 10_000.0:,.0f}万円)",
+            )
+        return None
+
+    @staticmethod
+    def _rule_low_price(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 5. 超低位ボロ株判定（株価 < 50円）
+        price, min_price = row.get("price"), th["min_price"]
+        if price < min_price:
+            return "超低位ボロ株", f"株価基準未満 ({price:,.0f}円 < {min_price:,.0f}円)"
+        return None
+
+    @staticmethod
+    def _rule_insolvent(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 6. 構造的破綻（債務超過判定）: 純資産マイナス または 自己資本比率 <= 0
+        net_assets, equity_ratio = row.get("net_assets"), row.get("equity_ratio")
+        min_eq = th["min_eq_ratio"]
+        if net_assets is not None and net_assets <= 0:
+            return "構造的破綻 (債務超過)", f"純資産マイナス ({net_assets:,.0f}円)"
+        if equity_ratio is not None and equity_ratio <= min_eq:
+            return (
+                "構造的破綻 (債務超過)",
+                f"自己資本比率マイナス/ゼロ ({equity_ratio:.1f}% <= {min_eq:.1f}%)",
+            )
+        return None
+
+    @staticmethod
+    def _rule_undisclosed(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 7. 重要財務指標未開示 / 算出不能判定（自己資本比率等の必須財務データ欠損）
+        if row.get("equity_ratio") is None:
+            return "重要指標未開示/算出不能", "自己資本比率等の財務諸表データ未開示または欠損"
+        return None
+
+    @classmethod
+    def _rule_cash_burn(cls, row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 8. 致命的キャッシュ枯渇判定（営業CFマージン < -10%）。金融・保険セクターは構造上免除
+        if str(row.get("sector", "Other")) in cls.CF_EXEMPT_SECTORS:
+            return None
+        operating_cf, sales = row.get("operating_cf"), row.get("sales")
+        if operating_cf is None or sales is None or sales <= 0:
+            return None
+        cf_margin, limit = operating_cf / sales, th["min_op_cf_margin"]
+        if cf_margin < limit:
+            return (
+                "致命的キャッシュ枯渇",
+                f"営業CFマージン大幅赤字 ({cf_margin * 100.0:.1f}% < {limit * 100.0:.1f}%)",
+            )
+        return None
+
+    @staticmethod
+    def _rule_market(row: dict, th: dict) -> Optional[tuple[str, str]]:
+        # 9. 対象外市場判定 (設定で target_markets が明示指定された場合のみ除外)
+        target_markets = th["target_markets"]
+        if target_markets is None:
+            return None
+        market = str(row.get("market", ""))
+        if market not in target_markets:
+            return (
+                "対象外市場",
+                f"指定対象市場 ({target_markets}) に含まれない市場 ({market})",
+            )
+        return None
 
     @classmethod
     def apply_filter(

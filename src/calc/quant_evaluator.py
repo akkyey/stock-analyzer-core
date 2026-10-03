@@ -227,6 +227,11 @@ class QuantEvaluator:
         # 25%超の高値掴み過熱ペナルティ (25%の0点から35%の-4点まで滑らかに減点)
         return -min(4.0, (ma_div - 25.0) * 0.4)
 
+    # 格付けの名前 (段階 0〜3 = C〜S) と、各段階の下限スコア (高い段階から)
+    _GRADE_NAMES = ("Grade C", "Grade B", "Grade A", "Grade S")
+    _LEGACY_NAMES = ("PASS", "WATCH", "BUY", "STRONG_BUY")
+    _SCORE_FLOORS = ((3, 80.0), (2, 65.0), (1, 50.0))
+
     @classmethod
     def _determine_verdict(
         cls,
@@ -244,42 +249,32 @@ class QuantEvaluator:
         verdict_mode="legacy": STRONG_BUY / BUY / WATCH / PASS (Qiita Part 2 準拠)
         verdict_mode="grade": Grade S / Grade A / Grade B / Grade C (客観的格付け)
         """
-        is_grade = (verdict_mode == "grade")
+        names = cls._GRADE_NAMES if verdict_mode == "grade" else cls._LEGACY_NAMES
+        A, B = 2, 1  # 格付けの段階 (S = 3、C = 0)
 
         # ベース判定
-        if score >= 80.0:
-            verdict = "Grade S" if is_grade else "STRONG_BUY"
-        elif score >= 65.0:
-            verdict = "Grade A" if is_grade else "BUY"
-        elif score >= 50.0:
-            verdict = "Grade B" if is_grade else "WATCH"
-        else:
-            verdict = "Grade C" if is_grade else "PASS"
+        level = next((lv for lv, floor in cls._SCORE_FLOORS if score >= floor), 0)
 
         # ゲートキーパー 1: 実績赤字（ROE < 0）銘柄のキャップ制限
-        if roe is not None and roe < 0 and verdict in ["Grade S", "Grade A", "STRONG_BUY", "BUY"]:
-            verdict = "Grade B" if is_grade else "WATCH"
+        if roe is not None and roe < 0:
+            level = min(level, B)
 
         # ゲートキーパー 2: 本業赤字・一過性特益トラップのキャップ制限
-        is_op_loss = False
-        if operating_margin is not None and operating_margin <= 0:
-            is_op_loss = True
-        elif op_income is not None and op_income <= 0:
-            is_op_loss = True
-
-        if is_op_loss and verdict in ["Grade S", "Grade A", "STRONG_BUY", "BUY"]:
-            verdict = "Grade B" if is_grade else "WATCH"
+        is_op_loss = (operating_margin is not None and operating_margin <= 0) or (
+            op_income is not None and op_income <= 0
+        )
+        if is_op_loss:
+            level = min(level, B)
 
         # ゲートキーパー 3: テクニカル・モメンタム足切り
         # 下降トレンド中（Bearish）の銘柄は反発確認前のリスクがあるため、最高評価を禁止
         # さらに 25日乖離率が -10.0% を下回る深い下降トレンド中の場合は最大 Grade B / WATCH に制限
         if "Bearish" in macd_status:
-            if verdict in ["Grade S", "STRONG_BUY"]:
-                verdict = "Grade A" if is_grade else "BUY"
-            if ma_div is not None and ma_div < -10.0 and verdict in ["Grade A", "BUY"]:
-                verdict = "Grade B" if is_grade else "WATCH"
+            level = min(level, A)
+            if ma_div is not None and ma_div < -10.0:
+                level = min(level, B)
 
-        return verdict
+        return names[level]
 
     @classmethod
     def resolve_multipliers(

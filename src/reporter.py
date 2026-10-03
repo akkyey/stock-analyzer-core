@@ -120,99 +120,86 @@ class StockReporter:
         Returns:
             dict[str, tuple[Any, str]]: 指標名 -> (値, "calc" | "stored" | "-")
         """
-        close = safe_float_or_none(
-            common.get("close")
-            or latest_row.get("close")
-            or common.get("price")
-            or latest_row.get("price")
+        def pick(*values: Any) -> float | None:
+            # 「a or b or …」と同じく、最初の真値 (どれも偽なら最後の値) を数値にする
+            return safe_float_or_none(next((v for v in values[:-1] if v), values[-1]))
+
+        close = pick(
+            common.get("close"), latest_row.get("close"), common.get("price"), latest_row.get("price")
         )
-        eps = safe_float_or_none(common.get("eps") or latest_row.get("eps"))
-        bps = safe_float_or_none(common.get("bps") or latest_row.get("bps"))
-        dps = safe_float_or_none(
-            common.get("dps")
-            or common.get("dividend_per_share")
-            or latest_row.get("dps")
-        )
-        shares = safe_float_or_none(
-            common.get("shares_outstanding")
-            or common.get("shares")
-            or latest_row.get("shares_outstanding")
+        eps = pick(common.get("eps"), latest_row.get("eps"))
+        bps = pick(common.get("bps"), latest_row.get("bps"))
+        dps = pick(common.get("dps"), common.get("dividend_per_share"), latest_row.get("dps"))
+        shares = pick(
+            common.get("shares_outstanding"), common.get("shares"), latest_row.get("shares_outstanding")
         )
 
-        res: dict[str, tuple[Any, str]] = {}
+        def per_share_ratio(denominator: float | None) -> tuple[float | None, float | None]:
+            # (保存値の照合用の再計算値, 保存値が無い場合の算出値)。照合用は株価 0 を除く
+            if denominator is None or denominator <= 0:
+                return None, None
+            loose = close / denominator if close is not None else None
+            return (loose if close else None), loose
 
-        # 1. PER (yfinance -> calc)。データが無い場合は仮の値を出さず "-" とする
-        per_val = safe_float_or_none(common.get("per") or latest_row.get("per"))
-        if per_val is not None and per_val > 0:
-            derived_per = close / eps if close and eps and eps > 0 else None
-            res["per"] = (
-                round(per_val, 2),
-                self._stored_value_source(per_val, derived_per, 0.01, 0.01),
-            )
-        elif close is not None and eps is not None and eps > 0:
-            res["per"] = (round(close / eps, 2), "calc")
-        else:
-            res["per"] = ("-", "-")
+        def resolve(stored: float | None, accept: bool, derived: tuple, fmt: Any, tol: tuple) -> tuple:
+            strict, loose = derived
+            if stored is not None and accept:
+                return fmt(stored), self._stored_value_source(stored, strict, *tol)
+            if loose is not None:
+                return fmt(loose), "calc"
+            return "-", "-"
 
-        # 2. PBR (yfinance -> calc)。データが無い場合は "-"
-        pbr_val = safe_float_or_none(common.get("pbr") or latest_row.get("pbr"))
-        if pbr_val is not None and pbr_val > 0:
-            derived_pbr = close / bps if close and bps and bps > 0 else None
-            res["pbr"] = (
-                round(pbr_val, 2),
-                self._stored_value_source(pbr_val, derived_pbr, 0.01, 0.01),
-            )
-        elif close is not None and bps is not None and bps > 0:
-            res["pbr"] = (round(close / bps, 2), "calc")
-        else:
-            res["pbr"] = ("-", "-")
+        def round2(v: float) -> float:
+            return round(v, 2)
 
-        # 3. Div_Yield (%) (yfinance -> calc)。保存値は既にパーセント表記 (例: 0.77 = 0.77%)
-        div_val = safe_float_or_none(
-            common.get("dividend_yield") or latest_row.get("dividend_yield")
+        per_val = pick(common.get("per"), latest_row.get("per"))
+        pbr_val = pick(common.get("pbr"), latest_row.get("pbr"))
+        div_val = pick(common.get("dividend_yield"), latest_row.get("dividend_yield"))
+        mc_val = pick(common.get("market_cap"), latest_row.get("market_cap"))
+
+        # 配当利回り (%) と時価総額の再計算値 (株価が正の場合のみ)
+        div_calc = dps / close * 100.0 if close and dps is not None and close > 0 else None
+        mc_strict = close * shares if close and shares and shares > 0 else None
+        mc_loose = (
+            close * shares if close is not None and shares is not None and shares > 0 else None
         )
-        if div_val is not None:
-            derived_div = (
-                dps / close * 100.0 if close and dps is not None and close > 0 else None
-            )
-            res["div_yield"] = (
-                round(div_val, 2),
-                self._stored_value_source(div_val, derived_div, 0.01, 0.01),
-            )
-        elif close is not None and dps is not None and close > 0:
-            res["div_yield"] = (round((dps / close) * 100.0, 2), "calc")
-        else:
-            res["div_yield"] = ("-", "-")
 
-        # 4. Market_Cap (yfinance -> calc)
-        mc_val = safe_float_or_none(
-            common.get("market_cap") or latest_row.get("market_cap")
+        # 1〜4. 保存値があり妥当ならそれ (出所は再計算との一致で判定)、無ければ再計算、どちらも無ければ "-"
+        res: dict[str, tuple[Any, str]] = {
+            "per": resolve(
+                per_val, per_val is not None and per_val > 0, per_share_ratio(eps), round2, (0.01, 0.01)
+            ),
+            "pbr": resolve(
+                pbr_val, pbr_val is not None and pbr_val > 0, per_share_ratio(bps), round2, (0.01, 0.01)
+            ),
+            # 保存値は既にパーセント表記 (例: 0.77 = 0.77%)。0 (無配) も有効な値
+            "div_yield": resolve(div_val, True, (div_calc, div_calc), round2, (0.01, 0.01)),
+            "market_cap": resolve(
+                mc_val, mc_val is not None and mc_val > 0, (mc_strict, mc_loose), int, (0.001, 1.0)
+            ),
+        }
+
+        # 5. ROE (%) (保存値 → EDINET → calc)。保存値は既にパーセント表記
+        res["roe"] = self._resolve_roe(
+            pick(common.get("roe"), latest_row.get("roe")),
+            safe_float_or_none(common.get("edinet_roe")),
+            eps,
+            bps,
         )
-        if mc_val is not None and mc_val > 0:
-            derived_mc = close * shares if close and shares and shares > 0 else None
-            res["market_cap"] = (
-                int(mc_val),
-                self._stored_value_source(mc_val, derived_mc, 0.001, 1.0),
-            )
-        elif close is not None and shares is not None and shares > 0:
-            res["market_cap"] = (int(close * shares), "calc")
-        else:
-            res["market_cap"] = ("-", "-")
-
-        # 5. ROE (%) (yfinance -> edinet -> calc)。保存値は既にパーセント表記
-        roe_val = safe_float_or_none(common.get("roe") or latest_row.get("roe"))
-        edinet_roe = safe_float_or_none(common.get("edinet_roe"))
-        if roe_val is not None:
-            res["roe"] = (round(roe_val, 2), "stored")
-        elif edinet_roe is not None:
-            roe_pct = edinet_roe * 100.0 if abs(edinet_roe) < 1.0 else edinet_roe
-            res["roe"] = (round(roe_pct, 2), "edinet")
-        elif eps is not None and bps is not None and bps > 0:
-            res["roe"] = (round((eps / bps) * 100.0, 2), "calc")
-        else:
-            res["roe"] = ("-", "-")
-
         return res
+
+    @staticmethod
+    def _resolve_roe(
+        roe_val: float | None, edinet_roe: float | None, eps: float | None, bps: float | None
+    ) -> tuple[Any, str]:
+        if roe_val is not None:
+            return round(roe_val, 2), "stored"
+        if edinet_roe is not None:
+            roe_pct = edinet_roe * 100.0 if abs(edinet_roe) < 1.0 else edinet_roe
+            return round(roe_pct, 2), "edinet"
+        if eps is not None and bps is not None and bps > 0:
+            return round((eps / bps) * 100.0, 2), "calc"
+        return "-", "-"
 
     def _format_single_item(
         self, code_info: dict[str, Any], source_map: dict[str, str] | None

@@ -21,8 +21,21 @@ class FinancialRepairService:
             return df
 
         initial_count = len(df)
+        # 各ステップは、入力にあった列 (cols) とその時点の列 (df.columns) を使い分けるため、
+        # 入力の列名を渡す
         cols = df.columns
+        df = FinancialRepairService._refine_equity_ratio(df, cols)
+        df = FinancialRepairService._derive_valuations(df, cols)
+        df = FinancialRepairService._profit_status(df, cols)
+        df, threshold = FinancialRepairService._scale_and_clip(df, cols)
 
+        logger.info(
+            f"✨ Deep financial repair completed. (Records: {initial_count}, Scaling Threshold: {threshold})"
+        )
+        return df
+
+    @staticmethod
+    def _refine_equity_ratio(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
         # [Step 1] 自己資本比率 (Equity Ratio) の精緻化
         # 1-1. 総資産と純資産による直接計算 (最優先)
         if "total_assets" in cols and "net_assets" in cols and "equity_ratio" in cols:
@@ -57,6 +70,10 @@ class FinancialRepairService:
                 ]
             )
 
+        return df
+
+    @staticmethod
+    def _derive_valuations(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
         # [Step 2] 動的 PER / PBR / 利回り / 時価総額 の算出 (当日株価 × 財務確定Fact)
         # 当日株価 (price) が存在する場合、シードやDBの確定Factからリアルタイムに導出する
         if "price" in cols:
@@ -160,6 +177,10 @@ class FinancialRepairService:
                     .alias("market_cap")
                 )
 
+        return df
+
+    @staticmethod
+    def _profit_status(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
         # [Step 3] 黒字転換 / 利益ステータス判定 (#5)
         if all(c in cols for c in ["net_profit", "prev_net_profit"]):
             df = df.with_columns(
@@ -204,6 +225,10 @@ class FinancialRepairService:
                 ]
             )
 
+        return df
+
+    @staticmethod
+    def _scale_and_clip(df: pl.DataFrame, cols: list[str]) -> tuple[pl.DataFrame, float]:
         # [Step 5] 比率項目の自動スケーリング (既定は無効)
         # 財務データは常に % 表記で保存されるため、既定 (0.0) では何もしない。
         # 1 未満を一律 100 倍すると、自己資本比率 0.7% のような実在の値が 70% になってしまう。
@@ -244,10 +269,7 @@ class FinancialRepairService:
                 ]
             )
 
-        logger.info(
-            f"✨ Deep financial repair completed. (Records: {initial_count}, Scaling Threshold: {threshold})"
-        )
-        return df
+        return df, threshold
 
     @staticmethod
     def apply_split_adjustment(df: pl.DataFrame, splits: pl.DataFrame) -> pl.DataFrame:
