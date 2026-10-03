@@ -161,7 +161,7 @@ class EdinetBridge:
         # 同じ銘柄は 有価証券報告書 → 半期報告書 の順、期の古い順に反映する
         order = {KIND_ANNUAL: 0, KIND_INTERIM: 1}
         items.sort(
-            key=lambda d: (d["code"], order.get(d.get("kind"), 9), d.get("period_end") or "")
+            key=lambda d: (d["code"], order.get(str(d.get("kind") or ""), 9), d.get("period_end") or "")
         )
 
         records: Dict[str, Dict[str, Any]] = {}

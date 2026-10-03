@@ -101,7 +101,8 @@ def adjustment_ratio(df_db: pl.DataFrame, df_new: pl.DataFrame) -> Optional[floa
     if both.is_empty():
         return None
     ratios = both.select((pl.col("db") / pl.col("new")).alias("r"))["r"]
-    return max(ratios.to_list(), key=lambda r: abs(r - 1.0))
+    val = max(ratios.to_list(), key=lambda r: abs(float(r) - 1.0))
+    return float(val) if val is not None else None
 
 
 # Yahoo の分割イベントの日付は、実際に株価が切り替わった日 (権利落ち日) より 1〜8 日ほど
@@ -225,9 +226,10 @@ def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional
         err = abs(math.log(closes[i - 1] / closes[i]) - math.log(ratio))
         if best_err is None or err < best_err:
             best_i, best_err = i, err
-    if best_i is None or best_err > SPLIT_JUMP_TOLERANCE:
+    if best_i is None or best_err is None or best_err > SPLIT_JUMP_TOLERANCE:
         return None
-    return days[best_i]
+    res_day = days[best_i]
+    return res_day if isinstance(res_day, date) else None
 
 
 def infer_unrecorded_splits(df: pl.DataFrame) -> list[tuple[date, float]]:
