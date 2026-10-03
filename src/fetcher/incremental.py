@@ -109,14 +109,40 @@ def adjustment_ratio(df_db: pl.DataFrame, df_new: pl.DataFrame) -> Optional[floa
 SPLIT_SEARCH_BEFORE = timedelta(days=14)
 SPLIT_SEARCH_AFTER = timedelta(days=5)
 
-# Yahoo が分割イベントを返さない銘柄もある (8377・326A・4316 等で確認)。値幅制限により
-# 1 取引日で 1.9 倍以上 (または 1/1.9 以下) に動くことは通常ないため、この幅を超え、
+# Yahoo が分割イベントを返さない銘柄もある (8377・326A・4316 等で確認)。前日比が
+# 1.9 倍以上 (または 1/1.9 以下) で、変化額が東証の値幅制限を超え (値動きではありえない)、
 # かつ整数比 (2・3・5・10 倍等) から INFERRED_SPLIT_TOLERANCE 以内の段差は分割 (併合) とみなす
 INFERRED_SPLIT_MIN_RATIO = 1.9
 INFERRED_SPLIT_TOLERANCE = 0.05
 INFERRED_SPLIT_MAX_GAP = timedelta(days=7)
-# 前日比が分割比率からこの割合 (対数) 以内なら、分割による段差とみなす
-SPLIT_JUMP_TOLERANCE = 0.25
+# 前日比が分割比率からこの割合 (対数) 以内なら、分割による段差とみなす。
+# 広すぎると、調整後の履歴に残った実際の大きな値動きまで段差と誤認し、実行のたびに
+# 調整が重なる (6072 の急騰で確認)。分割日の値動きを見込んで 12% とする
+SPLIT_JUMP_TOLERANCE = 0.12
+
+# 東証の値幅制限 (基準値段の未満 → 制限値幅、円)。1 営業日にこれを超えて動くことはないため、
+# 前日比の変化額がこれを超える段差だけを、分割 (併合) による段差とみなす。
+# 100 円未満の銘柄は制限値幅が 30 円で、27 円 → 52 円のように 2 倍近く動き得る (6740)
+_PRICE_LIMITS = (
+    (100, 30), (200, 50), (500, 80), (700, 100), (1_000, 150), (1_500, 300),
+    (2_000, 400), (3_000, 500), (5_000, 700), (7_000, 1_000), (10_000, 1_500),
+    (15_000, 3_000), (20_000, 4_000), (30_000, 5_000), (50_000, 7_000),
+    (70_000, 10_000), (100_000, 15_000), (150_000, 30_000), (200_000, 40_000),
+    (300_000, 50_000), (500_000, 70_000), (700_000, 100_000), (1_000_000, 150_000),
+)
+
+
+def daily_price_limit(price: float) -> float:
+    """基準値段に対する、東証の 1 日の制限値幅 (円)。"""
+    for upper, limit in _PRICE_LIMITS:
+        if price < upper:
+            return float(limit)
+    return float(price) * 0.3
+
+
+def exceeds_daily_limit(prev: float, cur: float) -> bool:
+    """前日終値から当日終値への変化額が、制限値幅を超えているか (値動きではありえない段差か)。"""
+    return abs(cur - prev) > daily_price_limit(prev)
 
 _PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Adj Close")
 
@@ -140,6 +166,12 @@ def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional
     """
     if not is_plausible_split_ratio(ratio) or df.is_empty():
         return None
+    # 比率が 1 に近い分割 (4923 の 1:1.05 など) は、日々の値動きと見分けがつかない。
+    # 株価の調整は、値幅制限ではありえない大きさ (INFERRED_SPLIT_MIN_RATIO 以上) に限る。
+    # (許容幅 SPLIT_JUMP_TOLERANCE が比率より広いと、どの日も「段差」になり、
+    #  実行のたびに履歴が割られ続ける)
+    if abs(math.log(ratio)) < math.log(INFERRED_SPLIT_MIN_RATIO):
+        return None
     out = df.sort("Date")
     days = out["Date"].cast(pl.Date).to_list()
     closes = out["Close"].to_list()
@@ -149,7 +181,7 @@ def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional
         if d is None or not (split_day - SPLIT_SEARCH_BEFORE <= d <= split_day + SPLIT_SEARCH_AFTER):
             continue
         prev, cur = closes[i - 1], closes[i]
-        if not prev or not cur or prev <= 0 or cur <= 0:
+        if not prev or not cur or prev <= 0 or cur <= 0 or not exceeds_daily_limit(prev, cur):
             continue
         err = abs(math.log(prev / cur) - math.log(ratio))
         if best_err is None or err < best_err:
@@ -181,6 +213,8 @@ def infer_unrecorded_splits(df: pl.DataFrame) -> list[tuple[date, float]]:
         x = r if r >= 1 else 1 / r
         n = round(x)
         if x < INFERRED_SPLIT_MIN_RATIO or not is_plausible_split_ratio(float(n)):
+            continue
+        if not exceeds_daily_limit(prev, cur):
             continue
         if abs(x / n - 1) > INFERRED_SPLIT_TOLERANCE:
             continue

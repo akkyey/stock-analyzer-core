@@ -167,3 +167,46 @@ def test_infer_ignores_market_moves_and_glitches():
         }
     )
     assert infer_unrecorded_splits(df) == []
+
+
+def test_small_ratio_split_never_adjusts_prices_so_repeated_runs_are_stable():
+    """4923 の実例: 比率 1.05 の分割で、実行のたびに分割前の株価が 1.05 で割られ続けた"""
+    from src.fetcher.incremental import apply_split_adjustments, find_split_jump
+
+    df = _series("2026-03-23", [1273.8, 1270.0, 1294.3, 1264.0, 1176.0, 1197.0, 1179.0])
+    events = [(date(2026, 3, 30), 1.05)]
+    assert find_split_jump(df, date(2026, 3, 30), 1.05) is None
+    once = apply_split_adjustments(df, events)
+    twice = apply_split_adjustments(once, events)
+    assert once["Close"].to_list() == df["Close"].to_list() == twice["Close"].to_list()
+
+
+def test_split_adjustment_is_idempotent_for_real_ratios():
+    from src.fetcher.incremental import apply_split_adjustments
+
+    df = _series("2026-02-12", [10845.9, 10816.5, 10797.0, 10806.8, 3634.9, 3585.1, 3495.2])
+    for ratio in (2.0, 3.0, 5.0, 10.0, 0.5):
+        events = [(date(2026, 2, 19), ratio)]
+        once = apply_split_adjustments(df, events)
+        assert apply_split_adjustments(once, events)["Close"].to_list() == once["Close"].to_list()
+
+
+def test_low_price_stock_limit_up_is_not_a_split():
+    """6740 の実例: 27 円 → 52 円は 100 円未満の値幅制限 (30 円) 内の値動きで、併合ではない"""
+    from src.fetcher.incremental import exceeds_daily_limit, infer_unrecorded_splits
+
+    assert not exceeds_daily_limit(27.0, 52.0)
+    assert exceeds_daily_limit(328.0, 648.0)  # 制限値幅 80 円を超える
+    df = pl.DataFrame({"Date": [datetime(2026, 3, 6), datetime(2026, 3, 9)], "Close": [27.0, 52.0]})
+    assert infer_unrecorded_splits(df) == []
+
+
+def test_real_surge_after_adjustment_is_not_readjusted():
+    """6072 の実例: 調整後に残る実際の大きな値動きを、再び段差と誤認して重ねて調整しない"""
+    from src.fetcher.incremental import apply_split_adjustments
+
+    # 2/13 に 1:2 併合 (320 円の段差) を調整済み。その後の +62% の動きは、制限値幅内の動きとして扱う
+    df = _series("2026-02-09", [396.0, 496.0, 656.0, 648.0, 1048.0, 1340.0])
+    events = [(date(2026, 2, 13), 0.5)]
+    once = apply_split_adjustments(df, events)
+    assert apply_split_adjustments(once, events)["Close"].to_list() == once["Close"].to_list()
