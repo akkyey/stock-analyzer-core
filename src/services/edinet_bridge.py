@@ -12,7 +12,12 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from src.fetcher.xbrl_parser import KIND_ANNUAL, KIND_INTERIM, PARSER_VERSION
+from src.fetcher.xbrl_parser import (
+    KIND_ANNUAL,
+    KIND_INTERIM,
+    PARSER_VERSION,
+    XbrlParser,
+)
 from src.repositories.fundamentals_repository import FundamentalsRepository
 
 # 有価証券報告書から更新する貸借対照表の項目 (半期報告書の方が新しければ更新しない)
@@ -27,11 +32,18 @@ ANNUAL_PL_FIELDS = (
     "eps",
     "dps",
 )
-INTERIM_FIELDS = ("total_assets", "net_assets", "equity_ratio", "shares_outstanding")
+INTERIM_FIELDS = XbrlParser.INTERIM_FIELDS
 
 
 def _is_num(v: Any) -> bool:
     return isinstance(v, (int, float)) and v == v  # NaN を除く
+
+
+def _before(period: str, stored: str, or_equal: bool = False) -> bool:
+    """書類の期 period が、DB に記録済みの期 stored より古いか (どちらかが不明なら False)。"""
+    if not period or not stored:
+        return False
+    return period <= stored if or_equal else period < stored
 
 
 def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Optional[Dict[str, Any]]:
@@ -58,12 +70,12 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
                 record[f] = float(item[f])
 
     if kind == KIND_ANNUAL:
-        if stored_pl and period_end and period_end < stored_pl:
+        if _before(period_end, stored_pl):
             return None
         put(ANNUAL_PL_FIELDS)
         record["period_end"] = period_end or None
         record["submitted_at"] = submitted
-        if not (stored_bs and period_end and period_end < stored_bs):
+        if not _before(period_end, stored_bs):
             put(BALANCE_SHEET_FIELDS)
             record["bs_period_end"] = period_end or None
             record["bs_submitted_at"] = submitted
@@ -74,9 +86,7 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
             record["operating_margin"] = item["operating_income"] / item["sales"] * 100.0
     elif kind == KIND_INTERIM:
         # 同じ期の再適用は同じ値になるため許容し、古い期だけを除く
-        if stored_bs and period_end and period_end < stored_bs:
-            return None
-        if stored_pl and period_end and period_end <= stored_pl:
+        if _before(period_end, stored_bs) or _before(period_end, stored_pl, or_equal=True):
             return None
         put(INTERIM_FIELDS)
         record["bs_period_end"] = period_end or None
@@ -131,14 +141,6 @@ class EdinetBridge:
             items.append(data)
         return items
 
-    def _stored_provenance(self) -> Dict[str, Dict[str, Optional[str]]]:
-        duck_repo = self.repository.duck_repo
-        with duck_repo.client.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT code, period_end, bs_period_end FROM fundamentals"
-            ).fetchall()
-        return {r[0]: {"period_end": r[1], "bs_period_end": r[2]} for r in rows}
-
     def bridge_all(self, purge_after: bool = False) -> int:
         """全ての JSON 成果物を DB へ反映する。
 
@@ -155,7 +157,7 @@ class EdinetBridge:
             return 0
 
         self.logger.info(f"🌉 Bridging {len(items)} results to DuckDB...")
-        stored = self._stored_provenance()
+        stored = self.repository.get_provenance()
         # 同じ銘柄は 有価証券報告書 → 半期報告書 の順、期の古い順に反映する
         order = {KIND_ANNUAL: 0, KIND_INTERIM: 1}
         items.sort(
@@ -163,13 +165,13 @@ class EdinetBridge:
         )
 
         records: Dict[str, Dict[str, Any]] = {}
-        applied, superseded = [], []
+        outcomes: List[tuple[Dict[str, Any], str]] = []  # (書類, success | superseded)
         for item in items:
             code = item["code"]
             current = stored.get(code, {})
             record = build_record(item, current)
             if record is None:
-                superseded.append(item)
+                outcomes.append((item, "superseded"))
                 continue
             merged = records.setdefault(code, {"code": code})
             merged.update(record)
@@ -178,7 +180,7 @@ class EdinetBridge:
                 "period_end": merged.get("period_end", current.get("period_end")),
                 "bs_period_end": merged.get("bs_period_end", current.get("bs_period_end")),
             }
-            applied.append(item)
+            outcomes.append((item, "success"))
 
         try:
             self._upsert(list(records.values()))
@@ -186,29 +188,30 @@ class EdinetBridge:
             self.logger.error(f"❌ Batch UPSERT failed: {e}")
             return 0
 
-        duck_repo = getattr(self.repository, "duck_repo", None)
-        if duck_repo and hasattr(duck_repo, "record_edinet_document"):
-            for item, status in [(i, "success") for i in applied] + [
-                (i, "superseded") for i in superseded
-            ]:
-                if item.get("doc_id"):
-                    duck_repo.record_edinet_document(
-                        doc_id=item["doc_id"],
-                        code=item["code"],
-                        doc_type=item.get("doc_type"),
-                        submit_date=item.get("submit_date"),
-                        is_annual=item.get("is_annual", False),
-                        status=status,
-                        parser_version=PARSER_VERSION,
-                    )
+        self.repository.duck_repo.record_edinet_documents(
+            [
+                {
+                    "doc_id": item["doc_id"],
+                    "code": item["code"],
+                    "doc_type": item.get("doc_type"),
+                    "submit_date": item.get("submit_date"),
+                    "is_annual": item.get("is_annual", False),
+                    "status": status,
+                    "parser_version": PARSER_VERSION,
+                }
+                for item, status in outcomes
+                if item.get("doc_id")
+            ]
+        )
 
+        applied = sum(1 for _, status in outcomes if status == "success")
         self.logger.info(
-            f"✅ Bridged {len(applied)} documents into {len(records)} stocks "
-            f"({len(superseded)} skipped as older than stored data)."
+            f"✅ Bridged {applied} documents into {len(records)} stocks "
+            f"({len(outcomes) - applied} skipped as older than stored data)."
         )
         if purge_after:
             self._cleanup_results([f for f in os.listdir(self.results_dir) if f.endswith(".json")])
-        return len(applied)
+        return applied
 
     def _upsert(self, records: List[Dict[str, Any]]) -> None:
         """項目の組み合わせごとにまとめて UPSERT する (含まれない項目は更新されない)。"""

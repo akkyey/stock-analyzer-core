@@ -17,6 +17,7 @@ from src.utils.diagnostics import record_fetch_stat
 
 from .base import FetcherBase
 from .fetch_profile import resolve_fetch_profile
+from .incremental import is_plausible_split_ratio
 
 # ユーザー体験向上のため、未上場・欠落銘柄の個別 404/Missing エラーを抑制
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
@@ -259,29 +260,25 @@ class MarketFetcher(FetcherBase):
                     )
                     continue
 
-                # 株式分割のイベント列を取り出し、履歴からは除く
-                if not hist.empty and "Stock Splits" in hist.columns:
-                    events = hist["Stock Splits"]
-                    # 異常な比率 (Yahoo が 2e-07 などを返すことがある) は除く
-                    events = events[
-                        events.notna() & (events >= 0.02) & (events <= 100) & (events != 1)
-                    ]
-                    if len(events):
-                        with self.lock:
-                            self._detected_splits.setdefault(code, []).extend(
-                                (ts.date() if hasattr(ts, "date") else ts, float(r))
-                                for ts, r in events.items()
-                            )
                 if not hist.empty:
+                    # 株式分割のイベント列を取り出し (異常な比率は除く)、履歴からは除く
+                    if "Stock Splits" in hist.columns:
+                        events = [
+                            (ts.date() if hasattr(ts, "date") else ts, float(r))
+                            for ts, r in hist["Stock Splits"].dropna().items()
+                            if is_plausible_split_ratio(float(r))
+                        ]
+                        if events:
+                            with self.lock:
+                                self._detected_splits.setdefault(code, []).extend(events)
                     hist = hist.drop(
                         columns=[c for c in ("Dividends", "Stock Splits", "Capital Gains") if c in hist.columns]
                     )
-
-                # 終値が空の行 (Yahoo が直近日を NaN で返すことがある) は採用しない。
-                # 残すと DB 履歴との結合で同じ日付の正しい値を空で上書きし、
-                # 1 日前のデータが「最新」として扱われてしまう
-                if not hist.empty and "Close" in hist.columns:
-                    hist = hist[hist["Close"].notna()]
+                    # 終値が空の行 (Yahoo が直近日を NaN で返すことがある) は採用しない。
+                    # 残すと DB 履歴との結合で同じ日付の正しい値を空で上書きし、
+                    # 1 日前のデータが「最新」として扱われてしまう
+                    if "Close" in hist.columns:
+                        hist = hist[hist["Close"].notna()]
                 if not hist.empty and "Close" in hist.columns:
                     batch_results[code] = hist
                 else:

@@ -283,5 +283,7 @@ def test_edinet_scan_days_covers_time_since_last_scan(monkeypatch):
 def test_plan_forced_full_history_for_split_backfill():
     """株式分割の記録が無い DB の初回は、履歴が十分でも全銘柄 1y で取り直す"""
     n = AcquisitionPhase.MIN_HISTORY_ROWS
-    batches = _plan({"_force_full_history": True}, {"1001": n + 40}, ["1001"])
-    assert [p for _, p in batches] == ["1y"]
+    phase = AcquisitionPhase(StubOrchestratorContext())
+    hist = {("1001",): _hist(n + 40)}
+    assert [p for _, p in phase._plan_fetch_batches(["1001"], hist)] == ["2d"]
+    assert [p for _, p in phase._plan_fetch_batches(["1001"], hist, force_full=True)] == ["1y"]

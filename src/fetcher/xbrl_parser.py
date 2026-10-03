@@ -49,6 +49,14 @@ _CONTEXTS = {
 class XbrlParser:
     """EDINET XBRL パーサー"""
 
+    # 純利益 (当期は net_profit、前期は prev_net_profit として読む)
+    NET_PROFIT_TAGS = (
+        "ProfitLossAttributableToOwnersOfParentSummaryOfBusinessResults",
+        "ProfitLossAttributableToOwnersOfParentIFRSSummaryOfBusinessResults",
+        "NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",
+        "NetIncomeLossSummaryOfBusinessResults",  # 単体のみの会社
+    )
+
     # (取り出す項目, 期間の種類, 候補の要素名 (優先順), 単体を常に許容するか)
     # 注意: IFRS の "EquityToAssetRatioIFRSSummaryOfBusinessResults" は名前に反して
     # 「1 株当たり親会社所有者帰属持分」(BPS)。自己資本比率は "RatioOfOwnersEquityToGrossAssets"
@@ -70,17 +78,7 @@ class XbrlParser:
             ),
             False,
         ),
-        (
-            "net_profit",
-            "duration",
-            (
-                "ProfitLossAttributableToOwnersOfParentSummaryOfBusinessResults",
-                "ProfitLossAttributableToOwnersOfParentIFRSSummaryOfBusinessResults",
-                "NetIncomeLossAttributableToOwnersOfParentUSGAAPSummaryOfBusinessResults",
-                "NetIncomeLossSummaryOfBusinessResults",  # 単体のみの会社
-            ),
-            False,
-        ),
+        ("net_profit", "duration", NET_PROFIT_TAGS, False),
         (
             "total_assets",
             "instant",
@@ -236,11 +234,16 @@ class XbrlParser:
             facts.setdefault((local, ctx), self._to_float(el.text))
 
         contexts_used = {ctx for _, ctx in facts}
-        if any(c.startswith("CurrentYearDuration") for c in contexts_used):
-            kind = KIND_ANNUAL
-        elif any(c.startswith("InterimDuration") for c in contexts_used):
-            kind = KIND_INTERIM
-        else:
+        # 当期の期間コンテキストがある種類 (有価証券報告書を優先)。どちらも無い書類は対象外
+        kind = next(
+            (
+                k
+                for k, c in _CONTEXTS.items()
+                if any(ctx.startswith(c["duration"]) for ctx in contexts_used)
+            ),
+            None,
+        )
+        if kind is None:
             return {}
         ctxs = _CONTEXTS[kind]
 
@@ -274,8 +277,7 @@ class XbrlParser:
             extracted["operating_income"] = operating_income
 
         if kind == KIND_ANNUAL:
-            net_profit_tags = next(n for f, _, n, _ in self.SUMMARY_FIELDS if f == "net_profit")
-            prev = lookup(net_profit_tags, ctxs["prior_duration"], False)
+            prev = lookup(self.NET_PROFIT_TAGS, ctxs["prior_duration"], False)
             if prev is not None:
                 extracted["prev_net_profit"] = prev
 

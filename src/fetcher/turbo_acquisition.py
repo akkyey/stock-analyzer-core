@@ -19,6 +19,7 @@ from src.fetcher.xbrl_parser import (
     PARSER_VERSION,
     XbrlParser,
 )
+from src.utils import get_current_time
 
 # 対象とする書類: 有価証券報告書 (120)・訂正 (130)、半期報告書 (160)・訂正 (170)。
 # 四半期報告書 (140/150) は 2024 年 4 月に廃止され、現在提出されるのは過去分の訂正のみ
@@ -120,7 +121,7 @@ class TurboAcquisitionManager:
         ]
         raw_docs = []
         # 一覧を取得できなかった日 (通信失敗)。次回の走査期間の起点に使う
-        self.failed_dates: List[str] = []
+        self.failed_dates = []
 
         with ThreadPoolExecutor(max_workers=self.scan_workers) as scan_executor:
             future_to_date = {
@@ -166,7 +167,7 @@ class TurboAcquisitionManager:
         def key(d: Dict[str, Any]) -> tuple:
             return (d.get("period_end") or "", d.get("submitDateTime") or "")
 
-        stale_before = (datetime.now() - timedelta(days=STALE_ANNUAL_DAYS)).strftime("%Y-%m-%d")
+        stale_before = (get_current_time() - timedelta(days=STALE_ANNUAL_DAYS)).strftime("%Y-%m-%d")
         annual: Dict[str, Dict[str, Any]] = {}
         interim: Dict[str, Dict[str, Any]] = {}
         for doc in docs:

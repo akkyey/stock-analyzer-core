@@ -430,22 +430,19 @@ class DuckDBRepository:
                 [alert_id],
             )
 
-    def get_processed_edinet_doc_ids(self, min_parser_version: Optional[int] = None) -> set[str]:
+    def get_processed_edinet_doc_ids(self, min_parser_version: int = 0) -> set[str]:
         """処理済みの EDINET doc_id セットを取得する (Colab セッション跨ぎ差分キャッシュ用)
 
         Args:
-            min_parser_version: 指定すると、この版以上のパーサーで処理した書類だけを返す
-                (古い版で処理した書類は取り込み直す)
+            min_parser_version: この版以上のパーサーで処理した書類だけを返す
+                (古い版で処理した書類は取り込み直す。0 なら全件)
         """
         try:
             with self.client.get_connection() as conn:
-                if min_parser_version is None:
-                    res = conn.execute("SELECT doc_id FROM edinet_documents").fetchall()
-                else:
-                    res = conn.execute(
-                        "SELECT doc_id FROM edinet_documents WHERE coalesce(parser_version, 0) >= ?",
-                        [min_parser_version],
-                    ).fetchall()
+                res = conn.execute(
+                    "SELECT doc_id FROM edinet_documents WHERE coalesce(parser_version, 0) >= ?",
+                    [min_parser_version],
+                ).fetchall()
                 return {row[0] for row in res if row and row[0]}
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to fetch processed EDINET docs: {e}")
@@ -462,18 +459,43 @@ class DuckDBRepository:
         parser_version: Optional[int] = None,
     ) -> None:
         """EDINET 書類の処理ステータスを記録する (success, parse_failed, superseded, error 等)"""
+        self.record_edinet_documents(
+            [
+                {
+                    "doc_id": doc_id,
+                    "code": code,
+                    "doc_type": doc_type,
+                    "submit_date": submit_date,
+                    "is_annual": is_annual,
+                    "status": status,
+                    "parser_version": parser_version,
+                }
+            ]
+        )
+
+    def record_edinet_documents(self, docs: List[dict]) -> None:
+        """複数の EDINET 書類の処理ステータスを、1 つの接続でまとめて記録する。"""
+        if not docs:
+            return
         try:
             with self.client.get_connection() as conn:
-                conn.execute(
+                conn.executemany(
                     """
                     INSERT OR REPLACE INTO edinet_documents
                         (doc_id, code, doc_type, submit_date, is_annual, status, parser_version, processed_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
-                    [doc_id, code, doc_type, submit_date, is_annual, status, parser_version],
+                    [
+                        [
+                            d["doc_id"], d["code"], d.get("doc_type"), d.get("submit_date"),
+                            d.get("is_annual", False), d.get("status", "success"),
+                            d.get("parser_version"),
+                        ]
+                        for d in docs
+                    ],
                 )
         except Exception as e:
-            self.logger.warning(f"⚠️ Failed to record EDINET doc {doc_id}: {e}")
+            self.logger.warning(f"⚠️ Failed to record {len(docs)} EDINET docs: {e}")
 
     def save_splits(self, rows: list[tuple[str, Any, float]]) -> None:
         """株式分割 (code, split_date, ratio) を保存する。同じ日の分割は上書き。"""

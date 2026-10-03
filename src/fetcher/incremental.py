@@ -8,9 +8,10 @@
 - 当日足: 取引終了直後は値が確定していないため採用しない
 - 調整のずれ: yfinance は配当落ちのたびに過去の値を遡って調整し直すため、
   DB の保存値と重なり日の終値が食い違ったら、その銘柄は全期間を取り直す
-- 株式分割: Yahoo Finance は日本株の分割を過去に遡って調整しない (2026-10 時点で確認。
-  しまむら 8227 の 3:1 分割は、調整済みの値でも 10,975 円 → 3,713 円の段差のまま)。
-  分割の記録 (日付・比率) をもとに、分割前の値を自前で調整する
+- 株式分割: Yahoo Finance は日本株の分割を、銘柄によっては過去に遡って調整しない。
+  分割イベントを返さない銘柄や、異常な比率のイベントもある。株価に段差が残っている分割だけを
+  自前で調整し、イベントの無い分割は値幅制限を超える整数比の段差から推定する
+  (2026-10 時点で確認した実例は、設計書 colab_execution_architecture_and_guide_design.md 3.3.2)
 """
 
 import math
@@ -103,13 +104,12 @@ def adjustment_ratio(df_db: pl.DataFrame, df_new: pl.DataFrame) -> Optional[floa
     return max(ratios.to_list(), key=lambda r: abs(r - 1.0))
 
 
-# Yahoo の分割イベントの日付は、実際に株価が切り替わった日 (権利落ち日) より後になる
-# (8227: 段差 2/18・イベント 2/19、7946: 段差 3/2・イベント 3/5、329A: 段差 3/2・イベント 3/10、
-# 7176: 段差 10/22・イベント 10/30)。この範囲で段差を探す
+# Yahoo の分割イベントの日付は、実際に株価が切り替わった日 (権利落ち日) より 1〜8 日ほど
+# 後になる。この範囲で段差を探す
 SPLIT_SEARCH_BEFORE = timedelta(days=14)
 SPLIT_SEARCH_AFTER = timedelta(days=5)
 
-# Yahoo が分割イベントを返さない銘柄もある (8377・326A・4316 等で確認)。前日比が
+# Yahoo が分割イベントを返さない銘柄もある。前日比が
 # 1.9 倍以上 (または 1/1.9 以下) で、変化額が東証の値幅制限を超え (値動きではありえない)、
 # かつ整数比 (2・3・5・10 倍等) から INFERRED_SPLIT_TOLERANCE 以内の段差は分割 (併合) とみなす
 INFERRED_SPLIT_MIN_RATIO = 1.9
@@ -117,12 +117,12 @@ INFERRED_SPLIT_TOLERANCE = 0.05
 INFERRED_SPLIT_MAX_GAP = timedelta(days=7)
 # 前日比が分割比率からこの割合 (対数) 以内なら、分割による段差とみなす。
 # 広すぎると、調整後の履歴に残った実際の大きな値動きまで段差と誤認し、実行のたびに
-# 調整が重なる (6072 の急騰で確認)。分割日の値動きを見込んで 12% とする
+# 調整が重なる。分割日の値動きを見込んで 12% とする
 SPLIT_JUMP_TOLERANCE = 0.12
 
 # 東証の値幅制限 (基準値段の未満 → 制限値幅、円)。1 営業日にこれを超えて動くことはないため、
 # 前日比の変化額がこれを超える段差だけを、分割 (併合) による段差とみなす。
-# 100 円未満の銘柄は制限値幅が 30 円で、27 円 → 52 円のように 2 倍近く動き得る (6740)
+# 100 円未満の銘柄は制限値幅が 30 円で、1 日に 2 倍近く動き得る
 _PRICE_LIMITS = (
     (100, 30), (200, 50), (500, 80), (700, 100), (1_000, 150), (1_500, 300),
     (2_000, 400), (3_000, 500), (5_000, 700), (7_000, 1_000), (10_000, 1_500),
@@ -166,10 +166,8 @@ def limit_may_be_widened(closes: list, i: int) -> bool:
 
     東証は、2 営業日連続でストップ高 (安) となり売買が成立しなかった銘柄の制限値幅を、
     翌営業日から拡大する (通常の 2 倍など)。直前の 2 日が続けて同じ向きに制限値幅まで
-    動いていれば、当日の変化額が通常の制限値幅を超えても、値動きでありうる。
-    - 6072: Kaihou との提携発表の後、4 日連続のストップ高。328 円 → 648 円と 1 日で約 2 倍
-    - 4316: 出来高がほぼ無いままストップ安が続き、387 円 → 192 円
-    どちらも併合ではない。出来高は見ていない (取得できない場合があるため近似)。
+    動いていれば、当日の変化額が通常の制限値幅を超えても、値動きでありうる (急騰・急落を
+    併合と誤認しないため)。出来高は見ていない (取得できない場合があるため近似)。
     """
     if i < 3:
         return False
@@ -180,7 +178,7 @@ def limit_may_be_widened(closes: list, i: int) -> bool:
 _PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Adj Close")
 
 # 分割比率として現実的な範囲。Yahoo は上場廃止前後などに 2e-07 のような異常な分割イベントを
-# 返すことがある (2026-10 に 1909・2180・7082・7426 で確認)
+# 返すことがある
 SPLIT_RATIO_RANGE = (0.02, 100.0)
 
 
@@ -192,6 +190,14 @@ def is_plausible_split_ratio(ratio: Optional[float]) -> bool:
     )
 
 
+def _is_impossible_jump(closes: list, i: int) -> bool:
+    """i 日目の前日比が、値動きではありえない段差か (変化額が制限値幅を超え、拡大でもない)。"""
+    prev, cur = closes[i - 1], closes[i]
+    if not prev or not cur or prev <= 0 or cur <= 0:
+        return False
+    return exceeds_daily_limit(prev, cur) and not limit_may_be_widened(closes, i)
+
+
 def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional[date]:
     """分割イベントの日付の近くで、前日比が分割比率に最も近い日 (段差の日) を返す。
 
@@ -199,7 +205,7 @@ def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional
     """
     if not is_plausible_split_ratio(ratio) or df.is_empty():
         return None
-    # 比率が 1 に近い分割 (4923 の 1:1.05 など) は、日々の値動きと見分けがつかない。
+    # 比率が 1 に近い分割 (1:1.05 など) は、日々の値動きと見分けがつかない。
     # 株価の調整は、値幅制限ではありえない大きさ (INFERRED_SPLIT_MIN_RATIO 以上) に限る。
     # (許容幅 SPLIT_JUMP_TOLERANCE が比率より広いと、どの日も「段差」になり、
     #  実行のたびに履歴が割られ続ける)
@@ -207,23 +213,16 @@ def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional
         return None
     out = df.sort("Date")
     days = out["Date"].cast(pl.Date).to_list()
+    lo, hi = split_day - SPLIT_SEARCH_BEFORE, split_day + SPLIT_SEARCH_AFTER
+    window = [i for i in range(1, len(days)) if days[i] is not None and lo <= days[i] <= hi]
+    if not window:
+        return None
     closes = out["Close"].to_list()
     best_i, best_err = None, None
-    for i in range(1, len(days)):
-        d = days[i]
-        if d is None or not (split_day - SPLIT_SEARCH_BEFORE <= d <= split_day + SPLIT_SEARCH_AFTER):
+    for i in window:
+        if not _is_impossible_jump(closes, i):
             continue
-        prev, cur = closes[i - 1], closes[i]
-        if (
-            not prev
-            or not cur
-            or prev <= 0
-            or cur <= 0
-            or not exceeds_daily_limit(prev, cur)
-            or limit_may_be_widened(closes, i)
-        ):
-            continue
-        err = abs(math.log(prev / cur) - math.log(ratio))
+        err = abs(math.log(closes[i - 1] / closes[i]) - math.log(ratio))
         if best_err is None or err < best_err:
             best_i, best_err = i, err
     if best_i is None or best_err > SPLIT_JUMP_TOLERANCE:
@@ -240,23 +239,36 @@ def infer_unrecorded_splits(df: pl.DataFrame) -> list[tuple[date, float]]:
     if df.is_empty() or "Date" not in df.columns or "Close" not in df.columns:
         return []
     out = df.sort("Date")
+    # 全銘柄・全履歴に毎回かかるため、前日比 INFERRED_SPLIT_MIN_RATIO 倍以上の行を先に絞る
+    # (ほとんどの銘柄は候補が 0 件)
+    prev = pl.col("Close").shift(1)
+    candidates = (
+        out.with_row_index("_i")
+        .filter(
+            (prev > 0)
+            & (pl.col("Close") > 0)
+            & (
+                (prev / pl.col("Close") >= INFERRED_SPLIT_MIN_RATIO)
+                | (pl.col("Close") / prev >= INFERRED_SPLIT_MIN_RATIO)
+            )
+        )["_i"]
+        .to_list()
+    )
+    if not candidates:
+        return []
     days = out["Date"].cast(pl.Date).to_list()
     closes = out["Close"].to_list()
     found: list[tuple[date, float]] = []
-    for i in range(1, len(days)):
-        prev, cur, d0, d1 = closes[i - 1], closes[i], days[i - 1], days[i]
-        if not prev or not cur or prev <= 0 or cur <= 0 or d0 is None or d1 is None:
+    for i in candidates:
+        d0, d1 = days[i - 1], days[i]
+        if d0 is None or d1 is None or d1 - d0 > INFERRED_SPLIT_MAX_GAP:
             continue
-        if d1 - d0 > INFERRED_SPLIT_MAX_GAP:
-            continue
-        r = prev / cur
+        r = closes[i - 1] / closes[i]
         x = r if r >= 1 else 1 / r
         n = round(x)
-        if x < INFERRED_SPLIT_MIN_RATIO or not is_plausible_split_ratio(float(n)):
+        if not is_plausible_split_ratio(float(n)) or abs(x / n - 1) > INFERRED_SPLIT_TOLERANCE:
             continue
-        if not exceeds_daily_limit(prev, cur) or limit_may_be_widened(closes, i):
-            continue
-        if abs(x / n - 1) > INFERRED_SPLIT_TOLERANCE:
+        if not _is_impossible_jump(closes, i):
             continue
         found.append((d1, float(n) if r >= 1 else 1.0 / n))
     return found
@@ -333,3 +345,47 @@ def merge_history(df_db: Optional[pl.DataFrame], df_new: pl.DataFrame) -> pl.Dat
         .unique("Date", keep="last", maintain_order=True)
         .sort("Date")
     )
+
+
+class SplitTracker:
+    """株式分割の記録を持ち、銘柄ごとの株価履歴を調整する (取得フェーズで 1 回の実行に 1 つ)。
+
+    - 記録済みの分割と、今回の取得で見つかった分割 (Yahoo のイベント) を合わせて持つ
+    - 比率が範囲内のイベントは、株価に段差が無く (Yahoo が調整済み) ても記録する
+      (1 株当たりの財務指標の補正に使う)
+    - 株価の調整は、段差が残っている分割だけ。イベントの無い分割は段差から推定して記録する
+    """
+
+    # 同じ分割のイベントが日付をずらして重ねて届くことがあるため、この日数以内は同じ分割とみなす
+    DEDUP_DAYS = 10
+
+    def __init__(self, recorded: Optional[pl.DataFrame] = None):
+        self.by_code: dict[str, list[tuple[date, float]]] = {}
+        self.new: list[tuple[str, date, float]] = []
+        if recorded is not None:
+            for code, d, r in recorded.iter_rows():
+                self.by_code.setdefault(str(code), []).append((d, r))
+
+    def _record(self, code: str, d: date, r: float) -> None:
+        self.by_code.setdefault(code, []).append((d, r))
+        self.new.append((code, d, r))
+
+    def add_events(self, found: dict[str, list[tuple[date, float]]]) -> None:
+        """取得で見つかった分割イベントを加える (異常な比率と、既知の分割の重複は除く)。"""
+        for code, events in found.items():
+            for d, r in events:
+                known = self.by_code.get(code, [])
+                if is_plausible_split_ratio(r) and all(
+                    abs((d - kd).days) > self.DEDUP_DAYS for kd, _ in known
+                ):
+                    self._record(code, d, r)
+
+    def adjust(self, code: str, df: pl.DataFrame) -> pl.DataFrame:
+        """株価に段差が残っている分割を調整し、イベントの無い分割を推定して記録・調整する。"""
+        events = self.by_code.get(code)
+        if events:
+            df = apply_split_adjustments(df, events)
+        inferred = infer_unrecorded_splits(df)
+        for d, r in inferred:
+            self._record(code, d, r)
+        return apply_split_adjustments(df, inferred) if inferred else df

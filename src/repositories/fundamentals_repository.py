@@ -76,6 +76,14 @@ class FundamentalsRepository:
         self.logger.info(f"Backfilled growth rates for {growth.height} stocks from seed.")
         return growth.height
 
+    def get_provenance(self) -> dict[str, dict[str, Optional[str]]]:
+        """銘柄ごとの財務値の出所 {"period_end", "bs_period_end"} (EDINET 取り込みの新旧判定用)。"""
+        with self.duck_repo.client.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT code, period_end, bs_period_end FROM fundamentals"
+            ).fetchall()
+        return {r[0]: {"period_end": r[1], "bs_period_end": r[2]} for r in rows}
+
     def restore_missing_from_seed(self, seed_path: Path, columns: tuple) -> int:
         """DB で欠損している項目だけを、シードの値で補う (値がある項目は変更しない)。
 
@@ -84,21 +92,19 @@ class FundamentalsRepository:
         """
         if not seed_path.exists():
             return 0
-        seed = pl.read_parquet(str(seed_path))
-        present = [c for c in columns if c in seed.columns]
-        if "code" not in seed.columns or not present:
+        raw = pl.read_parquet(str(seed_path))
+        present = [c for c in columns if c in raw.columns]
+        if "code" not in raw.columns or not present:
             return 0
-        seed = seed.select(["code", *present]).with_columns(pl.col("code").cast(pl.Utf8))
+        raw = raw.with_columns(pl.col("code").cast(pl.Utf8))
+        seed = raw.select(["code", *present])
         sets = ", ".join(f"{c} = coalesce(f.{c}, s.{c})" for c in present)
         missing = " OR ".join(f"(f.{c} IS NULL AND s.{c} IS NOT NULL)" for c in present)
         basis = (
-            pl.read_parquet(str(seed_path), columns=["code", "updated_at"])
-            .with_columns(
-                pl.col("code").cast(pl.Utf8),
-                pl.col("updated_at").cast(pl.Utf8).str.slice(0, 16).alias("basis"),
+            raw.select(
+                "code", pl.col("updated_at").cast(pl.Utf8).str.slice(0, 16).alias("basis")
             )
-            .select(["code", "basis"])
-            if "updated_at" in pl.read_parquet_schema(str(seed_path))
+            if "updated_at" in raw.columns
             else None
         )
         with self.duck_repo.client.get_connection() as conn:
