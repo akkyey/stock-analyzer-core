@@ -113,3 +113,19 @@ def test_consecutive_glitch_prices_are_removed():
     cleaned = PolarsProcessor.clean_anomalous_prices(df)["Close"].to_list()
     assert cleaned[20:31] == [None] * 11
     assert all(p == 1630.0 for p in cleaned[:20] + cleaned[31:])
+
+
+def test_glitch_block_at_start_of_history_is_removed():
+    """履歴の先頭が異常値の連続で始まっても除外する (前後の中央値自体が異常値になるため)"""
+    import polars as pl
+
+    prices = [53637025792.0] * 11 + [1630.0] * 200
+    df = pl.DataFrame(
+        {
+            "code": ["8303"] * len(prices),
+            "Date": [datetime(2025, 11, 17) + timedelta(days=i) for i in range(len(prices))],
+            "Close": prices,
+        }
+    )
+    cleaned = PolarsProcessor.clean_anomalous_prices(df)["Close"].to_list()
+    assert cleaned[:11] == [None] * 11 and all(p == 1630.0 for p in cleaned[11:])

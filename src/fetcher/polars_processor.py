@@ -68,8 +68,13 @@ class PolarsProcessor:
                 .over("code")
             )
             deviation = pl.col(price_col) / local_median
+            # 履歴の先頭が異常値の連続で始まると、前後の中央値自体が異常値になる
+            # (8303 は上場直後の 11 日間が 536 億円)。銘柄の全期間の中央値からの極端な乖離も除く
+            overall = pl.col(price_col) / pl.col(price_col).median().over("code")
             cleaned = cleaned.with_columns(
-                pl.when((deviation > 5.0) | (deviation < 0.2))
+                pl.when(
+                    (deviation > 5.0) | (deviation < 0.2) | (overall > 20.0) | (overall < 0.05)
+                )
                 .then(None)
                 .otherwise(pl.col(price_col))
                 .alias(price_col)
