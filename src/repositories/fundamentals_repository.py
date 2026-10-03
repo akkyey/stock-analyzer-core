@@ -93,21 +93,22 @@ class FundamentalsRepository:
         if not seed_path.exists():
             return 0
         raw = pl.read_parquet(str(seed_path))
-        present = [c for c in columns if c in raw.columns]
-        if "code" not in raw.columns or not present:
-            return 0
-        raw = raw.with_columns(pl.col("code").cast(pl.Utf8))
-        seed = raw.select(["code", *present])
-        sets = ", ".join(f"{c} = coalesce(f.{c}, s.{c})" for c in present)
-        missing = " OR ".join(f"(f.{c} IS NULL AND s.{c} IS NOT NULL)" for c in present)
-        basis = (
-            raw.select(
-                "code", pl.col("updated_at").cast(pl.Utf8).str.slice(0, 16).alias("basis")
-            )
-            if "updated_at" in raw.columns
-            else None
-        )
         with self.duck_repo.client.get_connection() as conn:
+            table_cols = {r[0] for r in conn.execute("DESCRIBE fundamentals").fetchall()}
+            present = [c for c in columns if c in raw.columns and c in table_cols]
+            if "code" not in raw.columns or not present:
+                return 0
+            raw = raw.with_columns(pl.col("code").cast(pl.Utf8))
+            seed = raw.select(["code", *present])
+            sets = ", ".join(f"{c} = coalesce(f.{c}, s.{c})" for c in present)
+            missing = " OR ".join(f"(f.{c} IS NULL AND s.{c} IS NOT NULL)" for c in present)
+            basis = (
+                raw.select(
+                    "code", pl.col("updated_at").cast(pl.Utf8).str.slice(0, 16).alias("basis")
+                )
+                if "updated_at" in raw.columns
+                else None
+            )
             conn.register("_seed_restore", seed.to_arrow())
             rows = conn.execute(
                 f"UPDATE fundamentals AS f SET {sets} FROM _seed_restore AS s "

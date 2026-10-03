@@ -221,6 +221,15 @@ class DuckDBRepository:
                 )
             """)
             # [v28.5] Schema Evolution
+            for stock_col in (
+                "status VARCHAR DEFAULT 'active'",
+                "exclusion_reason VARCHAR",
+                "excluded_until VARCHAR",
+                "fail_count INTEGER DEFAULT 0",
+                "edinet_code VARCHAR",
+            ):
+                conn.execute(f"ALTER TABLE stocks ADD COLUMN IF NOT EXISTS {stock_col}")
+
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS prev_net_profit DOUBLE"
             )
@@ -238,6 +247,15 @@ class DuckDBRepository:
             )
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS dps DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS net_profit DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS eps DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS bps DOUBLE"
             )
             # 財務値の出所となった書類の決算期末・提出日時。古い期の書類 (過年度の訂正報告書など)
             # で新しい値を上書きしないための判定と、株式分割の調整に使う。
