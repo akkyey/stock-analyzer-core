@@ -210,3 +210,20 @@ def test_real_surge_after_adjustment_is_not_readjusted():
     events = [(date(2026, 2, 13), 0.5)]
     once = apply_split_adjustments(df, events)
     assert apply_split_adjustments(once, events)["Close"].to_list() == once["Close"].to_list()
+
+
+def test_surge_with_widened_limit_is_not_a_consolidation():
+    """6072 の実例: 4 日連続のストップ高の後、制限値幅の拡大で 328 円 → 648 円 (約 2 倍)。併合ではない"""
+    from src.fetcher.incremental import infer_unrecorded_splits, limit_may_be_widened
+
+    df = pl.DataFrame(
+        {
+            "Date": [datetime(2026, 2, d) for d in (9, 10, 12, 13)],
+            "Close": [198.0, 248.0, 328.0, 648.0],  # 前日までに 50 円・80 円 (制限値幅いっぱい) のストップ高
+        }
+    )
+    assert limit_may_be_widened(df["Close"].to_list(), 3)
+    assert infer_unrecorded_splits(df) == []
+    # 前日が静かなら、同じ 2 倍の段差は併合とみなす
+    quiet = pl.DataFrame({"Date": [datetime(2026, 2, d) for d in (9, 10, 12, 13)], "Close": [328.0, 330.0, 329.0, 648.0]})
+    assert infer_unrecorded_splits(quiet) == [(date(2026, 2, 13), 0.5)]

@@ -140,9 +140,29 @@ def daily_price_limit(price: float) -> float:
     return float(price) * 0.3
 
 
+# 前日にこの割合以上、制限値幅まで動いた銘柄は、制限値幅が拡大している可能性がある
+LIMIT_HIT_RATIO = 0.8
+
+
 def exceeds_daily_limit(prev: float, cur: float) -> bool:
     """前日終値から当日終値への変化額が、制限値幅を超えているか (値動きではありえない段差か)。"""
     return abs(cur - prev) > daily_price_limit(prev)
+
+
+def limit_may_be_widened(closes: list, i: int) -> bool:
+    """i 日目の制限値幅が、拡大されている可能性があるか。
+
+    東証は、2 営業日連続でストップ高 (安) となり売買が成立しなかった銘柄の制限値幅を、
+    翌営業日から拡大する (通常の 2 倍など)。前日に制限値幅まで動いていれば、当日の変化額が
+    通常の制限値幅を超えても、値動きでありうる (6072 は Kaihou との提携発表の後、
+    4 日連続のストップ高となり、328 円 → 648 円と 1 日で約 2 倍になった。併合ではない)。
+    """
+    if i < 2:
+        return False
+    pp, p = closes[i - 2], closes[i - 1]
+    if not pp or not p or pp <= 0 or p <= 0:
+        return False
+    return abs(p - pp) >= LIMIT_HIT_RATIO * daily_price_limit(pp)
 
 _PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Adj Close")
 
@@ -181,7 +201,14 @@ def find_split_jump(df: pl.DataFrame, split_day: date, ratio: float) -> Optional
         if d is None or not (split_day - SPLIT_SEARCH_BEFORE <= d <= split_day + SPLIT_SEARCH_AFTER):
             continue
         prev, cur = closes[i - 1], closes[i]
-        if not prev or not cur or prev <= 0 or cur <= 0 or not exceeds_daily_limit(prev, cur):
+        if (
+            not prev
+            or not cur
+            or prev <= 0
+            or cur <= 0
+            or not exceeds_daily_limit(prev, cur)
+            or limit_may_be_widened(closes, i)
+        ):
             continue
         err = abs(math.log(prev / cur) - math.log(ratio))
         if best_err is None or err < best_err:
@@ -214,7 +241,7 @@ def infer_unrecorded_splits(df: pl.DataFrame) -> list[tuple[date, float]]:
         n = round(x)
         if x < INFERRED_SPLIT_MIN_RATIO or not is_plausible_split_ratio(float(n)):
             continue
-        if not exceeds_daily_limit(prev, cur):
+        if not exceeds_daily_limit(prev, cur) or limit_may_be_widened(closes, i):
             continue
         if abs(x / n - 1) > INFERRED_SPLIT_TOLERANCE:
             continue
