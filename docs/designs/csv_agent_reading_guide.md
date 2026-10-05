@@ -77,7 +77,7 @@ df_uncalc = pl.read_csv("data/output/uncalculable_stocks.csv", null_values=["-"]
 | **PBR_Src** / **PBR** | String / Float | 株価純資産倍率 (倍) と出所 | `calc` / `1.3` |
 | **Div_Yield_Src** / **Div_Yield** | String / Float | 配当利回り (**%表記**。`0.55` は 0.55%) と出所 | `calc` / `0.55` |
 | **ROE_Src** / **ROE** | String / Float | 自己資本利益率 (**%表記**) と出所 | `stored` / `27.41` |
-| **Sales_Growth** | Float | 売上高成長率 (%) | `2.03` |
+| **Sales_Growth** | Float | 売上高成長率 (%)。**値が無い場合は `-`**。同梱シード由来の値で、EDINET の取り込みでは計算していない。売上が旧い値から変わった銘柄では、旧い売上との比較の値が新しい売上と食い違うため、`-` にしている（同じ決算期の売上なら値を残す）。スコア・判定・足切りには使われない | `2.03` |
 | **Profit_Growth** | Float | 利益成長率 (%) | `-64.7` |
 | **Operating_Margin** | Float | 営業利益率 (%) | `-1.48` |
 | **Equity_Ratio** | Float | 自己資本比率 (%) | `59.72` |

@@ -40,6 +40,11 @@ def _is_num(v: Any) -> TypeGuard[float]:
     return isinstance(v, (int, float)) and v == v  # NaN を除く
 
 
+def _same_amount(a: float, b: float) -> bool:
+    """売上が同じ値か (丸めの誤差は同じとみなす)。"""
+    return abs(a - b) <= 1e-9 * max(abs(a), abs(b), 1.0)
+
+
 def _before(period: str, stored: str, or_equal: bool = False) -> bool:
     """書類の期 period が、DB に記録済みの期 stored より古いか (どちらかが不明なら False)。"""
     if not period or not stored:
@@ -47,12 +52,12 @@ def _before(period: str, stored: str, or_equal: bool = False) -> bool:
     return period <= stored if or_equal else period < stored
 
 
-def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Optional[Dict[str, Any]]:
+def build_record(item: Dict[str, Any], stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """取得結果 1 件から、fundamentals へ書き込む項目を決める。
 
     Args:
         item: パーサーの結果 (kind / period_end / submit_date / 各項目)
-        stored: DB の現在の出所 {"period_end", "bs_period_end"} (無ければ None)
+        stored: DB の現在の出所 {"period_end", "bs_period_end"} と売上 "sales" (無ければ None)
 
     Returns:
         書き込む項目 (code を含む)。古い期の書類などで書き込むものが無ければ None。
@@ -67,7 +72,9 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
     if kind == KIND_ANNUAL:
         if _before(period_end, stored_pl):
             return None
-        record = _annual_record(item, period_end, submitted, update_bs=not _before(period_end, stored_bs))
+        record = _annual_record(
+            item, period_end, submitted, update_bs=not _before(period_end, stored_bs), stored_sales=stored.get("sales")
+        )
     elif kind == KIND_INTERIM:
         # 同じ期の再適用は同じ値になるため許容し、古い期だけを除く
         if _before(period_end, stored_bs) or _before(period_end, stored_pl, or_equal=True):
@@ -104,15 +111,20 @@ def _drop_implausible_per_share(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _annual_record(
-    item: Dict[str, Any], period_end: str, submitted: Optional[str], update_bs: bool
+    item: Dict[str, Any],
+    period_end: str,
+    submitted: Optional[str],
+    update_bs: bool,
+    stored_sales: Optional[float] = None,
 ) -> Dict[str, Any]:
     """有価証券報告書から書き込む項目 (貸借対照表は、半期報告書の方が新しくなければ更新)。"""
     record = _pick(item, ANNUAL_PL_FIELDS)
     record.update(period_end=period_end or None, submitted_at=submitted)
-    if "sales" in record:
-        # 売上を新しい期の値に更新したときは、旧い売上との比較で計算された売上高成長率 (同梱シード由来。
+    if "sales" in record and _is_num(stored_sales) and not _same_amount(record["sales"], stored_sales):
+        # 売上が DB の値から変わったときは、旧い売上との比較で計算された売上高成長率 (同梱シード由来。
         # EDINET の取り込みでは計算していない) を空にする。残すと、新しい売上と食い違った成長率が
-        # 表示されてしまう (取り込みの「空の値で上書きしない」原則の、意図した例外)
+        # 表示されてしまう (取り込みの「空の値で上書きしない」原則の、意図した例外)。売上が同じ
+        # (同じ決算期の売上) なら、成長率は整合しているため残す
         record["sales_growth"] = None
     if update_bs:
         record.update(_pick(item, BALANCE_SHEET_FIELDS))
@@ -211,6 +223,7 @@ class EdinetBridge:
             stored[code] = {
                 "period_end": merged.get("period_end", current.get("period_end")),
                 "bs_period_end": merged.get("bs_period_end", current.get("bs_period_end")),
+                "sales": merged.get("sales", current.get("sales")),
             }
             outcomes.append((item, "success"))
 

@@ -159,23 +159,33 @@ def test_build_record_drops_per_share_values_of_pre_listing_document():
     assert "bps" not in rec and "shares_outstanding" not in rec and rec["net_assets"] == 100.0
 
 
-def test_annual_report_with_new_sales_clears_stale_sales_growth(bridge, db_conn):
-    """売上を更新したときは、旧い売上との比較の売上高成長率 (シード由来) を空にする。
-    売上を取れなかった書類では、成長率を変えない"""
+def test_sales_growth_is_cleared_only_when_sales_changes(bridge, db_conn):
+    """売上が DB の値から変わったときだけ、旧い売上との比較の売上高成長率 (シード由来) を空にする。
+    同じ決算期の売上 (同じ値) なら成長率は整合しているため残す。売上を取れなかった書類でも変えない"""
     FundamentalsRepository().upsert(
         [{"code": "1381", "sales": 2.6426e10, "sales_growth": 2.28, "profit_growth": 5.0},
-         {"code": "1414", "sales": 9.0e10, "sales_growth": 6.2}]
+         {"code": "1414", "sales": 9.0e10, "sales_growth": 6.2},
+         {"code": "1500", "sales": 7.0e9, "sales_growth": 1.1}]
     )
-    _write(bridge, "1381_annual.json", {"code": "1381", "kind": "annual", "period_end": "2026-03-31",
-                                         "submit_date": "2026-06-20 15:00", "sales": 2.9244e10})
-    _write(bridge, "1414_annual.json", {"code": "1414", "kind": "annual", "period_end": "2026-03-31",
-                                         "submit_date": "2026-06-20 15:00", "net_profit": 1.0e9})  # 売上は取れず
+    common = {"kind": "annual", "period_end": "2026-03-31", "submit_date": "2026-06-20 15:00"}
+    _write(bridge, "1381_annual.json", {"code": "1381", **common, "sales": 2.9244e10})  # 売上が変わった
+    _write(bridge, "1414_annual.json", {"code": "1414", **common, "net_profit": 1.0e9})  # 売上は取れず
+    _write(bridge, "1500_annual.json", {"code": "1500", **common, "sales": 7.0e9, "net_profit": 1.0})  # 同じ売上
     bridge.bridge_all()
     with bridge.repository.duck_repo.client.get_connection() as conn:
-        a, b = _fund(conn, "1381"), _fund(conn, "1414")
+        a, b, c = _fund(conn, "1381"), _fund(conn, "1414"), _fund(conn, "1500")
     assert a["sales"] == 2.9244e10 and a["sales_growth"] is None
     assert a["profit_growth"] == 5.0  # 他の項目は変えない
     assert b["sales_growth"] == 6.2
+    assert c["sales_growth"] == 1.1
+
+
+def test_sales_growth_is_kept_when_stored_sales_is_unknown():
+    """DB に売上が無い場合は、比較できないため成長率に触れない"""
+    item = {"code": "1", "kind": "annual", "period_end": "2026-03-31", "sales": 5.0}
+    assert "sales_growth" not in build_record(item, {})
+    assert build_record(item, {"sales": 4.0})["sales_growth"] is None
+    assert "sales_growth" not in build_record(item, {"sales": 5.0})
 
 
 # --- 書類の選択 -------------------------------------------------------------

@@ -95,13 +95,17 @@ class FundamentalsRepository:
         self.logger.info(f"Backfilled growth rates for {growth.height} stocks from seed.")
         return growth.height
 
-    def get_provenance(self) -> dict[str, dict[str, Optional[str]]]:
-        """銘柄ごとの財務値の出所 {"period_end", "bs_period_end"} (EDINET 取り込みの新旧判定用)。"""
+    def get_provenance(self) -> dict[str, dict[str, Any]]:
+        """銘柄ごとの財務値の出所 {"period_end", "bs_period_end"} と現在の売上 (EDINET 取り込みの判定用)。
+
+        売上は、取り込みで売上が変わったかを判定し、変わった場合に旧い売上との比較の売上高成長率を
+        空にするために使う。
+        """
         with self.duck_repo.client.get_connection() as conn:
             rows = conn.execute(
-                "SELECT code, period_end, bs_period_end FROM fundamentals"
+                "SELECT code, period_end, bs_period_end, sales FROM fundamentals"
             ).fetchall()
-        return {r[0]: {"period_end": r[1], "bs_period_end": r[2]} for r in rows}
+        return {r[0]: {"period_end": r[1], "bs_period_end": r[2], "sales": r[3]} for r in rows}
 
     def refresh_from_seed(self, seed_path: Path) -> int:
         """同梱シードの値で、決算期の古い財務値を更新する (DB の値の方が新しい項目は変更しない)。
