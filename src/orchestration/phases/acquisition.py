@@ -256,7 +256,7 @@ class AcquisitionPhase(BasePhase):
                     repo.save_stocks(df_pl)
                     target_codes = list(repo.get_all_codes() or [])
                     print(
-                        f"   ✅ 銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。",
+                        f"   ✅ 東証(JPX)公式リストから銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。",
                         flush=True,
                     )
             except Exception as e:
@@ -302,8 +302,11 @@ class AcquisitionPhase(BasePhase):
                 try:
                     df_seed = pl.read_parquet(str(seed_parquet))
                     repo.save_fundamentals(df_seed)
+                    all_master_codes = list(repo.get_all_codes() or [])
+                    diff_seed = len(all_master_codes) - len(df_seed) if len(all_master_codes) > len(df_seed) else 0
+                    diff_note = f" (直近の新規上場等 {diff_seed} 銘柄を除く)" if diff_seed > 0 else ""
                     print(
-                        f"   ✅ 財務データに {len(df_seed)} 銘柄を初期登録しました。",
+                        f"   ✅ 財務シードデータから {len(df_seed)} 銘柄を初期登録しました{diff_note}。",
                         flush=True,
                     )
                 except Exception as e:
@@ -349,6 +352,7 @@ class AcquisitionPhase(BasePhase):
             scan_days = self._edinet_scan_days(
                 repo, int(fetcher_cfg.get("edinet_scan_days", 30))
             )
+            print(f"   🔍 EDINET 最新開示の同期確認中 (過去 {scan_days} 日分)...", flush=True)
             self.log_info(
                 f"⚡ Synchronizing Fundamentals from EDINET (Turbo, {scan_days} days)..."
             )
@@ -366,6 +370,7 @@ class AcquisitionPhase(BasePhase):
                 # ブリッジによる DB 反映 (成果物キャッシュを保持して平常時の実通信を遮断)
                 bridge = EdinetBridge()
                 sync_count = bridge.bridge_all(purge_after=False)
+                print(f"   ✨ EDINET 同期完了 ({sync_count} 件の開示書類を反映 / キャッシュ有効)", flush=True)
                 self.log_info(
                     f"✅ EDINET sync completed. {sync_count} documents integrated."
                 )
@@ -409,6 +414,13 @@ class AcquisitionPhase(BasePhase):
         """株価を取得し、DB の履歴と結合・株式分割を調整した銘柄ごとの履歴を返す。"""
         from src.services.stock_master import update_no_data_tracking
 
+        all_master_count = len(list(repo.get_all_codes() or []))
+        excluded_count = all_master_count - len(target_codes) if all_master_count > len(target_codes) else 0
+        if excluded_count > 0:
+            print(
+                f"   ℹ️ 市場データ取得対象: {len(target_codes)} 銘柄 (株価配信のない PRO Market 等 {excluded_count} 銘柄を除外)",
+                flush=True,
+            )
         print(
             f"📡 全 {len(target_codes)} 銘柄の市場データ取得を開始します...",
             flush=True,
@@ -571,7 +583,7 @@ class AcquisitionPhase(BasePhase):
             self.log_warn(f"取得不能銘柄の記録に失敗しました (継続): {e}")
 
         print(
-            f"✅ 市場データ取得完了: 全 {len(all_data_map)} 銘柄のデータを準備しました。",
+            f"✅ 市場データ取得完了: 対象 {len(target_codes)} 銘柄中 {len(all_data_map)} 銘柄のデータを準備しました。",
             flush=True,
         )
         return all_data_map
