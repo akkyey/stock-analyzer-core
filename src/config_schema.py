@@ -100,6 +100,10 @@ class ConfigModel(BaseModel):
         default_factory=FinancialRepairConfig
     )
     gdrive: GDriveConfig | None = None
+    # データ取得の設定 (edinet_scan_days・refresh_stock_master・refresh_fundamentals_from_seed 等)。
+    # 項目が決まっていないため辞書のまま通す。スキーマに無いと、`extra: ignore` で、設定ファイルの
+    # fetcher: の内容がすべて捨てられ、コード内の既定値だけが使われていた
+    fetcher: dict[str, Any] = Field(default_factory=dict)
     sector_policies: dict[str, SectorPolicy] = Field(default_factory=dict)
     sector_risks: dict[str, str] = Field(default_factory=dict)
     metadata_mapping: MetadataMappingConfig | None = None
