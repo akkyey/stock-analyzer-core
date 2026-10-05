@@ -1,7 +1,6 @@
-"""境界値・異常値・ユーザー操作ミスに対する堅牢化テストスイート (Phase 1 〜 Phase 3)."""
-
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
 import polars as pl
 import pytest
 
@@ -137,7 +136,9 @@ def test_pre_filter_boundary_insolvent_negative_equity():
     passed_codes = result.passed_df["code"].to_list()
     assert passed_codes == ["2003"]
 
-    rejected_reasons = dict(zip(result.rejected_df["code"], result.rejected_df["filter_reason"]))
+    rejected_reasons = dict(
+        zip(result.rejected_df["code"], result.rejected_df["filter_reason"], strict=True)
+    )
     assert rejected_reasons["2001"] == "構造的破綻 (債務超過)"
     assert rejected_reasons["2002"] == "構造的破綻 (債務超過)"
 
