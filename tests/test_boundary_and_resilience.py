@@ -7,7 +7,7 @@ import pytest
 
 from src.calc.pre_filter import PreFilter
 from src.calc.quant_evaluator import QuantEvaluator
-from src.services.financial_repair import FinancialRepair
+from src.services.financial_repair import FinancialRepairService
 from src.utils.colab_sync import ColabSyncManager
 
 
@@ -143,7 +143,7 @@ def test_pre_filter_boundary_insolvent_negative_equity():
 
 
 def test_financial_repair_zero_division_resilience():
-    """B-1: FinancialRepair で EPS=0, BPS=0, 株価=0, 負値のゼロ除算耐性."""
+    """B-1: FinancialRepairService で EPS=0, BPS=0, 株価=0, 負値のゼロ除算耐性."""
     records = [
         # EPS=0 (PER 除算ゼロ), BPS=0 (PBR 除算ゼロ)
         {"code": "3001", "price": 1000.0, "eps": 0.0, "bps": 0.0, "dps": 0.0},
@@ -155,7 +155,7 @@ def test_financial_repair_zero_division_resilience():
         {"code": "3004", "price": 1000.0, "eps": 100.0, "bps": 500.0, "dps": 30.0},
     ]
     df = pl.DataFrame(records)
-    repaired = FinancialRepair.repair_all(df)
+    repaired = FinancialRepairService.repair(df)
 
     row1 = repaired.filter(pl.col("code") == "3001").to_dicts()[0]
     assert row1["per"] is None  # EPS=0 では PER を算出せず None
