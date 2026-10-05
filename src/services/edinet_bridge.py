@@ -33,6 +33,13 @@ ANNUAL_PL_FIELDS = (
     "dps",
 )
 INTERIM_FIELDS = XbrlParser.INTERIM_FIELDS
+# 自己資本比率 (%) として採用する範囲。債務超過 (純資産が負) では 100% を大きく下回るため下限は広く取るが、
+# 総資産が 0 と読まれた書類 (例: 543A の -4.08×10^10) のような、桁の違う値は採用しない
+EQUITY_RATIO_RANGE = (-1000.0, 100.0)
+# 発行済株式数がこれ未満の書類は、1 株当たりの値を採用しない。上場前に提出された書類 (543A は 1 株) では、
+# EPS・BPS が純利益・純資産そのもの (約 -4 億円) になり、PER などが意味のない値になる
+MIN_PLAUSIBLE_SHARES = 1000.0
+PER_SHARE_FIELDS = ("eps", "bps", "dps")
 
 
 def _is_num(v: Any) -> TypeGuard[float]:
@@ -56,6 +63,7 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
     Returns:
         書き込む項目 (code を含む)。古い期の書類などで書き込むものが無ければ None。
     """
+    item = _drop_implausible_per_share(item)
     period_end = item.get("period_end") or ""
     submitted = item.get("submit_date") or None
     stored_pl = stored.get("period_end") or ""
@@ -82,8 +90,23 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
 
 
 def _pick(item: Dict[str, Any], fields: tuple) -> Dict[str, Any]:
-    """item の項目のうち、数値のものだけを取り出す。"""
-    return {f: float(item[f]) for f in fields if _is_num(item.get(f))}
+    """item の項目のうち、数値のものだけを取り出す (範囲外の自己資本比率は除く)。"""
+    picked = {f: float(item[f]) for f in fields if _is_num(item.get(f))}
+    ratio = picked.get("equity_ratio")
+    if ratio is not None and not (EQUITY_RATIO_RANGE[0] <= ratio <= EQUITY_RATIO_RANGE[1]):
+        del picked["equity_ratio"]  # 純資産 / 総資産で計算できる場合は、_fill_equity_ratio が補う
+    return picked
+
+
+def _drop_implausible_per_share(item: Dict[str, Any]) -> Dict[str, Any]:
+    """発行済株式数が極端に少ない書類 (上場前など) の、株数と 1 株当たりの値を除いた写しを返す。
+
+    損益側 (eps・dps) と貸借対照表側 (bps・shares_outstanding) は別々に取り出すため、書類全体で判定する。
+    """
+    shares = item.get("shares_outstanding")
+    if _is_num(shares) and shares < MIN_PLAUSIBLE_SHARES:
+        return {k: v for k, v in item.items() if k not in ("shares_outstanding", *PER_SHARE_FIELDS)}
+    return item
 
 
 def _annual_record(
@@ -92,6 +115,11 @@ def _annual_record(
     """有価証券報告書から書き込む項目 (貸借対照表は、半期報告書の方が新しくなければ更新)。"""
     record = _pick(item, ANNUAL_PL_FIELDS)
     record.update(period_end=period_end or None, submitted_at=submitted)
+    if "sales" in record:
+        # 売上を新しい期の値に更新したときは、旧い売上との比較で計算された売上高成長率 (同梱シード由来。
+        # EDINET の取り込みでは計算していない) を空にする。残すと、新しい売上と食い違った成長率が
+        # 表示されてしまう (取り込みの「空の値で上書きしない」原則の、意図した例外)
+        record["sales_growth"] = None
     if update_bs:
         record.update(_pick(item, BALANCE_SHEET_FIELDS))
         record.update(bs_period_end=period_end or None, bs_submitted_at=submitted)
