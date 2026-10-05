@@ -46,7 +46,7 @@ def _reset_block_source() -> str:
         nb = json.load(f)
     cell_src = "".join(nb["cells"][4]["source"])
     start = cell_src.index("# 0. 初期化スイッチの処理")
-    end = cell_src.index("# Drive 再マウントガード")
+    end = cell_src.index("# DB の配置")
     return cell_src[start:end]
 
 
@@ -62,14 +62,20 @@ def _run_reset_block(namespace: dict) -> None:
     exec(compile(_reset_block_source(), "<step1-reset-block>", "exec"), namespace)
 
 
-def test_colab_notebook_reset_database_runs_only_once_per_session():
-    """A-1: 「すべてのセルを実行」で Step 0 が reset_database を ON に戻しても、消去は 1 回だけ。
+def _ns(sync, drive="/drive/StockAnalyzer", **extra):
+    from pathlib import Path
+
+    return {"ColabSyncManager": sync, "DRIVE_DIR": Path(drive), "WORKING_DIR": Path("/work"), **extra}
+
+
+def test_colab_notebook_reset_database_runs_only_once_per_folder_per_session():
+    """A-1: 「すべてのセルを実行」で Step 0 が reset_database を ON に戻しても、同じ保存先の消去は 1 回だけ。
 
     以前の自動解除は Step 1 の変数を戻すだけで、Step 0 のチェックボックスが ON のままだと、
-    実行のたびに DB が消えて 20 分の初回構築が繰り返されていた。
+    実行のたびに DB が消えて初回構築が繰り返されていた。
     """
     sync = _FakeSync()
-    ns = {"ColabSyncManager": sync, "DRIVE_DIR": "/drive", "WORKING_DIR": "/work"}
+    ns = _ns(sync)
 
     ns["reset_database"] = True  # Step 0 (チェックボックス ON)
     _run_reset_block(ns)
@@ -79,13 +85,44 @@ def test_colab_notebook_reset_database_runs_only_once_per_session():
     for _ in range(3):  # 「すべてのセルを実行」: Step 0 が再び True にする
         ns["reset_database"] = True
         _run_reset_block(ns)
-    assert sync.reset_calls == 1, "同じセッションでは 2 回目以降は消去しない"
+    assert sync.reset_calls == 1, "同じ保存先は、同じセッションでは 2 回目以降は消去しない"
     assert ns["reset_database"] is True  # 消去しない場合は、値には触れない
+
+
+def test_colab_notebook_reset_database_allowed_again_when_folder_changes():
+    """保存先フォルダを変えた場合は新しい保存先なので、同じセッションでも初期化できる (実機で、案内どおりに
+    操作しても止められた不具合の再発防止)"""
+    from pathlib import Path
+
+    sync = _FakeSync()
+    ns = _ns(sync, reset_database=True)
+    _run_reset_block(ns)
+    assert sync.reset_calls == 1
+
+    ns["DRIVE_DIR"] = Path("/drive/StockAnalyzer_Test2")  # 保存先を変更
+    ns["reset_database"] = True
+    _run_reset_block(ns)
+    assert sync.reset_calls == 2
+
+    ns["reset_database"] = True  # 同じ保存先 (Test2) は、もう消さない
+    _run_reset_block(ns)
+    assert sync.reset_calls == 2
+
+
+def test_colab_notebook_blocked_reset_explains_the_options(capsys):
+    sync = _FakeSync()
+    ns = _ns(sync, reset_database=True)
+    _run_reset_block(ns)
+    ns["reset_database"] = True
+    _run_reset_block(ns)
+    out = capsys.readouterr().out
+    assert "すでに初期化済みです" in out
+    assert "ランタイムを再起動するか、保存先フォルダ名を変えてください" in out
 
 
 def test_colab_notebook_reset_database_off_never_resets():
     sync = _FakeSync()
-    ns = {"ColabSyncManager": sync, "DRIVE_DIR": "/drive", "WORKING_DIR": "/work", "reset_database": False}
+    ns = _ns(sync, reset_database=False)
     _run_reset_block(ns)
     _run_reset_block(ns)
     assert sync.reset_calls == 0
@@ -95,9 +132,37 @@ def test_colab_notebook_reset_database_can_reset_again_after_runtime_restart():
     """ランタイムを再起動すると (変数が消えると)、もう一度消去できる。"""
     sync = _FakeSync()
     for _ in range(2):
-        ns = {"ColabSyncManager": sync, "DRIVE_DIR": "/drive", "WORKING_DIR": "/work", "reset_database": True}
-        _run_reset_block(ns)
+        _run_reset_block(_ns(sync, reset_database=True))
     assert sync.reset_calls == 2
+
+
+def test_colab_notebook_remounts_drive_before_reset():
+    """未マウントのまま消去すると、Drive の DB が消えず、再マウント後に古い DB が復元される。
+    (Step 3 の完了時にアンマウントされた後で Step 1 だけを再実行した場合)"""
+    import json
+
+    with open("notebooks/stock_analyzer_colab.ipynb") as f:
+        cell_src = "".join(json.load(f)["cells"][4]["source"])
+    assert cell_src.index('drive.mount("/content/drive")') < cell_src.index("ColabSyncManager.reset_cache")
+
+
+def test_reset_cache_also_removes_edinet_results_but_not_unrelated_tmp(tmp_path: Path):
+    """初期化で、EDINET の取得結果 (JSON) とダウンロードした XBRL も消す。残すと、キャッシュの破損を疑って
+    初期化しても、前回の (壊れているかもしれない) 取得結果が使い回される。"""
+    drive_dir, working_dir = tmp_path / "drive", tmp_path / "working"
+    results = working_dir / "tmp" / "edinet_results"
+    xbrl = working_dir / "tmp" / "edinet_xbrl"
+    other = working_dir / "tmp" / "other.txt"
+    for d in (results, xbrl, drive_dir / "cache"):
+        d.mkdir(parents=True)
+    (results / "7203_annual.json").write_text("{}")
+    (xbrl / "x.zip").write_text("x")
+    other.write_text("keep")
+
+    ColabSyncManager.reset_cache(drive_dir, working_dir)
+
+    assert not results.exists() and not xbrl.exists()
+    assert other.exists()  # 関係のない一時ファイルは消さない
 
 
 def test_colab_sync_pull_when_drive_unmounted_falls_back_safely(tmp_path: Path):

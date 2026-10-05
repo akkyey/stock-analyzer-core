@@ -105,7 +105,7 @@ class ColabSyncManager:
         working_dir: Path,
         db_filename: Optional[str] = None,
     ) -> None:
-        """Google Drive および作業層 SSD の DB キャッシュを安全に完全クリアする。"""
+        """Google Drive および作業層 SSD の DB キャッシュ・出力・EDINET の取得結果を完全クリアする。"""
         filename = db_filename or cls.DB_FILENAME
         targets = [
             drive_dir / "cache" / filename,
@@ -121,6 +121,10 @@ class ColabSyncManager:
             working_dir / "cache" / f"{filename}.wal",
             working_dir / f"{filename}.wal",
             working_dir / "output",
+            # EDINET の取得結果 (JSON) と、ダウンロードした XBRL。残すと、初期化しても前回の取得結果が
+            # 使い回される (キャッシュの破損を疑って初期化した場合に、壊れた結果が残ってしまう)
+            working_dir / "tmp" / "edinet_results",
+            working_dir / "tmp" / "edinet_xbrl",
         ]
         for t in targets:
             if t.is_dir():
