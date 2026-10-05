@@ -38,6 +38,18 @@ def test_colab_sync_reset_database_removes_tmp_and_resets(tmp_path: Path):
     assert not dummy_wal.exists()
 
 
+def test_colab_notebook_resets_database_flag_after_execution():
+    """A-1: ノートブック実行コード内で reset_database 実行直後にフラグが自動解除されること."""
+    import json
+    nb_path = Path("notebooks/stock_analyzer_colab.ipynb")
+    with open(nb_path) as f:
+        nb = json.load(f)
+
+    cell_src = "".join(nb["cells"][4]["source"])
+    assert 'globals()["reset_database"] = False' in cell_src
+    assert "安全装置" in cell_src
+
+
 def test_colab_sync_pull_when_drive_unmounted_falls_back_safely(tmp_path: Path):
     """A-3: Google Drive が未マウント（空・存在しない）でも作業層の既存DBで安全に稼働すること."""
     unmounted_drive = tmp_path / "non_existent_drive"
