@@ -1,3 +1,4 @@
+import hashlib
 from logging import getLogger
 from pathlib import Path
 from typing import Any, Optional
@@ -5,6 +6,24 @@ from typing import Any, Optional
 import polars as pl
 
 from src.repositories.duck_repository import DuckDBRepository
+
+# 損益・1 株当たり指標 (決算期 period_end で新旧を判定) と、貸借対照表の項目 (bs_period_end で判定)
+ANNUAL_PL_FIELDS = (
+    "sales",
+    "operating_income",
+    "net_profit",
+    "prev_net_profit",
+    "roe",
+    "eps",
+    "dps",
+    "operating_margin",
+)
+BALANCE_SHEET_FIELDS = ("total_assets", "net_assets", "equity_ratio", "shares_outstanding", "bps")
+
+
+def seed_fingerprint(seed_path: Path) -> str:
+    """シードの内容から作る識別子 (実行済みの印に使う。シードを作り直すと変わる)。"""
+    return hashlib.sha1(seed_path.read_bytes()).hexdigest()[:12]
 
 
 class FundamentalsRepository:
@@ -83,6 +102,67 @@ class FundamentalsRepository:
                 "SELECT code, period_end, bs_period_end FROM fundamentals"
             ).fetchall()
         return {r[0]: {"period_end": r[1], "bs_period_end": r[2]} for r in rows}
+
+    def refresh_from_seed(self, seed_path: Path) -> int:
+        """同梱シードの値で、決算期の古い財務値を更新する (DB の値の方が新しい項目は変更しない)。
+
+        シードを EDINET から作り直したときに、既存の DB に反映するための処理。EDINET 取り込みと同じ規則で、
+        銘柄ごとに、損益・1 株当たり指標は period_end、貸借対照表の項目は bs_period_end を比べ、シードの期が
+        DB より新しいか、DB の期が不明 (旧シード由来) の項目だけを更新する。シードの値が空の項目は、
+        DB の値を消さない。ただし、売上を更新した銘柄の売上高成長率は、旧い売上との比較の値なので、
+        シードの値 (空を含む) に置き換える。出所の書類が無い行 (シードの period_end が空) は更新しない。
+
+        Returns:
+            更新した銘柄数 (出所の列が無い旧形式のシードは 0)
+        """
+        if not seed_path.exists():
+            return 0
+        seed = pl.read_parquet(str(seed_path))
+        provenance = ("period_end", "submitted_at", "bs_period_end", "bs_submitted_at")
+        if "code" not in seed.columns or any(c not in seed.columns for c in provenance):
+            return 0
+        seed = seed.with_columns(pl.col("code").cast(pl.Utf8))
+        with self.duck_repo.client.get_connection() as conn:
+            table_cols = {r[0] for r in conn.execute("DESCRIBE fundamentals").fetchall()}
+            stored = {
+                r[0]: (r[1], r[2])
+                for r in conn.execute("SELECT code, period_end, bs_period_end FROM fundamentals").fetchall()
+            }
+        records = [
+            {"code": row["code"], **rec}
+            for row in seed.iter_rows(named=True)
+            if row["code"] in stored
+            if (rec := self._seed_update(row, stored[row["code"]], table_cols))
+        ]
+
+        # 項目の組み合わせごとにまとめて UPSERT する (含まれない項目は更新されない)
+        groups: dict[tuple, list[dict[str, Any]]] = {}
+        for r in records:
+            groups.setdefault(tuple(sorted(r)), []).append(r)
+        for rows in groups.values():
+            self.upsert(rows)
+        return len(records)
+
+    @staticmethod
+    def _seed_update(row: dict[str, Any], stored: tuple, table_cols: set) -> dict[str, Any]:
+        """シードの 1 行から、DB へ書き込む項目を決める (損益と貸借対照表を、別々の決算期で判定する)。"""
+
+        def newer(seed_period: Any, db_period: Any) -> bool:
+            return bool(seed_period) and (not db_period or str(seed_period) > str(db_period))
+
+        def values(fields: tuple) -> dict[str, Any]:
+            return {f: row[f] for f in fields if row.get(f) is not None and f in table_cols}
+
+        rec: dict[str, Any] = {}
+        if newer(row["period_end"], stored[0]):
+            rec.update(values(ANNUAL_PL_FIELDS))
+            rec.update(period_end=row["period_end"], submitted_at=row["submitted_at"])
+            if row.get("sales") is not None and "sales_growth" in table_cols:
+                rec["sales_growth"] = row.get("sales_growth")
+        if newer(row["bs_period_end"], stored[1]):
+            rec.update(values(BALANCE_SHEET_FIELDS))
+            rec.update(bs_period_end=row["bs_period_end"], bs_submitted_at=row["bs_submitted_at"])
+        return rec
 
     def restore_missing_from_seed(self, seed_path: Path, columns: tuple) -> int:
         """DB で欠損している項目だけを、シードの値で補う (値がある項目は変更しない)。

@@ -42,4 +42,7 @@ notification:
 fetcher:
   skip_heavy_repair: true
   edinet_scan_days: 30
+  # 同梱の財務シードを作り直したとき、既存の DB の古い財務値を更新する (シードごとに 1 回だけ。
+  # 決算期の新しい値は変更しない)。Colab では Step 0 の「refresh_fundamentals」で切り替える
+  refresh_fundamentals_from_seed: true
 

@@ -348,3 +348,104 @@ def test_edinet_completion_message_separates_new_downloads_from_cache(stub_conte
     # 2 回目: 通信は 0 件。取得済みの書類はキャッシュを利用 (Colab 2 回目の実測)
     later = run(downloads=0, cache_hits=271)
     assert "新たに取得 0 件 / 取得済み 271 件はキャッシュを利用 / 反映した開示書類 269 件" in later
+
+
+# --- 作り直した同梱シードの、既存 DB への反映 (シードごとに 1 回だけ) --------------------------
+
+
+def _seed_file(tmp_path, content=b"seed-v1"):
+    path = tmp_path / "seed.parquet"
+    path.write_bytes(content)
+    return path
+
+
+def _refresh(stub_context, tmp_path, meta, enabled=True, updated=5, content=b"seed-v1"):
+    from src.repositories.fundamentals_repository import seed_fingerprint
+
+    stub_context.config["fetcher"] = {"refresh_fundamentals_from_seed": enabled}
+    repo, funda = MagicMock(), MagicMock()
+    funda.refresh_from_seed.return_value = updated
+    seed = _seed_file(tmp_path, content)
+    repo.get_meta.return_value = meta(seed_fingerprint) if callable(meta) else meta
+    AcquisitionPhase(stub_context)._refresh_from_seed(repo, funda, seed)
+    return repo, funda, seed
+
+
+def test_seed_refresh_runs_once_and_shows_count(stub_context, tmp_path, capsys):
+    """初めてのシード: 反映して、印 (シードの識別子) を残し、画面に件数を出す"""
+    from src.repositories.fundamentals_repository import seed_fingerprint
+
+    repo, funda, seed = _refresh(stub_context, tmp_path, meta=None, updated=1309)
+    funda.refresh_from_seed.assert_called_once_with(seed)
+    repo.set_meta.assert_called_once_with(AcquisitionPhase.SEED_REFRESH_META_KEY, seed_fingerprint(seed))
+    out = capsys.readouterr().out
+    assert "1309 銘柄更新しました" in out and "決算期の新しい値は変更していません" in out
+
+
+def test_seed_refresh_is_skipped_for_the_same_seed(stub_context, tmp_path, capsys):
+    """同じ版のシードに対しては、2 回目以降は何もしない"""
+    repo, funda, _ = _refresh(stub_context, tmp_path, meta=lambda fp: fp(_seed_file(tmp_path)))
+    funda.refresh_from_seed.assert_not_called()
+    repo.set_meta.assert_not_called()
+    assert capsys.readouterr().out == ""
+
+
+def test_seed_refresh_runs_again_when_seed_is_rebuilt(stub_context, tmp_path):
+    """シードを作り直すと (識別子が変わると)、もう一度反映する"""
+    _, funda, _ = _refresh(stub_context, tmp_path, meta="an-older-seed-id")
+    funda.refresh_from_seed.assert_called_once()
+
+
+def test_seed_refresh_disabled_by_setting_leaves_no_mark(stub_context, tmp_path, capsys):
+    """設定で省いた場合は、印を残さない (あとで有効にして実行できる)"""
+    repo, funda, _ = _refresh(stub_context, tmp_path, meta=None, enabled=False)
+    funda.refresh_from_seed.assert_not_called()
+    repo.set_meta.assert_not_called()
+    assert "更新しました" not in capsys.readouterr().out
+
+
+def test_seed_refresh_zero_updates_is_silent_but_marked(stub_context, tmp_path, capsys):
+    repo, _, _ = _refresh(stub_context, tmp_path, meta=None, updated=0)
+    repo.set_meta.assert_called_once()
+    assert "更新しました" not in capsys.readouterr().out
+
+
+def test_seed_refresh_failure_does_not_stop_the_run_or_mark(stub_context, tmp_path):
+    stub_context.config["fetcher"] = {}
+    repo, funda = MagicMock(), MagicMock()
+    repo.get_meta.return_value = None
+    funda.refresh_from_seed.side_effect = RuntimeError("boom")
+    AcquisitionPhase(stub_context)._refresh_from_seed(repo, funda, _seed_file(tmp_path))
+    repo.set_meta.assert_not_called()
+
+
+def test_new_database_gets_the_seed_mark_without_refresh(stub_context, capsys):
+    """新規の DB は、読み込んだシードが最新なので、印だけを残し、「更新しました」とは出さない"""
+    seed = pl.DataFrame({"code": ["1001", "1002"]})
+    with (
+        patch("src.repositories.fundamentals_repository.FundamentalsRepository") as MockFunda,
+        patch("pathlib.Path.exists", return_value=True),
+        patch("pathlib.Path.read_bytes", return_value=b"seed-v1"),
+        patch("polars.read_parquet", return_value=seed),
+    ):
+        MockFunda.return_value.get_count.return_value = 0
+        MockFunda.return_value.backfill_growth_from_seed.return_value = 0
+        repo = MagicMock()
+        repo.get_all_codes.return_value = ["1001", "1002"]
+        store: dict = {}
+        repo.get_meta.side_effect = store.get
+        repo.set_meta.side_effect = store.__setitem__
+        AcquisitionPhase(stub_context)._ensure_fundamentals(repo)
+    assert store[AcquisitionPhase.SEED_REFRESH_META_KEY]  # 読み込んだシードの識別子が記録される
+    MockFunda.return_value.refresh_from_seed.assert_not_called()
+    assert "銘柄更新しました" not in capsys.readouterr().out
+
+
+def test_notebook_passes_refresh_checkbox_to_pipeline_config():
+    import json
+
+    with open("notebooks/stock_analyzer_colab.ipynb") as f:
+        cells = ["".join(c["source"]) for c in json.load(f)["cells"]]
+    assert any('refresh_fundamentals = True  # @param {type:"boolean"}' in c for c in cells)  # 既定は ON
+    step3 = next(c for c in cells if "OrchestratorContext(" in c)
+    assert '["refresh_fundamentals_from_seed"]' in step3 and 'globals().get("refresh_fundamentals", True)' in step3

@@ -18,20 +18,14 @@ from src.fetcher.xbrl_parser import (
     PARSER_VERSION,
     XbrlParser,
 )
-from src.repositories.fundamentals_repository import FundamentalsRepository
-
-# 有価証券報告書から更新する貸借対照表の項目 (半期報告書の方が新しければ更新しない)
-BALANCE_SHEET_FIELDS = ("total_assets", "net_assets", "equity_ratio", "shares_outstanding", "bps")
-# 有価証券報告書から更新する損益・1 株当たり指標
-ANNUAL_PL_FIELDS = (
-    "sales",
-    "operating_income",
-    "net_profit",
-    "prev_net_profit",
-    "roe",
-    "eps",
-    "dps",
+from src.repositories.fundamentals_repository import ANNUAL_PL_FIELDS as _SEED_PL_FIELDS
+from src.repositories.fundamentals_repository import (
+    BALANCE_SHEET_FIELDS,
+    FundamentalsRepository,
 )
+
+# 有価証券報告書から更新する損益・1 株当たり指標 (営業利益率は、売上と営業利益から計算して補う)
+ANNUAL_PL_FIELDS = tuple(f for f in _SEED_PL_FIELDS if f != "operating_margin")
 INTERIM_FIELDS = XbrlParser.INTERIM_FIELDS
 # 自己資本比率 (%) として採用する範囲。債務超過 (純資産が負) では 100% を大きく下回るため下限は広く取るが、
 # 総資産が 0 と読まれた書類 (例: 543A の -4.08×10^10) のような、桁の違う値は採用しない

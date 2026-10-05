@@ -46,6 +46,8 @@ class AcquisitionPhase(BasePhase):
     # 株式分割を記録するための全期間の取り直しを済ませたか (DB ごとに 1 回)
     SPLIT_BACKFILL_META_KEY = "split_history_backfilled"
     # 旧版の EDINET 取り込みで NULL になった項目の復旧 (実施済みかどうかの記録キー)
+    # 同梱シードを既存の DB へ反映した印 (値はシードの識別子。シードを作り直すと、もう一度反映される)
+    SEED_REFRESH_META_KEY = "fundamentals_seed_refreshed"
     RESTORE_META_KEY = "fundamentals_restored_parser_v2"
     RESTORE_COLUMNS = (
         "net_profit",
@@ -298,7 +300,10 @@ class AcquisitionPhase(BasePhase):
         """財務データの初期シード・成長率の補完・旧版で消えた値の復旧 (いずれも必要な場合のみ)。"""
         from pathlib import Path
 
-        from src.repositories.fundamentals_repository import FundamentalsRepository
+        from src.repositories.fundamentals_repository import (
+            FundamentalsRepository,
+            seed_fingerprint,
+        )
 
         # 1-2. 財務データの初期シード (全件ベースラインデータ未登録時はバンドルされたシードデータから自動投入)
         funda_repo = FundamentalsRepository(repo)
@@ -315,6 +320,8 @@ class AcquisitionPhase(BasePhase):
                 try:
                     df_seed = pl.read_parquet(str(seed_parquet))
                     repo.save_fundamentals(df_seed)
+                    # 新規の DB は、読み込んだシードが最新なので、既存 DB 向けの更新は不要 (印だけ残す)
+                    repo.set_meta(self.SEED_REFRESH_META_KEY, seed_fingerprint(seed_parquet))
                     # 取得対象の銘柄のうち、シードに無い銘柄 (シード作成後の新規上場など)。
                     # 件数の差ではなく、実際にシードに無い銘柄を数える (シードには上場廃止済みの銘柄もある)
                     seed_codes = set(df_seed["code"].cast(pl.Utf8).to_list())
@@ -340,6 +347,9 @@ class AcquisitionPhase(BasePhase):
         except Exception as e:
             self.log_error(f"❌ 成長率の補完に失敗しました (継続): {e}")
 
+        # 1-3b. 既存 DB への、作り直した同梱シードの反映 (シードごとに 1 回だけ)
+        self._refresh_from_seed(repo, funda_repo, seed_parquet)
+
         # 1-4. 旧版の EDINET 取り込みで消えた財務値の復旧 (1 回だけ)。
         # 旧版は半期報告書などで取れなかった項目を NULL で上書きしていた。
         # 消えた項目のうち、株価に依存しない値だけをシードから補う (DB に値がある項目は変更しない)
@@ -354,6 +364,37 @@ class AcquisitionPhase(BasePhase):
         except Exception as e:
             self.log_error(f"❌ 財務値の復旧に失敗しました (継続): {e}")
 
+
+    def _refresh_from_seed(self, repo: Any, funda_repo: Any, seed_parquet: Any) -> None:
+        """作り直した同梱シードの値で、既存 DB の古い財務値を更新する (シードごとに 1 回だけ)。
+
+        決算期の新旧を見て、DB の値の方が新しければ変更しない。設定
+        (fetcher.refresh_fundamentals_from_seed、Colab では Step 0 のチェックボックス) で省くと、
+        印を残さないため、あとで有効にして実行できる。復旧 (1-4) より先に実行する
+        (復旧が、新しいシードの出所を基準日として使えるように)。
+        """
+        from src.repositories.fundamentals_repository import seed_fingerprint
+
+        try:
+            if not seed_parquet.exists():
+                return
+            fingerprint = seed_fingerprint(seed_parquet)
+            if repo.get_meta(self.SEED_REFRESH_META_KEY) == fingerprint:
+                return
+            if not self.context.config.get("fetcher", {}).get("refresh_fundamentals_from_seed", True):
+                self.log_info("ℹ️ 財務データのシードによる更新は、設定で省かれました。")
+                return
+            updated = funda_repo.refresh_from_seed(seed_parquet)
+            repo.set_meta(self.SEED_REFRESH_META_KEY, fingerprint)
+            if updated:
+                print(
+                    f"   🔄 財務データを、新しいシードで {updated} 銘柄更新しました"
+                    " (決算期の新しい値は変更していません)。",
+                    flush=True,
+                )
+            self.log_info(f"ℹ️ 財務データをシードで更新しました: {updated} 銘柄")
+        except Exception as e:
+            self.log_error(f"❌ 財務データのシードによる更新に失敗しました (継続): {e}")
 
     def _sync_edinet(self, repo: Any) -> None:
         """EDINET から最新の財務データを取り込む (前回の走査日以降の書類)。"""
