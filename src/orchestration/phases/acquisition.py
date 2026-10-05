@@ -416,7 +416,12 @@ class AcquisitionPhase(BasePhase):
 
         all_master_count = len(list(repo.get_all_codes() or []))
         excluded_count = all_master_count - len(target_codes) if all_master_count > len(target_codes) else 0
-        if excluded_count > 0:
+        if self.context.limit:
+            print(
+                f"   ℹ️ 市場データ取得対象: {len(target_codes)} 銘柄 (指定上限: {self.context.limit} 件 / マスタ全 {all_master_count} 銘柄中)",
+                flush=True,
+            )
+        elif excluded_count > 0:
             print(
                 f"   ℹ️ 市場データ取得対象: {len(target_codes)} 銘柄 (株価配信のない PRO Market 等 {excluded_count} 銘柄を除外)",
                 flush=True,
