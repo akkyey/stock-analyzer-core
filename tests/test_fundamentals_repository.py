@@ -97,3 +97,32 @@ def test_backfill_growth_from_seed(db_conn, tmp_path):
 
     # シード無しは 0
     assert repo.backfill_growth_from_seed(tmp_path / "none.parquet") == 0
+
+
+def test_restore_missing_from_seed_fills_only_nulls(db_conn, tmp_path):
+    repo = FundamentalsRepository()
+    repo.upsert(
+        [
+            {"code": "2590", "net_profit": None, "bps": None, "roe": 5.0},
+            {"code": "9267", "net_profit": 7875.0, "bps": 2006.0, "roe": 13.8},
+        ]
+    )
+    seed = tmp_path / "seed.parquet"
+    pl.DataFrame(
+        {
+            "code": ["2590", "9267"],
+            "net_profit": [100.0, 1.0],
+            "bps": [900.0, 1.0],
+            "roe": [9.9, 9.9],
+            "updated_at": ["2026-09-23 15:44:04", "2026-09-20 10:00:00"],
+        }
+    ).write_parquet(seed)
+    assert repo.restore_missing_from_seed(seed, ("net_profit", "bps")) == 1
+    rows = {
+        r[0]: r for r in db_conn.execute("SELECT code, net_profit, bps, roe FROM fundamentals").fetchall()
+    }
+    assert rows["2590"] == ("2590", 100.0, 900.0, 5.0)  # roe は対象外
+    assert rows["9267"] == ("9267", 7875.0, 2006.0, 13.8)  # 値がある項目は変えない
+    # シード由来の値には、シードの作成日時を基準日として記録する (株式分割の補正用)
+    basis = dict(db_conn.execute("SELECT code, submitted_at FROM fundamentals").fetchall())
+    assert basis == {"2590": "2026-09-23 15:44", "9267": "2026-09-20 10:00"}

@@ -221,6 +221,15 @@ class DuckDBRepository:
                 )
             """)
             # [v28.5] Schema Evolution
+            for stock_col in (
+                "status VARCHAR DEFAULT 'active'",
+                "exclusion_reason VARCHAR",
+                "excluded_until VARCHAR",
+                "fail_count INTEGER DEFAULT 0",
+                "edinet_code VARCHAR",
+            ):
+                conn.execute(f"ALTER TABLE stocks ADD COLUMN IF NOT EXISTS {stock_col}")
+
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS prev_net_profit DOUBLE"
             )
@@ -239,6 +248,26 @@ class DuckDBRepository:
             conn.execute(
                 "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS dps DOUBLE"
             )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS net_profit DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS eps DOUBLE"
+            )
+            conn.execute(
+                "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS bps DOUBLE"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_fundamentals_code ON fundamentals(code)"
+            )
+            # 財務値の出所となった書類の決算期末・提出日時。古い期の書類 (過年度の訂正報告書など)
+            # で新しい値を上書きしないための判定と、株式分割の調整に使う。
+            # period_end/submitted_at は損益・1 株当たり指標 (有価証券報告書)、
+            # bs_* は貸借対照表の項目 (有価証券報告書または半期報告書) の出所
+            for meta_col in ("period_end", "submitted_at", "bs_period_end", "bs_submitted_at"):
+                conn.execute(
+                    f"ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS {meta_col} VARCHAR"
+                )
             # 成長率 (旧スキーマには列が無く、シードの値が取り込み時に捨てられていた)
             for growth_col in ("sales_growth", "profit_growth", "profit_growth_raw"):
                 conn.execute(
@@ -261,13 +290,34 @@ class DuckDBRepository:
                 "ALTER TABLE edinet_documents ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'success'"
             )
             conn.execute(
+                "ALTER TABLE edinet_documents ADD COLUMN IF NOT EXISTS parser_version INTEGER"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_edinet_docs_code ON edinet_documents(code)"
             )
+            # 株式分割 (1 株当たりの財務指標を分割後の株価に合わせるために使う)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS stock_splits (
+                    code VARCHAR,
+                    split_date DATE,
+                    ratio DOUBLE,
+                    detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (code, split_date)
+                )
+            """)
 
             # [v27.2] 市場カレンダー・キャッシュ
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS market_calendar (
                     date DATE PRIMARY KEY
+                )
+            """)
+            # 小さな状態値 (銘柄マスタの最終更新日など)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_meta (
+                    key VARCHAR PRIMARY KEY,
+                    value VARCHAR,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             # stocks テーブルのスキーマ進化
@@ -311,6 +361,23 @@ class DuckDBRepository:
         with self.client.get_connection() as conn:
             res = conn.execute("SELECT count(*) FROM daily_metrics").fetchone()
             return int(res[0]) if res else 0
+
+    def get_meta(self, key: str) -> Optional[str]:
+        """app_meta の値を取得する (無ければ None)。"""
+        with self.client.get_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_meta WHERE key = ?", [key]
+            ).fetchall()
+        return str(row[0][0]) if row and row[0][0] is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """app_meta に値を保存する。"""
+        with self.client.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                [key, value],
+            )
 
     def save_stocks(self, df: pl.DataFrame):
         """銘柄マスタを保存・更新する。"""
@@ -384,11 +451,19 @@ class DuckDBRepository:
                 [alert_id],
             )
 
-    def get_processed_edinet_doc_ids(self) -> set[str]:
-        """処理済みの EDINET doc_id セットを取得する (Colab セッション跨ぎ差分キャッシュ用)"""
+    def get_processed_edinet_doc_ids(self, min_parser_version: int = 0) -> set[str]:
+        """処理済みの EDINET doc_id セットを取得する (Colab セッション跨ぎ差分キャッシュ用)
+
+        Args:
+            min_parser_version: この版以上のパーサーで処理した書類だけを返す
+                (古い版で処理した書類は取り込み直す。0 なら全件)
+        """
         try:
             with self.client.get_connection() as conn:
-                res = conn.execute("SELECT doc_id FROM edinet_documents").fetchall()
+                res = conn.execute(
+                    "SELECT doc_id FROM edinet_documents WHERE coalesce(parser_version, 0) >= ?",
+                    [min_parser_version],
+                ).fetchall()
                 return {row[0] for row in res if row and row[0]}
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to fetch processed EDINET docs: {e}")
@@ -402,17 +477,60 @@ class DuckDBRepository:
         submit_date: Optional[str] = None,
         is_annual: bool = False,
         status: str = "success",
+        parser_version: Optional[int] = None,
     ) -> None:
-        """EDINET 書類の処理ステータスを記録する (success, parse_failed, error 等)"""
+        """EDINET 書類の処理ステータスを記録する (success, parse_failed, superseded, error 等)"""
+        self.record_edinet_documents(
+            [
+                {
+                    "doc_id": doc_id,
+                    "code": code,
+                    "doc_type": doc_type,
+                    "submit_date": submit_date,
+                    "is_annual": is_annual,
+                    "status": status,
+                    "parser_version": parser_version,
+                }
+            ]
+        )
+
+    def record_edinet_documents(self, docs: List[dict]) -> None:
+        """複数の EDINET 書類の処理ステータスを、1 つの接続でまとめて記録する。"""
+        if not docs:
+            return
         try:
             with self.client.get_connection() as conn:
-                conn.execute(
+                conn.executemany(
                     """
-                    INSERT OR REPLACE INTO edinet_documents (doc_id, code, doc_type, submit_date, is_annual, status, processed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    INSERT OR REPLACE INTO edinet_documents
+                        (doc_id, code, doc_type, submit_date, is_annual, status, parser_version, processed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
-                    [doc_id, code, doc_type, submit_date, is_annual, status],
+                    [
+                        [
+                            d["doc_id"], d["code"], d.get("doc_type"), d.get("submit_date"),
+                            d.get("is_annual", False), d.get("status", "success"),
+                            d.get("parser_version"),
+                        ]
+                        for d in docs
+                    ],
                 )
         except Exception as e:
-            self.logger.warning(f"⚠️ Failed to record EDINET doc {doc_id}: {e}")
+            self.logger.warning(f"⚠️ Failed to record {len(docs)} EDINET docs: {e}")
 
+    def save_splits(self, rows: list[tuple[str, Any, float]]) -> None:
+        """株式分割 (code, split_date, ratio) を保存する。同じ日の分割は上書き。"""
+        if not rows:
+            return
+        with self.client.get_connection() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO stock_splits (code, split_date, ratio) VALUES (?, ?, ?)",
+                [[c, d, r] for c, d, r in rows],
+            )
+
+    def load_splits(self) -> pl.DataFrame:
+        """記録済みの株式分割を返す (code, split_date, ratio)。"""
+        with self.client.get_connection() as conn:
+            return conn.execute(
+                "SELECT code, split_date, ratio FROM stock_splits"
+            ).pl()

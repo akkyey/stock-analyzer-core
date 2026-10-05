@@ -70,14 +70,48 @@ def test_summary_includes_db_stats(tmp_path):
     db.parent.mkdir(parents=True)
     with duckdb.connect(str(db)) as con:
         con.execute("CREATE TABLE stocks (code VARCHAR)")
-        con.execute("CREATE TABLE fundamentals (code VARCHAR)")
+        con.execute("CREATE TABLE fundamentals (code VARCHAR, per DOUBLE, eps DOUBLE)")
         con.execute("CREATE TABLE daily_metrics (code VARCHAR, entry_date DATE)")
         con.execute("INSERT INTO stocks VALUES ('7203')")
         con.execute("INSERT INTO daily_metrics VALUES ('7203','2026-10-01'),('7203','2026-10-02')")
     text = build_run_summary(_Ctx(), working_dir=tmp_path)
     assert "stocks: 1 行" in text
     assert "daily_metrics: 2 日分" in text
+    assert "fundamentals の充足" in text and "per=0" in text and "eps=0" in text
     assert "2026-10-01" in text and "2026-10-02" in text
+
+
+def test_summary_includes_splits_edinet_documents_and_meta(tmp_path):
+    """株式分割の記録件数・EDINET 書類の状態別件数・app_meta (実行状態) を出す"""
+    db = tmp_path / "cache" / "stock_analyzer.duckdb"
+    db.parent.mkdir(parents=True)
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE stocks (code VARCHAR)")
+        con.execute("CREATE TABLE fundamentals (code VARCHAR, eps DOUBLE)")
+        con.execute("CREATE TABLE daily_metrics (code VARCHAR, entry_date DATE)")
+        con.execute("CREATE TABLE stock_splits (code VARCHAR, split_date DATE, ratio DOUBLE)")
+        con.execute("INSERT INTO stock_splits VALUES ('8227','2026-02-19',3.0),('7946','2026-03-05',5.0)")
+        con.execute("CREATE TABLE edinet_documents (doc_id VARCHAR, status VARCHAR)")
+        con.execute("INSERT INTO edinet_documents VALUES ('a','success'),('b','success'),('c','parse_failed')")
+        con.execute("CREATE TABLE app_meta (key VARCHAR, value VARCHAR)")
+        con.execute("INSERT INTO app_meta VALUES ('split_history_backfilled','2026-10-05'),('edinet_last_scan_date','2026-10-05')")
+    text = build_run_summary(_Ctx(), working_dir=tmp_path)
+    assert "stock_splits: 2 行" in text
+    assert "edinet_documents: parse_failed=1, success=2" in text
+    assert "app_meta: edinet_last_scan_date=2026-10-05, split_history_backfilled=2026-10-05" in text
+
+
+def test_summary_tolerates_old_db_without_new_tables(tmp_path):
+    """古い DB (株式分割・EDINET 書類・app_meta のテーブルが無い) でも、サマリは作れる"""
+    db = tmp_path / "cache" / "stock_analyzer.duckdb"
+    db.parent.mkdir(parents=True)
+    with duckdb.connect(str(db)) as con:
+        con.execute("CREATE TABLE stocks (code VARCHAR)")
+        con.execute("CREATE TABLE fundamentals (code VARCHAR)")
+        con.execute("CREATE TABLE daily_metrics (code VARCHAR, entry_date DATE)")
+    text = build_run_summary(_Ctx(), working_dir=tmp_path)
+    assert "stocks: 0 行" in text
+    assert "stock_splits" not in text and "app_meta" not in text
 
 
 def test_failure_summary_includes_traceback(tmp_path):
@@ -138,4 +172,6 @@ def test_drive_unmounted_is_reported(tmp_path):
 
         pytest.skip("Drive がマウントされた環境では検証できない")
     text = build_run_summary(_Ctx(), drive_dir=Path("/content/drive/MyDrive/StockAnalyzer"))
-    assert "未マウント" in text
+    assert "マウントされていません" in text
+    # 同期後にアンマウントするため、同期の成否は別の行で確認するよう案内する
+    assert "Drive同期" in text and "アンマウント" in text

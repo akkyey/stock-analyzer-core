@@ -29,6 +29,11 @@ class ColabSyncManager:
     MIN_STOCKS = 1000
     MIN_HISTORY_DATES = 20
 
+    @staticmethod
+    def _wal_path(db_path: Path) -> Path:
+        """DuckDB の WAL ファイルのパス (<db>.wal)。"""
+        return db_path.with_name(db_path.name + ".wal")
+
     @classmethod
     def _resolve_drive_files(
         cls, drive_dir: Path, db_filename: Optional[str] = None
@@ -100,7 +105,7 @@ class ColabSyncManager:
         working_dir: Path,
         db_filename: Optional[str] = None,
     ) -> None:
-        """Google Drive および作業層 SSD の DB キャッシュを安全に完全クリアする。"""
+        """Google Drive および作業層 SSD の DB キャッシュ・出力・EDINET の取得結果を完全クリアする。"""
         filename = db_filename or cls.DB_FILENAME
         targets = [
             drive_dir / "cache" / filename,
@@ -108,11 +113,18 @@ class ColabSyncManager:
             drive_dir / filename,
             drive_dir / f"{filename}.bak",
             drive_dir / "cache" / f"{filename}.tmp",
+            drive_dir / "cache" / f"{filename}.wal",
             working_dir / "cache" / filename,
             working_dir / filename,
             working_dir / "cache" / f"{filename}.bak",
             working_dir / "cache" / f"{filename}.tmp",
+            working_dir / "cache" / f"{filename}.wal",
+            working_dir / f"{filename}.wal",
             working_dir / "output",
+            # EDINET の取得結果 (JSON) と、ダウンロードした XBRL。残すと、初期化しても前回の取得結果が
+            # 使い回される (キャッシュの破損を疑って初期化した場合に、壊れた結果が残ってしまう)
+            working_dir / "tmp" / "edinet_results",
+            working_dir / "tmp" / "edinet_xbrl",
         ]
         for t in targets:
             if t.is_dir():
@@ -275,6 +287,9 @@ class ColabSyncManager:
             try:
                 shutil.copy2(src, tmp)
                 if cls.is_duckdb_healthy(tmp):
+                    # 置き換える前の DB に属する WAL (中断した実行の未反映分) が残っていると、
+                    # 新しい DB に再生されて開けなくなるため、先に削除する
+                    cls._wal_path(working_db).unlink(missing_ok=True)
                     os.replace(tmp, working_db)
                     return True
                 logger.warning(f"⚠️ [Pull] Drive 上の{label}が破損しているか不正です: {src}")
@@ -311,8 +326,9 @@ class ColabSyncManager:
                 logger.warning(
                     f"ℹ️ [Pull: 第3段] 既存DB未存在または全破損のため、新規に空の DB を初期化します: {working_db}"
                 )
-                working_db.unlink(missing_ok=True)
-                working_cache_db.unlink(missing_ok=True)
+                for stale in (working_db, working_cache_db):
+                    stale.unlink(missing_ok=True)
+                    cls._wal_path(stale).unlink(missing_ok=True)
                 return working_db
 
         # working_db と working_cache_db の両方を同期（二重参照の完全安全化）
@@ -366,60 +382,13 @@ class ColabSyncManager:
             drive_cache.mkdir(parents=True, exist_ok=True)
             drive_output.mkdir(parents=True, exist_ok=True)
 
-            # 1. DB の同期
+            # 1. DB の同期 (作業層 DB が破損していれば中断)
             if working_db.exists() and working_db.stat().st_size > 0:
-                # WAL を確実にメイン DB ファイルへフラッシュ
-                try:
-                    import duckdb
-
-                    with duckdb.connect(str(working_db)) as con:
-                        con.execute("CHECKPOINT")
-                except Exception as e:
-                    logger.debug(f"DuckDB CHECKPOINT notice: {e}")
-
-                # 作業層 DB の健全性を最終確認
-                if not cls.is_duckdb_healthy(working_db):
-                    logger.error(
-                        f"❌ [Push] 作業層 DB が破損しているため、Drive への同期を中断しました: {working_db}"
-                    )
+                if not cls._push_db(working_db, drive_db, drive_bak, drive_tmp):
                     return False
 
-                # 既存 Drive DB を .bak へ退避 (健全な場合のみ。破損 DB で健全な .bak を潰さない)
-                if drive_db.exists() and not cls.is_duckdb_healthy(drive_db):
-                    logger.warning(
-                        "⚠️ [Push] Drive 上の既存 DB が健全ではないため、既存の .bak を保護して退避をスキップします。"
-                    )
-                elif drive_db.exists():
-                    try:
-                        shutil.copy2(drive_db, drive_bak)
-                        logger.info(
-                            "🛡️ [Push] Drive 上の既存 DB を 1 世代バックアップ (.bak) に退避しました。"
-                        )
-                    except Exception as e:
-                        logger.warning(f"⚠️ [Push] .bak 退避に失敗しましたが処理を続行します: {e}")
-
-                # .tmp 経由のアトミック置換
-                shutil.copy2(working_db, drive_tmp)
-                os.replace(drive_tmp, drive_db)
-                logger.info(
-                    f"✅ [Push] 最新 DB をアトミックに Google Drive へ同期しました: {drive_db}"
-                )
-
             # 2. CSV レポートの同期 (ファイルごとに安全処理)
-            working_output = working_dir / "output"
-            for csv_name in [cls.DAILY_REPORT_FILENAME, cls.UNPROCESSED_FILENAME]:
-                w_csv = working_output / csv_name
-                if w_csv.exists():
-                    d_csv = drive_output / csv_name
-                    d_tmp = drive_output / f"{csv_name}.tmp"
-                    try:
-                        shutil.copy2(w_csv, d_tmp)
-                        os.replace(d_tmp, d_csv)
-                        logger.info(f"✅ [Push] レポート CSV を同期しました: {d_csv}")
-                    except Exception as csv_err:
-                        logger.warning(f"⚠️ [Push] {csv_name} の同期中に警告: {csv_err}")
-                        if d_tmp.exists():
-                            d_tmp.unlink(missing_ok=True)
+            cls._push_reports(working_dir / "output", drive_output)
 
             # 3. Colab 環境でのフラッシュとアンマウント
             if flush_unmount:
@@ -433,16 +402,81 @@ class ColabSyncManager:
                 exc_info=True,
             )
             # 異常系: 中途半端に残った .tmp ファイルを確実に掃除
-            for tmp_file in [drive_tmp] + [
-                drive_output / f"{csv_name}.tmp"
-                for csv_name in [cls.DAILY_REPORT_FILENAME, cls.UNPROCESSED_FILENAME]
-            ]:
-                try:
-                    if tmp_file.exists():
-                        tmp_file.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            cls._remove_quietly(
+                [drive_tmp]
+                + [drive_output / f"{name}.tmp" for name in cls._report_filenames()]
+            )
             return False
+
+    @classmethod
+    def _report_filenames(cls) -> tuple[str, str]:
+        return (cls.DAILY_REPORT_FILENAME, cls.UNPROCESSED_FILENAME)
+
+    @classmethod
+    def _push_db(cls, working_db: Path, drive_db: Path, drive_bak: Path, drive_tmp: Path) -> bool:
+        """作業層 DB を Drive へアトミックに同期する。作業層 DB が破損していれば False。"""
+        # WAL を確実にメイン DB ファイルへフラッシュ
+        try:
+            import duckdb
+
+            with duckdb.connect(str(working_db)) as con:
+                con.execute("CHECKPOINT")
+        except Exception as e:
+            logger.debug(f"DuckDB CHECKPOINT notice: {e}")
+
+        # 作業層 DB の健全性を最終確認
+        if not cls.is_duckdb_healthy(working_db):
+            logger.error(
+                f"❌ [Push] 作業層 DB が破損しているため、Drive への同期を中断しました: {working_db}"
+            )
+            return False
+
+        # 既存 Drive DB を .bak へ退避 (健全な場合のみ。破損 DB で健全な .bak を潰さない)
+        if drive_db.exists() and not cls.is_duckdb_healthy(drive_db):
+            logger.warning(
+                "⚠️ [Push] Drive 上の既存 DB が健全ではないため、既存の .bak を保護して退避をスキップします。"
+            )
+        elif drive_db.exists():
+            try:
+                shutil.copy2(drive_db, drive_bak)
+                logger.info(
+                    "🛡️ [Push] Drive 上の既存 DB を 1 世代バックアップ (.bak) に退避しました。"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ [Push] .bak 退避に失敗しましたが処理を続行します: {e}")
+
+        # .tmp 経由のアトミック置換
+        shutil.copy2(working_db, drive_tmp)
+        os.replace(drive_tmp, drive_db)
+        logger.info(f"✅ [Push] 最新 DB をアトミックに Google Drive へ同期しました: {drive_db}")
+        return True
+
+    @classmethod
+    def _push_reports(cls, working_output: Path, drive_output: Path) -> None:
+        """レポート CSV を .tmp 経由で Drive へ同期する (失敗は警告のみ)。"""
+        for csv_name in cls._report_filenames():
+            w_csv = working_output / csv_name
+            if not w_csv.exists():
+                continue
+            d_csv = drive_output / csv_name
+            d_tmp = drive_output / f"{csv_name}.tmp"
+            try:
+                shutil.copy2(w_csv, d_tmp)
+                os.replace(d_tmp, d_csv)
+                logger.info(f"✅ [Push] レポート CSV を同期しました: {d_csv}")
+            except Exception as csv_err:
+                logger.warning(f"⚠️ [Push] {csv_name} の同期中に警告: {csv_err}")
+                if d_tmp.exists():
+                    d_tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _remove_quietly(paths: list[Path]) -> None:
+        for tmp_file in paths:
+            try:
+                if tmp_file.exists():
+                    tmp_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     @classmethod
     def flush_and_unmount_if_colab(cls) -> None:

@@ -145,3 +145,145 @@ def test_upload_file_to_drive_uses_shared_folder_and_subfolder(tmp_path, monkeyp
     created.clear()
     ColabTools.upload_file_to_drive(str(report))  # 環境変数の親にフォールバック
     assert created[0]["parents"] == ["ENVPARENT"]
+
+
+def _fake_download_factory(batch_empty: bool, canary_ok: bool, calls: list):
+    import pandas as pd
+
+    def fake_download(tickers, **kwargs):
+        calls.append(list(tickers))
+        if tickers == ["7203.T"]:
+            return pd.DataFrame({"Close": [1.0]}) if canary_ok else pd.DataFrame()
+        if batch_empty:
+            return pd.DataFrame()
+        cols = pd.MultiIndex.from_product([tickers, ["Close"]])
+        return pd.DataFrame([[1.0] * len(tickers)], columns=cols)
+
+    return fake_download
+
+
+def _run_fetch(monkeypatch, batch_empty, canary_ok):
+    from src.fetcher import market_fetcher as mf
+
+    calls: list = []
+    sleeps: list = []
+    monkeypatch.setattr(mf.yf, "download", _fake_download_factory(batch_empty, canary_ok, calls))
+    monkeypatch.setattr(mf.time, "sleep", lambda s: sleeps.append(s))
+    f = mf.MarketFetcher({})
+    res = f.fetch_market_data(["9999", "9998"], period="1y", context=_Ctx({"fetch_profile": "standard"}))
+    return res, calls, sleeps
+
+
+def test_empty_batch_without_rate_limit_skips_backoff(monkeypatch):
+    """データの無い銘柄だけのバッチ (上場廃止・PRO Market 等) は、試し取得が成功すれば待機・再試行しない"""
+    res, calls, sleeps = _run_fetch(monkeypatch, batch_empty=True, canary_ok=True)
+    assert res == {}
+    assert calls == [["9999.T", "9998.T"], ["7203.T"]]  # バッチ 1 回 + 試し取得 1 回のみ
+    assert max(sleeps) < 1.0  # 5 秒以上のバックオフ待機が発生しない
+
+
+def test_empty_batch_under_rate_limit_keeps_backoff(monkeypatch):
+    """試し取得も失敗する (レート制限) 場合は、従来どおりバックオフして再試行する"""
+    res, calls, sleeps = _run_fetch(monkeypatch, batch_empty=True, canary_ok=False)
+    batch_calls = [c for c in calls if c != ["7203.T"]]
+    assert len(batch_calls) == STANDARD.max_retries
+    assert any(s >= STANDARD.empty_backoff_base for s in sleeps)
+
+
+def test_non_empty_batch_does_not_probe(monkeypatch):
+    res, calls, _ = _run_fetch(monkeypatch, batch_empty=False, canary_ok=True)
+    assert set(res) == {"9999", "9998"}
+    assert ["7203.T"] not in calls
+
+
+def test_rows_without_close_are_dropped(monkeypatch):
+    """Yahoo が直近日を終値 NaN で返しても、その行は採用しない (DB の正しい値を上書きしない)"""
+    import numpy as np
+    import pandas as pd
+
+    from src.fetcher import market_fetcher as mf
+
+    idx = pd.to_datetime(["2026-10-01", "2026-10-02"])
+    cols = pd.MultiIndex.from_product([["3549.T", "7203.T"], ["Close", "Volume"]])
+    raw = pd.DataFrame(
+        [[3711.0, 100.0, 2925.0, 200.0], [np.nan, 0.0, np.nan, 0.0]], index=idx, columns=cols
+    )
+    f = mf.MarketFetcher({})
+    out = f._extract_dfs_from_batch(raw, ["3549.T", "7203.T"])
+    assert list(out["3549"].index) == [pd.Timestamp("2026-10-01")]
+    assert out["3549"]["Close"].notna().all()
+
+    # 全行が NaN の銘柄は「取得できなかった」扱い
+    raw2 = pd.DataFrame([[np.nan, 0.0, 1.0, 1.0]], index=idx[:1], columns=cols)
+    out2 = f._extract_dfs_from_batch(raw2, ["3549.T", "7203.T"])
+    assert "3549" not in out2 and "7203" in out2
+
+
+def test_plan_uses_last_db_date_to_cover_gaps():
+    """実行間隔が空いた銘柄は、欠落日を含む期間で取得する (固定 2d では欠落が残る)"""
+    from datetime import date, datetime, timedelta
+
+    n = AcquisitionPhase.MIN_HISTORY_ROWS
+    end = date(2026, 9, 18)  # 金曜
+
+    def hist(last):
+        days = [last - timedelta(days=i) for i in range(n + 5)]
+        return pl.DataFrame({"code": ["x"] * len(days), "Date": [datetime(d.year, d.month, d.day) for d in days]})
+
+    ctx = StubOrchestratorContext()
+    phase = AcquisitionPhase(ctx)
+    batches = phase._plan_fetch_batches(
+        ["1001", "1002"],
+        {("1001",): hist(date(2026, 10, 1)), ("1002",): hist(end)},
+        today=date(2026, 10, 2),
+    )
+    by_period = {c: p for codes, p in batches for c in codes}
+    assert by_period == {"1001": "2d", "1002": "21d"}
+
+
+def test_edinet_scan_days_covers_time_since_last_scan(monkeypatch):
+    from datetime import datetime as dt
+
+    from src.utils import JST
+
+    ctx = StubOrchestratorContext()
+    phase = AcquisitionPhase(ctx)
+
+    class Repo:
+        def __init__(self, last):
+            self.meta = {AcquisitionPhase.EDINET_SCAN_META_KEY: last} if last else {}
+
+        def get_meta(self, k):
+            return self.meta.get(k)
+
+        def set_meta(self, k, v):
+            self.meta[k] = v
+
+    monkeypatch.setattr(
+        "src.orchestration.phases.acquisition.get_current_time",
+        lambda: dt(2026, 10, 3, 10, 0, tzinfo=JST),
+    )
+    assert phase._edinet_scan_days(Repo(None), 30) == 30
+    assert phase._edinet_scan_days(Repo("2026-09-30"), 30) == 30
+    assert phase._edinet_scan_days(Repo("2026-07-01"), 30) == 95
+    assert phase._edinet_scan_days(Repo("2024-01-01"), 30) == AcquisitionPhase.MAX_EDINET_SCAN_DAYS
+
+    repo = Repo("2026-09-01")
+    phase._record_edinet_scan(repo, [])
+    assert repo.meta[AcquisitionPhase.EDINET_SCAN_META_KEY] == "2026-10-03"
+    # 一覧を取得できなかった日があれば、その前日までしか進めない
+    repo = Repo("2026-09-01")
+    phase._record_edinet_scan(repo, ["2026-09-20", "2026-09-25"])
+    assert repo.meta[AcquisitionPhase.EDINET_SCAN_META_KEY] == "2026-09-01"
+    repo = Repo("2026-09-01")
+    phase._record_edinet_scan(repo, ["2026-08-20"])
+    assert repo.meta[AcquisitionPhase.EDINET_SCAN_META_KEY] == "2026-08-19"
+
+
+def test_plan_forced_full_history_for_split_backfill():
+    """株式分割の記録が無い DB の初回は、履歴が十分でも全銘柄 1y で取り直す"""
+    n = AcquisitionPhase.MIN_HISTORY_ROWS
+    phase = AcquisitionPhase(StubOrchestratorContext())
+    hist = {("1001",): _hist(n + 40)}
+    assert [p for _, p in phase._plan_fetch_batches(["1001"], hist)] == ["2d"]
+    assert [p for _, p in phase._plan_fetch_batches(["1001"], hist, force_full=True)] == ["1y"]

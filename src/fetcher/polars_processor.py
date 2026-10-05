@@ -55,8 +55,32 @@ class PolarsProcessor:
                 .alias("volume")
             )
 
-        # 2. 前日比異常スパイク (5倍超または 0.2倍未満の異常跳ね上がり・分割漏れ) のチェックアウト
+        # 2. 前後 31 日の中央値から 5 倍超・0.2 倍未満に外れた値 (データ不良) のチェックアウト。
+        # 前日比だけでは、異常値が連続すると 2 日目以降が前日比 1 倍となりすり抜ける
         if "code" in cleaned.columns:
+            date_col = next((c for c in ("Date", "entry_date", "index") if c in cleaned.columns), None)
+            if date_col is not None:
+                cleaned = cleaned.sort(["code", date_col])
+            local_median = (
+                pl.col(price_col)
+                .rolling_median(window_size=31, center=True, min_samples=5)
+                .over("code")
+            )
+            deviation = pl.col(price_col) / local_median
+            # 履歴の先頭が異常値の連続で始まると、前後の中央値自体が異常値になるため、
+            # 銘柄の全期間の中央値からの極端な乖離も除く
+            overall = pl.col(price_col) / pl.col(price_col).median().over("code")
+            cleaned = cleaned.with_columns(
+                pl.when(
+                    (deviation > 5.0) | (deviation < 0.2) | (overall > 20.0) | (overall < 0.05)
+                )
+                .then(None)
+                .otherwise(pl.col(price_col))
+                .alias(price_col)
+            )
+
+            # 3. 前日比異常スパイク (5倍超または 0.2倍未満の異常跳ね上がり・分割漏れ) のチェックアウト
+            # (2. で除いた後の値で判定する)
             prev_price = pl.col(price_col).shift(1).over("code")
             ratio = pl.col(price_col) / prev_price
             cleaned = cleaned.with_columns(
@@ -271,6 +295,167 @@ class PolarsProcessor:
         )
 
     @staticmethod
+    def _normalize_input(df_pl: pl.DataFrame) -> pl.DataFrame:
+        """列名の表記揺れを正規化し、日付を entry_date に統合する。"""
+        # [v26.8] 名寄せ・正規化の早期実施 (Early Sanitization)
+        # 以降、表記揺れによる脆さを排除する
+        aliases = {
+            "price": ("Close", "Price"),
+            "volume": ("Volume",),
+            "open": ("Open",),
+            "high": ("High",),
+            "low": ("Low",),
+        }
+        rename_map = {
+            c: target
+            for target, sources in aliases.items()
+            if target not in df_pl.columns
+            for c in sources
+            if c in df_pl.columns
+        }
+        if rename_map:
+            df_pl = df_pl.rename(rename_map)
+
+        # 日付の正規化 (entry_date への統合)
+        date_col = next(
+            (c for c in ["entry_date", "Date", "index"] if c in df_pl.columns), None
+        )
+        if date_col:
+            df_pl = df_pl.with_columns(
+                [
+                    pl.col(date_col)
+                    .cast(pl.Utf8)
+                    .str.slice(0, 10)
+                    .str.to_date(strict=False)
+                    .alias("entry_date")
+                ]
+            )
+        else:
+            from datetime import date
+
+            df_pl = df_pl.with_columns([pl.lit(date.today()).alias("entry_date")])
+
+        return df_pl
+
+    @staticmethod
+    def _add_technicals(df_pl: pl.DataFrame) -> pl.DataFrame:
+        """ボリンジャーバンド・RSI・MACD・トレンドスコア・売買代金を算出する (code・entry_date 順に並べてから計算)。"""
+        # [SSOT] 基層指標の算出（ネストされたWindow式エラー防止のため段階的に算出）
+        df_pl = (
+            df_pl.sort(["code", "entry_date"])
+            .with_columns(PolarsProcessor._get_bb_expr(window=25))
+            .with_columns(
+                [
+                    pl.col("ma25").alias("bb_mid"),
+                    pl.col("std25").alias("bb_sigma"),
+                    (pl.col("ma25") + pl.col("std25")).alias("bb_p1sig"),
+                    (pl.col("ma25") + 2 * pl.col("std25")).alias("bb_p2sig"),
+                    (pl.col("ma25") - pl.col("std25")).alias("bb_m1sig"),
+                    (pl.col("ma25") - 2 * pl.col("std25")).alias("bb_m2sig"),
+                ]
+            )
+        )
+
+        # RSI: 段階的計算 (diff -> gain/loss -> ewm_mean -> rsi)
+        df_pl = df_pl.with_columns(
+            pl.col("price").diff().over("code").alias("_diff")
+        ).with_columns(
+            [
+                pl.when(pl.col("_diff") > 0).then(pl.col("_diff")).otherwise(0.0).alias("_gain"),
+                pl.when(pl.col("_diff") < 0).then(pl.col("_diff").abs()).otherwise(0.0).alias("_loss"),
+                pl.col("price").is_not_null().cast(pl.Int32).rolling_sum(30).over("code").alias("_valid_cnt"),
+            ]
+        ).with_columns(
+            [
+                pl.col("_gain").fill_null(0.0).ewm_mean(com=13, adjust=False).over("code").alias("_avg_gain"),
+                pl.col("_loss").fill_null(0.0).ewm_mean(com=13, adjust=False).over("code").alias("_avg_loss"),
+            ]
+        ).with_columns(
+            [
+                pl.when(pl.col("_valid_cnt").fill_null(0) < 30)
+                .then(None)
+                .when(pl.col("_avg_loss") == 0)
+                .then(pl.when(pl.col("_avg_gain") == 0).then(50.0).otherwise(100.0))
+                .otherwise(100.0 - (100.0 / (1.0 + (pl.col("_avg_gain") / pl.col("_avg_loss")))))
+                .alias("rsi_14")
+            ]
+        )
+
+        # MACD: 段階的計算 (ema12/26 -> macd -> macd_signal -> macd_hist)
+        df_pl = df_pl.with_columns(
+            [
+                pl.col("price").ewm_mean(span=12, adjust=False).over("code").alias("_ema12"),
+                pl.col("price").ewm_mean(span=26, adjust=False).over("code").alias("_ema26"),
+            ]
+        ).with_columns(
+            [
+                (pl.col("_ema12") - pl.col("_ema26")).alias("macd")
+            ]
+        ).with_columns(
+            [
+                pl.col("macd").ewm_mean(span=9, adjust=False).over("code").alias("macd_signal")
+            ]
+        ).with_columns(
+            [
+                (pl.col("macd") - pl.col("macd_signal")).alias("macd_hist")
+            ]
+        )
+
+        # トレンドスコア等の派生指標
+        df_pl = df_pl.with_columns(
+            [
+                (((pl.col("price") - pl.col("ma25")) / pl.col("ma25")) * 100).alias(
+                    "ma_divergence"
+                ),
+                (
+                    (pl.col("ma25") > pl.col("ma75"))
+                    .fill_null(False)
+                    .cast(pl.Int32)
+                    + (pl.col("price") > pl.col("ma25"))
+                    .fill_null(False)
+                    .cast(pl.Int32)
+                    + (pl.col("macd_hist") > 0).fill_null(False).cast(pl.Int32)
+                    + (pl.col("rsi_14") > 50).fill_null(False).cast(pl.Int32)
+                ).alias("trend_score"),
+            ]
+        )
+
+        # trading_value の安全な算出式 (volume/price が欠落している場合に対応)
+        if "volume" in df_pl.columns and "price" in df_pl.columns:
+            vp_expr = (pl.col("volume") * pl.col("price")).cast(pl.Float64)
+        else:
+            vp_expr = pl.lit(None).cast(pl.Float64)
+
+        tv_init = (
+            pl.col("trading_value") if "trading_value" in df_pl.columns else vp_expr
+        )
+
+        df_pl = df_pl.with_columns(
+            [
+                pl.col("trend_score").alias("trend_signal"),
+                (pl.col("trend_score") >= 3).cast(pl.Float64).alias("trend_up"),
+                pl.when(pl.col("macd_hist") > 0)
+                .then(pl.lit("Bullish"))
+                .when(pl.col("macd_hist") < 0)
+                .then(pl.lit("Bearish"))
+                .otherwise(pl.lit("Neutral"))
+                .alias("macd_status"),
+                tv_init.alias("trading_value"),
+            ]
+        ).with_columns(
+            [
+                pl.coalesce(
+                    [
+                        pl.col("trading_value"),
+                        vp_expr,
+                    ]
+                ).alias("trading_value"),
+            ]
+        )
+
+        return df_pl
+
+    @staticmethod
     def calc_from_polars(df_pl: pl.DataFrame, latest_only: bool = True) -> pl.DataFrame:
         """code カラムが構築済みの Polars DataFrame を直接受け取り、ベクトル演算を行う。"""
         try:
@@ -280,45 +465,7 @@ class PolarsProcessor:
             if "code" not in df_pl.columns:
                 raise ValueError("DataFrame must contain 'code' column.")
 
-            # [v26.8] 名寄せ・正規化の早期実施 (Early Sanitization)
-            # 以降、表記揺れによる脆さを排除する
-            rename_map = {}
-            for c in ["Close", "Price"]:
-                if c in df_pl.columns and "price" not in df_pl.columns:
-                    rename_map[c] = "price"
-            for c in ["Volume"]:
-                if c in df_pl.columns and "volume" not in df_pl.columns:
-                    rename_map[c] = "volume"
-            for c in ["Open"]:
-                if c in df_pl.columns and "open" not in df_pl.columns:
-                    rename_map[c] = "open"
-            for c in ["High"]:
-                if c in df_pl.columns and "high" not in df_pl.columns:
-                    rename_map[c] = "high"
-            for c in ["Low"]:
-                if c in df_pl.columns and "low" not in df_pl.columns:
-                    rename_map[c] = "low"
-            if rename_map:
-                df_pl = df_pl.rename(rename_map)
-
-            # 日付の正規化 (entry_date への統合)
-            date_col = next(
-                (c for c in ["entry_date", "Date", "index"] if c in df_pl.columns), None
-            )
-            if date_col:
-                df_pl = df_pl.with_columns(
-                    [
-                        pl.col(date_col)
-                        .cast(pl.Utf8)
-                        .str.slice(0, 10)
-                        .str.to_date(strict=False)
-                        .alias("entry_date")
-                    ]
-                )
-            else:
-                from datetime import date
-
-                df_pl = df_pl.with_columns([pl.lit(date.today()).alias("entry_date")])
+            df_pl = PolarsProcessor._normalize_input(df_pl)
 
             # 2. テクニカル指標の計算
             # 指標計算に必要な最低限の行に絞る
@@ -328,118 +475,7 @@ class PolarsProcessor:
             if df_pl.is_empty():
                 return PolarsProcessor._ensure_resilient_schema(df_pl.clear())
 
-            # [SSOT] 基層指標の算出（ネストされたWindow式エラー防止のため段階的に算出）
-            df_pl = (
-                df_pl.sort(["code", "entry_date"])
-                .with_columns(PolarsProcessor._get_bb_expr(window=25))
-                .with_columns(
-                    [
-                        pl.col("ma25").alias("bb_mid"),
-                        pl.col("std25").alias("bb_sigma"),
-                        (pl.col("ma25") + pl.col("std25")).alias("bb_p1sig"),
-                        (pl.col("ma25") + 2 * pl.col("std25")).alias("bb_p2sig"),
-                        (pl.col("ma25") - pl.col("std25")).alias("bb_m1sig"),
-                        (pl.col("ma25") - 2 * pl.col("std25")).alias("bb_m2sig"),
-                    ]
-                )
-            )
-
-            # RSI: 段階的計算 (diff -> gain/loss -> ewm_mean -> rsi)
-            df_pl = df_pl.with_columns(
-                pl.col("price").diff().over("code").alias("_diff")
-            ).with_columns(
-                [
-                    pl.when(pl.col("_diff") > 0).then(pl.col("_diff")).otherwise(0.0).alias("_gain"),
-                    pl.when(pl.col("_diff") < 0).then(pl.col("_diff").abs()).otherwise(0.0).alias("_loss"),
-                    pl.col("price").is_not_null().cast(pl.Int32).rolling_sum(30).over("code").alias("_valid_cnt"),
-                ]
-            ).with_columns(
-                [
-                    pl.col("_gain").fill_null(0.0).ewm_mean(com=13, adjust=False).over("code").alias("_avg_gain"),
-                    pl.col("_loss").fill_null(0.0).ewm_mean(com=13, adjust=False).over("code").alias("_avg_loss"),
-                ]
-            ).with_columns(
-                [
-                    pl.when(pl.col("_valid_cnt").fill_null(0) < 30)
-                    .then(None)
-                    .when(pl.col("_avg_loss") == 0)
-                    .then(pl.when(pl.col("_avg_gain") == 0).then(50.0).otherwise(100.0))
-                    .otherwise(100.0 - (100.0 / (1.0 + (pl.col("_avg_gain") / pl.col("_avg_loss")))))
-                    .alias("rsi_14")
-                ]
-            )
-
-            # MACD: 段階的計算 (ema12/26 -> macd -> macd_signal -> macd_hist)
-            df_pl = df_pl.with_columns(
-                [
-                    pl.col("price").ewm_mean(span=12, adjust=False).over("code").alias("_ema12"),
-                    pl.col("price").ewm_mean(span=26, adjust=False).over("code").alias("_ema26"),
-                ]
-            ).with_columns(
-                [
-                    (pl.col("_ema12") - pl.col("_ema26")).alias("macd")
-                ]
-            ).with_columns(
-                [
-                    pl.col("macd").ewm_mean(span=9, adjust=False).over("code").alias("macd_signal")
-                ]
-            ).with_columns(
-                [
-                    (pl.col("macd") - pl.col("macd_signal")).alias("macd_hist")
-                ]
-            )
-
-            # トレンドスコア等の派生指標
-            df_pl = df_pl.with_columns(
-                [
-                    (((pl.col("price") - pl.col("ma25")) / pl.col("ma25")) * 100).alias(
-                        "ma_divergence"
-                    ),
-                    (
-                        (pl.col("ma25") > pl.col("ma75"))
-                        .fill_null(False)
-                        .cast(pl.Int32)
-                        + (pl.col("price") > pl.col("ma25"))
-                        .fill_null(False)
-                        .cast(pl.Int32)
-                        + (pl.col("macd_hist") > 0).fill_null(False).cast(pl.Int32)
-                        + (pl.col("rsi_14") > 50).fill_null(False).cast(pl.Int32)
-                    ).alias("trend_score"),
-                ]
-            )
-
-            # trading_value の安全な算出式 (volume/price が欠落している場合に対応)
-            if "volume" in df_pl.columns and "price" in df_pl.columns:
-                vp_expr = (pl.col("volume") * pl.col("price")).cast(pl.Float64)
-            else:
-                vp_expr = pl.lit(None).cast(pl.Float64)
-
-            tv_init = (
-                pl.col("trading_value") if "trading_value" in df_pl.columns else vp_expr
-            )
-
-            df_pl = df_pl.with_columns(
-                [
-                    pl.col("trend_score").alias("trend_signal"),
-                    (pl.col("trend_score") >= 3).cast(pl.Float64).alias("trend_up"),
-                    pl.when(pl.col("macd_hist") > 0)
-                    .then(pl.lit("Bullish"))
-                    .when(pl.col("macd_hist") < 0)
-                    .then(pl.lit("Bearish"))
-                    .otherwise(pl.lit("Neutral"))
-                    .alias("macd_status"),
-                    tv_init.alias("trading_value"),
-                ]
-            ).with_columns(
-                [
-                    pl.coalesce(
-                        [
-                            pl.col("trading_value"),
-                            vp_expr,
-                        ]
-                    ).alias("trading_value"),
-                ]
-            )
+            df_pl = PolarsProcessor._add_technicals(df_pl)
 
             # [v26.8] Holiday Guard: 計算の最後に営業日以外を排除
             df_pl = df_pl.filter(

@@ -94,7 +94,17 @@ class EvaluationPhase(BasePhase):
         self.log_info("Applying Layer 2: QuantEvaluator scoring...")
         evaluable_df = self._apply_quant_evaluator(evaluable_df)
 
-        # 9. スコア降順ソート
+        # 9. スコアの保存 (スコア算出前の保存では quant_score が常に空だった)
+        try:
+            self.context.duck_repo.save_metrics(
+                evaluable_df.select(["code", "entry_date", "quant_score"]).filter(
+                    pl.col("entry_date").is_not_null()
+                )
+            )
+        except Exception as e:
+            self.log_warn(f"スコアの保存に失敗しました (継続): {e}")
+
+        # 10. スコア降順ソート
         final_df = evaluable_df.sort("quant_score", descending=True)
 
         self.log_info(
@@ -194,9 +204,24 @@ class EvaluationPhase(BasePhase):
 
     def _enrich_master_data(self, df: pl.DataFrame) -> pl.DataFrame:
         """業種・ファンダメンタルズ情報を結合する"""
-        from src.repositories.fundamentals_repository import FundamentalsRepository
+        df = df.with_columns(pl.col("code").cast(pl.Utf8))
+        df = self._join_master(df, self._load_stocks())
+        df = self._join_fundamentals(df, self._load_fundamentals())
 
-        # 銘柄マスタの結合 (context.stock_repo 優先、フォールバックとして duck_repo.load_stocks)
+        # 株式分割の後に書類が提出されていない銘柄の 1 株当たり指標を補正する
+        try:
+            splits = self.context.duck_repo.load_splits()
+            if isinstance(splits, pl.DataFrame) and not splits.is_empty():
+                df = FinancialRepairService.apply_split_adjustment(df, splits)
+        except Exception as e:
+            self.log_warn(f"株式分割の補正に失敗しました (継続): {e}")
+
+        # 結合後に万一混入した _right サフィックス列をパージ (Schema Isolation Guard)
+        right_cols = [c for c in df.columns if c.endswith("_right")]
+        return df.drop(right_cols) if right_cols else df
+
+    def _load_stocks(self) -> pl.DataFrame:
+        """銘柄マスタ (context.stock_repo 優先、フォールバックとして duck_repo.load_stocks)"""
         stocks_df = pl.DataFrame()
         if hasattr(self.context, "stock_repo") and self.context.stock_repo:
             try:
@@ -205,47 +230,46 @@ class EvaluationPhase(BasePhase):
                 stocks_df = self.context.duck_repo.load_stocks()
         if stocks_df.is_empty():
             stocks_df = self.context.duck_repo.load_stocks()
+        return stocks_df
 
-        df = df.with_columns(pl.col("code").cast(pl.Utf8))
+    @staticmethod
+    def _join_master(df: pl.DataFrame, stocks_df: pl.DataFrame) -> pl.DataFrame:
+        if stocks_df.is_empty():
+            return df
+        stocks_df = stocks_df.with_columns(pl.col("code").cast(pl.Utf8))
+        candidate_cols = ["code", "name", "sector", "market", "status", "exclusion_reason"]
+        master_cols = [c for c in candidate_cols if c in stocks_df.columns]
+        # df側のマスター列重複をドロップ
+        df_metrics = df.drop([c for c in master_cols if c in df.columns and c != "code"])
+        # 銘柄マスタの全銘柄を保持するため、stocks_df を主として left join
+        # （時系列データのない銘柄も price=None として保持され、PreFilter で『市場データ取得不能』として隔離回収される）
+        df = stocks_df.select(master_cols).join(df_metrics, on="code", how="left")
+        if "sector" in df.columns:
+            df = df.with_columns([pl.col("sector").fill_null("Other")])
+        if "name" in df.columns:
+            df = df.with_columns([pl.col("name").fill_null("Unknown")])
+        return df
 
-        if not stocks_df.is_empty():
-            stocks_df = stocks_df.with_columns(pl.col("code").cast(pl.Utf8))
-            candidate_cols = ["code", "name", "sector", "market"]
-            master_cols = [c for c in candidate_cols if c in stocks_df.columns]
-            # df側のマスター列重複をドロップ
-            df_metrics = df.drop(
-                [c for c in master_cols if c in df.columns and c != "code"]
-            )
-            # 銘柄マスタの全銘柄を保持するため、stocks_df を主として left join
-            # （時系列データのない銘柄も price=None として保持され、PreFilter で『市場データ取得不能』として隔離回収される）
-            df = stocks_df.select(master_cols).join(df_metrics, on="code", how="left")
-            if "sector" in df.columns:
-                df = df.with_columns([pl.col("sector").fill_null("Other")])
-            if "name" in df.columns:
-                df = df.with_columns([pl.col("name").fill_null("Unknown")])
+    def _load_fundamentals(self) -> pl.DataFrame:
+        """財務データ (context.funda_repo 優先)"""
+        from src.repositories.fundamentals_repository import FundamentalsRepository
 
-        # 財務データの結合 (context.funda_repo 優先)
         if hasattr(self.context, "funda_repo") and self.context.funda_repo:
             funda_repo = self.context.funda_repo
         else:
             funda_repo = FundamentalsRepository()
-
         if hasattr(funda_repo, "load_all"):
-            df_fundamentals = funda_repo.load_all()
-        elif hasattr(funda_repo, "get_all_pl"):
-            df_fundamentals = funda_repo.get_all_pl()
-        else:
-            df_fundamentals = pl.DataFrame()
+            res = funda_repo.load_all()
+            return res if isinstance(res, pl.DataFrame) else pl.DataFrame()
+        if hasattr(funda_repo, "get_all_pl"):
+            res = funda_repo.get_all_pl()
+            return res if isinstance(res, pl.DataFrame) else pl.DataFrame()
+        return pl.DataFrame()
 
-        if not df_fundamentals.is_empty():
-            df_fundamentals = df_fundamentals.with_columns(pl.col("code").cast(pl.Utf8))
-            f_cols = [c for c in df_fundamentals.columns if c != "code"]
-            df = self._clean_columns(df, f_cols)
-            df = df.join(df_fundamentals, on="code", how="left")
-
-        # 結合後に万一混入した _right サフィックス列をパージ (Schema Isolation Guard)
-        right_cols = [c for c in df.columns if c.endswith("_right")]
-        if right_cols:
-            df = df.drop(right_cols)
-
-        return df
+    def _join_fundamentals(self, df: pl.DataFrame, df_fundamentals: pl.DataFrame) -> pl.DataFrame:
+        if df_fundamentals.is_empty():
+            return df
+        df_fundamentals = df_fundamentals.with_columns(pl.col("code").cast(pl.Utf8))
+        f_cols = [c for c in df_fundamentals.columns if c != "code"]
+        df = self._clean_columns(df, f_cols)
+        return df.join(df_fundamentals, on="code", how="left")

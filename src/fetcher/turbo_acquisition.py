@@ -1,10 +1,11 @@
 import json
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from threading import Semaphore
+from threading import Lock, Semaphore
 from typing import Any, Dict, List
 
 from src.fetcher.edinet_fetcher import (
@@ -12,7 +13,49 @@ from src.fetcher.edinet_fetcher import (
     EdinetFetcher,
     mask_api_key,
 )
-from src.fetcher.xbrl_parser import XbrlParser
+from src.fetcher.xbrl_parser import (
+    KIND_ANNUAL,
+    KIND_INTERIM,
+    PARSER_VERSION,
+    XbrlParser,
+)
+from src.utils import get_current_time
+
+# 対象とする書類: 有価証券報告書 (120)・訂正 (130)、半期報告書 (160)・訂正 (170)。
+# 四半期報告書 (140/150) は 2024 年 4 月に廃止され、現在提出されるのは過去分の訂正のみ
+ANNUAL_DOC_TYPES = ("120", "130")
+INTERIM_DOC_TYPES = ("160", "170")
+
+# 有価証券報告書は期末から 3 か月以内に提出されるため、期末がこれより古い書類 (過年度の
+# 訂正報告書) は最新の期ではありえない。DB に期の記録が無い (同梱シード由来の) 銘柄でも
+# 古い期で上書きしないよう、選択の段階で除外する
+STALE_ANNUAL_DAYS = 480
+
+_PERIOD_RE = re.compile(r"(\d{4})/(\d{2})/(\d{2})")
+
+
+def doc_period_end(doc: Dict[str, Any]) -> str:
+    """書類の対象期間の末日 (YYYY-MM-DD)。不明なら空文字。
+
+    一覧の periodEnd は訂正報告書では空のため、書類名 (例: "訂正有価証券報告書－第27期
+    (2024/04/01－2025/03/31)") の最後の日付で補う。
+    """
+    pe = (doc.get("periodEnd") or "").strip()
+    if pe:
+        return pe[:10]
+    dates = _PERIOD_RE.findall(doc.get("docDescription") or "")
+    if dates:
+        y, m, d = dates[-1]
+        return f"{y}-{m}-{d}"
+    return ""
+
+
+def clean_sec_code(sec_code: Any) -> str:
+    """5 桁の証券コードを 4 桁にする。上場銘柄のコードでなければ空文字。"""
+    code = str(sec_code or "").strip()[:4]
+    if len(code) != 4 or code == "0000" or not code.isalnum():
+        return ""
+    return code
 
 
 class TurboAcquisitionManager:
@@ -28,6 +71,11 @@ class TurboAcquisitionManager:
         self.parser = parser
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self.failed_dates: List[str] = []
+        # 取得済み (キャッシュ) で通信を省いた書類数と、実際にダウンロードした書類数 (進捗表示用)
+        self.cache_hits = 0
+        self.downloads = 0
+        self._count_lock = Lock()
 
         # パフォーマンス設定 (config から取得。デフォルトは旧 Turbo 設定準拠)
         fetcher_cfg = config.get("fetcher", {})
@@ -69,6 +117,10 @@ class TurboAcquisitionManager:
         self.logger.info(f"✨ Turbo Acquisition completed. Total: {len(final_results)}")
         return final_results
 
+    def _count(self, name: str) -> None:
+        with self._count_lock:
+            setattr(self, name, getattr(self, name) + 1)
+
     def _scan_document_list(self, days: int) -> List[Dict[str, Any]]:
         """過去 N 日分の書類を並列にスキャンする"""
         dates = [
@@ -76,6 +128,8 @@ class TurboAcquisitionManager:
             for i in range(days)
         ]
         raw_docs = []
+        # 一覧を取得できなかった日 (通信失敗)。次回の走査期間の起点に使う
+        self.failed_dates = []
 
         with ThreadPoolExecutor(max_workers=self.scan_workers) as scan_executor:
             future_to_date = {
@@ -85,62 +139,72 @@ class TurboAcquisitionManager:
             for future in future_to_date:
                 try:
                     day_res = future.result()
-                    # 有報(120), 四半報(140), 修正(130-170) などを対象とする
+                    if day_res.get("failed"):
+                        self.failed_dates.append(future_to_date[future])
                     for d in day_res.get("results", []):
                         doc_type = d.get("docTypeCode")
-                        if doc_type in [
-                            "120",
-                            "130",
-                            "140",
-                            "150",
-                            "160",
-                            "170",
-                        ] and d.get("secCode"):
-                            # 証券コード 4桁化
-                            d["clean_code"] = d.get("secCode")[:4]
-                            d["is_annual"] = doc_type in ["120", "130"]
-                            raw_docs.append(d)
+                        if doc_type not in ANNUAL_DOC_TYPES + INTERIM_DOC_TYPES:
+                            continue
+                        code = clean_sec_code(d.get("secCode"))
+                        if not code:
+                            continue
+                        d["clean_code"] = code
+                        d["is_annual"] = doc_type in ANNUAL_DOC_TYPES
+                        d["period_end"] = doc_period_end(d)
+                        raw_docs.append(d)
                 except Exception as e:
                     if isinstance(e, EdinetAuthenticationError):
                         raise
                     self.logger.error(f"❌ Scan error: {mask_api_key(str(e))}")
+                    self.failed_dates.append(future_to_date[future])
 
         return raw_docs
 
     def _filter_annual_priority(
         self, docs: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """銘柄ごとに『本決算(有報・訂正有報)』を最優先で残し、最新のものを選択する"""
-        latest_docs = {}
+        """銘柄ごとに、取り込む書類を選ぶ。
+
+        - 有価証券報告書 (訂正を含む): 対象期間が最も新しいもの。同じ期は提出が新しいもの
+          (過年度の訂正報告書が後から出ても、新しい期の値を古い期で上書きしない)。
+          期末が STALE_ANNUAL_DAYS より古いものは対象外
+        - 半期報告書 (訂正を含む): 上の有価証券報告書より新しい期のもののみ
+          (貸借対照表の項目だけを更新する)
+        """
+
+        def key(d: Dict[str, Any]) -> tuple:
+            return (d.get("period_end") or "", d.get("submitDateTime") or "")
+
+        stale_before = (get_current_time() - timedelta(days=STALE_ANNUAL_DAYS)).strftime("%Y-%m-%d")
+        annual: Dict[str, Dict[str, Any]] = {}
+        interim: Dict[str, Dict[str, Any]] = {}
         for doc in docs:
-            code = doc["clean_code"]
-            submit_time = doc.get("submitDateTime", "")
-            is_annual = doc["is_annual"]
-
-            if code not in latest_docs:
-                latest_docs[code] = doc
+            if doc["is_annual"] and doc.get("period_end") and doc["period_end"] < stale_before:
                 continue
+            bucket = annual if doc["is_annual"] else interim
+            code = doc["clean_code"]
+            if code not in bucket or key(doc) > key(bucket[code]):
+                bucket[code] = doc
 
-            current = latest_docs[code]
-            # 優先順位 1: 有報・訂正有報があるなら四半報より優先
-            if is_annual and not current["is_annual"]:
-                latest_docs[code] = doc
-            # 優先順位 2: 種別区分が同じならより提出日時が新しいもの
-            elif is_annual == current["is_annual"]:
-                if submit_time > current.get("submitDateTime", ""):
-                    latest_docs[code] = doc
-
-        return list(latest_docs.values())
+        selected = list(annual.values())
+        for code, doc in interim.items():
+            base = annual.get(code)
+            if base is None or (doc.get("period_end") or "") > (base.get("period_end") or ""):
+                selected.append(doc)
+        return selected
 
     def _execute_pipeline(self, target_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
         """ダウンロード制限付きの並列パースパイプライン"""
         from src.fetcher.edinet_fetcher import EdinetAuthenticationError, mask_api_key
         from src.repositories.duck_repository import DuckDBRepository
 
-        # DuckDB 永続層から取得済みの doc_id 一覧をロード (Colab セッション跨ぎ差分キャッシュ)
+        # DuckDB 永続層から取得済みの doc_id 一覧をロード (Colab セッション跨ぎ差分キャッシュ)。
+        # 古い版のパーサーで処理した書類は対象に含めない (取り込み直す)
         try:
             duck_repo = DuckDBRepository()
-            processed_doc_ids = duck_repo.get_processed_edinet_doc_ids()
+            processed_doc_ids = duck_repo.get_processed_edinet_doc_ids(
+                min_parser_version=PARSER_VERSION
+            )
         except Exception:
             processed_doc_ids = set()
 
@@ -152,27 +216,41 @@ class TurboAcquisitionManager:
         dl_semaphore = Semaphore(self.max_dl_concurrency)
         results = {}
 
+        def _record(doc: Dict[str, Any], status: str) -> None:
+            try:
+                duck_repo.record_edinet_document(
+                    doc_id=doc["docID"],
+                    code=doc["clean_code"],
+                    doc_type=doc.get("docTypeCode"),
+                    submit_date=doc.get("submitDateTime", ""),
+                    is_annual=doc.get("is_annual", False),
+                    status=status,
+                    parser_version=PARSER_VERSION,
+                )
+            except Exception:
+                pass
+
         def pipeline_worker(doc):
             code = doc["clean_code"]
             doc_id = doc["docID"]
-            result_file = os.path.join(self.results_dir, f"{code}.json")
+            kind = KIND_ANNUAL if doc.get("is_annual") else KIND_INTERIM
+            result_file = os.path.join(self.results_dir, f"{code}_{kind}.json")
 
             # 第1段: DuckDB 永続層キャッシュ判定 (セッション跨ぎでの実通信を100%遮断)
             if doc_id in processed_doc_ids:
+                self._count("cache_hits")
                 return None
 
-            # 第2段: ローカル作業層 JSON キャッシュ判定
+            # 第2段: ローカル作業層 JSON キャッシュ判定 (同じ書類を同じ版で処理済み)
             if os.path.exists(result_file):
                 try:
                     with open(result_file, "r", encoding="utf-8") as f:
                         cached_item = json.load(f)
-                    cached_doc_id = cached_item.get("doc_id")
-                    cached_submit = cached_item.get("submit_date", "")
-                    target_submit = doc.get("submitDateTime", "")
-
-                    if cached_doc_id == doc_id or (
-                        cached_submit and cached_submit >= target_submit
+                    if (
+                        cached_item.get("parser_version") == PARSER_VERSION
+                        and cached_item.get("doc_id") == doc_id
                     ):
+                        self._count("cache_hits")
                         return code, cached_item
                 except Exception:
                     pass
@@ -181,6 +259,7 @@ class TurboAcquisitionManager:
                 # 1. ダウンロード (I/O 制限)
                 with dl_semaphore:
                     zip_path = self.fetcher.download_xbrl(doc_id, self.tmp_dir)
+                    self._count("downloads")  # ダウンロードできた書類だけを数える
                     time.sleep(0.5)  # EDINET API への敬意としてのスリープ
 
                 # 2. パース (CPU 並列)
@@ -190,9 +269,11 @@ class TurboAcquisitionManager:
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
 
-                if financials:
+                # 書類の種別と中身の期間が食い違う場合 (様式の特殊な有価証券報告書等) は取り込まない
+                if financials and financials.get("kind") == kind:
                     item = {
                         "source": "edinet_turbo",
+                        "parser_version": PARSER_VERSION,
                         "doc_id": doc_id,
                         "doc_type": doc.get("docTypeCode"),
                         "is_annual": doc.get("is_annual", False),
@@ -200,23 +281,14 @@ class TurboAcquisitionManager:
                         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         **financials,
                     }
+                    if not item.get("period_end"):
+                        item["period_end"] = doc.get("period_end") or None
                     # 個別ファイルにバッファリング
-                    with open(result_file, "w") as f:
+                    with open(result_file, "w", encoding="utf-8") as f:
                         json.dump(item, f, indent=2, ensure_ascii=False)
                     return code, item
-                else:
-                    # パース失敗または財務項目未検出時も記録して次回以降の無駄な通信を防止
-                    try:
-                        duck_repo.record_edinet_document(
-                            doc_id=doc_id,
-                            code=code,
-                            doc_type=doc.get("docTypeCode"),
-                            submit_date=doc.get("submitDateTime", ""),
-                            is_annual=doc.get("is_annual", False),
-                            status="parse_failed",
-                        )
-                    except Exception:
-                        pass
+                # パース失敗または財務項目未検出時も記録して次回以降の無駄な通信を防止
+                _record(doc, "parse_failed")
 
             except EdinetAuthenticationError:
                 raise
@@ -224,17 +296,7 @@ class TurboAcquisitionManager:
                 self.logger.error(
                     f"❌ Pipeline failed for {code}: {mask_api_key(str(e))}"
                 )
-                try:
-                    duck_repo.record_edinet_document(
-                        doc_id=doc_id,
-                        code=code,
-                        doc_type=doc.get("docTypeCode"),
-                        submit_date=doc.get("submitDateTime", ""),
-                        is_annual=doc.get("is_annual", False),
-                        status="error",
-                    )
-                except Exception:
-                    pass
+                _record(doc, "error")
             return None
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -245,6 +307,6 @@ class TurboAcquisitionManager:
                 res = future.result()
                 if res:
                     code, data = res
-                    results[code] = data
+                    results[f"{code}_{data.get('kind')}"] = data
 
         return results

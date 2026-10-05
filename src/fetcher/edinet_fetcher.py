@@ -160,20 +160,20 @@ class EdinetFetcher:
                     self.logger.error(
                         f"❌ Failed to fetch EDINET documents for {date_str} after {max_retries} attempts: {e}"
                     )
-                    return {"results": []}
+                    return {"results": [], "failed": True}
             except requests.exceptions.JSONDecodeError as e:
                 self.logger.warning(
                     f"⚠️ EDINET API returned non-JSON response for {date_str} (HTTP {response.status_code}): {e}. Content preview: {response.text[:150]}"
                 )
-                return {"results": []}
+                return {"results": [], "failed": True}
             except Exception as e:
                 masked_err = mask_api_key(str(e))
                 self.logger.error(
                     f"❌ Failed to fetch EDINET documents for {date_str}: {masked_err}"
                 )
-                return {"results": []}
+                return {"results": [], "failed": True}
 
-        return {"results": []}
+        return {"results": [], "failed": True}
 
     def parse_code_listing(self) -> Dict[str, str]:
         """EdinetcodeDlInfo.csv を解析して {証券コード(4桁): EDINETコード} のマップを返す"""
@@ -209,75 +209,88 @@ class EdinetFetcher:
         url = f"{self.BASE_URL}/documents/{doc_id}"
         headers, params = self._get_headers_and_params({"type": 1})  # type 1 = XBRL zip
 
+        file_path: Optional[str] = None
         try:
             response = requests.get(
                 url, params=params, headers=headers, stream=True, timeout=60
             )
-            if response.status_code in (401, 403):
-                raise EdinetAuthenticationError(
-                    f"EDINET APIキーの認証に失敗しました (HTTP {response.status_code})。APIキーを確認してください。"
-                )
-
-            # Content-Type が JSON の場合（HTTP 200 で返されるエラー JSON を検知）
-            content_type = response.headers.get("Content-Type", "")
-            if "application/json" in content_type or "text/json" in content_type:
-                try:
-                    data = response.json()
-                    self._validate_auth_response(response.status_code, data=data)
-                except EdinetAuthenticationError:
-                    raise
-                except Exception:
-                    pass
-
-            response.raise_for_status()
+            self._check_download_response(response)
 
             os.makedirs(save_dir, exist_ok=True)
             file_path = os.path.join(save_dir, f"{doc_id}.zip")
-            with open(file_path, "wb") as f:
-                first_chunk = True
-                for chunk in response.iter_content(chunk_size=8192):
-                    if first_chunk:
-                        first_chunk = False
-                        # ストリーミング開始部分が JSON エラー文字列である場合の検知
-                        stripped = chunk.strip()
-                        if stripped.startswith(b'{"StatusCode"') or stripped.startswith(b'{"statusCode"'):
-                            try:
-                                import json
-                                data = json.loads(chunk.decode("utf-8", errors="ignore"))
-                                self._validate_auth_response(response.status_code, data=data)
-                            except EdinetAuthenticationError:
-                                raise
-                            except Exception:
-                                pass
-                    f.write(chunk)
-
-            # ファイルサイズが小さく、有効な ZIP ヘッダー (PK\x03\x04) でない場合も検証
-            if os.path.exists(file_path) and os.path.getsize(file_path) < 1024:
-                with open(file_path, "rb") as test_f:
-                    header_bytes = test_f.read(4)
-                if header_bytes != b"PK\x03\x04":
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as err_f:
-                        content_str = err_f.read()
-                    self._validate_auth_response(response.status_code, text=content_str)
-
+            self._write_download(response, file_path)
+            self._check_downloaded_file(response, file_path)
             return file_path
         except EdinetAuthenticationError:
-            if "file_path" in locals() and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass
+            self._remove_quietly(file_path)
             raise
         except Exception as e:
-            if "file_path" in locals() and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass
+            self._remove_quietly(file_path)
             masked_err = mask_api_key(str(e))
             raise RuntimeError(
                 f"Failed to download XBRL for {doc_id}: {masked_err}"
             ) from None
+
+    def _check_download_response(self, response: Any) -> None:
+        """認証エラー (HTTP 401/403、HTTP 200 で返されるエラー JSON) と HTTP エラーを例外にする。"""
+        if response.status_code in (401, 403):
+            raise EdinetAuthenticationError(
+                f"EDINET APIキーの認証に失敗しました (HTTP {response.status_code})。APIキーを確認してください。"
+            )
+
+        # Content-Type が JSON の場合（HTTP 200 で返されるエラー JSON を検知）
+        content_type = response.headers.get("Content-Type", "")
+        if "application/json" in content_type or "text/json" in content_type:
+            try:
+                data = response.json()
+                self._validate_auth_response(response.status_code, data=data)
+            except EdinetAuthenticationError:
+                raise
+            except Exception:
+                pass
+
+        response.raise_for_status()
+
+    def _write_download(self, response: Any, file_path: str) -> None:
+        """応答を保存する。ストリーミング開始部分が JSON エラー文字列なら認証エラーを検知する。"""
+        with open(file_path, "wb") as f:
+            for i, chunk in enumerate(response.iter_content(chunk_size=8192)):
+                if i == 0:
+                    self._check_first_chunk(response, chunk)
+                f.write(chunk)
+
+    def _check_first_chunk(self, response: Any, chunk: bytes) -> None:
+        stripped = chunk.strip()
+        if not (stripped.startswith(b'{"StatusCode"') or stripped.startswith(b'{"statusCode"')):
+            return
+        try:
+            import json
+
+            data = json.loads(chunk.decode("utf-8", errors="ignore"))
+            self._validate_auth_response(response.status_code, data=data)
+        except EdinetAuthenticationError:
+            raise
+        except Exception:
+            pass
+
+    def _check_downloaded_file(self, response: Any, file_path: str) -> None:
+        """ファイルサイズが小さく、有効な ZIP ヘッダー (PK\\x03\\x04) でない場合も検証"""
+        if not os.path.exists(file_path) or os.path.getsize(file_path) >= 1024:
+            return
+        with open(file_path, "rb") as test_f:
+            header_bytes = test_f.read(4)
+        if header_bytes != b"PK\x03\x04":
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as err_f:
+                content_str = err_f.read()
+            self._validate_auth_response(response.status_code, text=content_str)
+
+    @staticmethod
+    def _remove_quietly(file_path: Optional[str]) -> None:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
 
     def backfill_scan(self, days: int = 365) -> List[Dict[str, Any]]:
         """過去 N 日分の書類をスキャンし、対象となる有報・四半報のメタデータリストを返す"""

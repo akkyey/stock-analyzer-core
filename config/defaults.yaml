@@ -17,7 +17,8 @@ database:
   retention_days: 30
 
 financial_repair:
-  ratio_scaling_threshold: 1.0
+  # 0.0 = 無効 (財務データは % 表記で保存される)。正の値にするとその値未満の自己資本比率を 100 倍する
+  ratio_scaling_threshold: 0.0
 
 sector_policies: {}
 
