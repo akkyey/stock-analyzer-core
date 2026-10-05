@@ -222,3 +222,60 @@ def test_acquisition_is_idempotent_with_recorded_small_ratio_split(stub_context)
     expected = hist["Close"].to_list()
     assert first["1001"].sort("Date")["Close"].to_list() == expected
     assert second["1001"].sort("Date")["Close"].to_list() == expected
+
+
+# --- 画面に出る銘柄数の説明 (3,920 → 3,912 → 3,892 の理由) ---------------------------
+
+
+def test_fundamentals_seed_note_counts_codes_missing_from_seed(stub_context, capsys, tmp_path):
+    """財務シードの注記は、件数の差ではなく、取得対象のうちシードに無い銘柄の数を出す"""
+    seed = pl.DataFrame({"code": ["1001", "1002", "9999"]})  # 9999 は上場廃止済みでもシードにある
+    with (
+        patch("src.repositories.fundamentals_repository.FundamentalsRepository") as MockFunda,
+        patch("pathlib.Path.exists", return_value=True),
+        patch("polars.read_parquet", return_value=seed),
+    ):
+        MockFunda.return_value.get_count.return_value = 0
+        MockFunda.return_value.backfill_growth_from_seed.return_value = 0
+        repo = MagicMock()
+        repo.get_all_codes.return_value = ["1001", "1002", "1003", "1004"]  # 1003・1004 はシードに無い
+        repo.get_meta.return_value = "done"
+        AcquisitionPhase(stub_context)._ensure_fundamentals(repo)
+    out = capsys.readouterr().out
+    assert "財務シードデータから 3 銘柄" in out
+    assert "取得対象のうち 2 銘柄" in out
+
+
+def test_fundamentals_seed_note_omitted_when_all_codes_are_in_seed(stub_context, capsys):
+    seed = pl.DataFrame({"code": ["1001", "1002", "9999"]})
+    with (
+        patch("src.repositories.fundamentals_repository.FundamentalsRepository") as MockFunda,
+        patch("pathlib.Path.exists", return_value=True),
+        patch("polars.read_parquet", return_value=seed),
+    ):
+        MockFunda.return_value.get_count.return_value = 0
+        MockFunda.return_value.backfill_growth_from_seed.return_value = 0
+        repo = MagicMock()
+        repo.get_all_codes.return_value = ["1001", "1002"]
+        repo.get_meta.return_value = "done"
+        AcquisitionPhase(stub_context)._ensure_fundamentals(repo)
+    out = capsys.readouterr().out
+    assert "財務シードデータから 3 銘柄を初期登録しました。" in out
+    assert "未収録" not in out
+
+
+def test_monthly_master_sync_result_is_shown_on_screen(stub_context, capsys):
+    """銘柄マスタの月次同期 (新規上場・上場廃止) の結果は、画面にも出す"""
+    from types import SimpleNamespace
+
+    repo = MagicMock()
+    repo.get_all_codes.side_effect = [["1001"] * 3920, ["1001"] * 3892]
+    fetcher = MagicMock()
+    result = SimpleNamespace(status="updated", added=43, delisted=71, relisted=0, detail="")
+    stub_context.config["fetcher"] = {"refresh_stock_master": True}
+    with patch("src.services.stock_master.refresh_stock_master", return_value=result):
+        codes = AcquisitionPhase(stub_context)._ensure_stock_master(repo, fetcher)
+    out = capsys.readouterr().out
+    assert len(codes) == 3892
+    assert "新規上場 43 / 上場廃止 71 / 再上場 0 銘柄" in out
+    assert "取得対象 3892 銘柄" in out

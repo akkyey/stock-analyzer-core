@@ -269,13 +269,19 @@ class AcquisitionPhase(BasePhase):
 
             res = refresh_stock_master(repo, fetcher.jpx_fetcher)
             if res.status == "updated":
-                self.log_info(
-                    f"🔄 銘柄マスタを更新しました: 新規 {res.added} / 上場廃止 {res.delisted} "
-                    f"/ 再上場 {res.relisted} 銘柄"
+                target_codes = list(repo.get_all_codes() or [])
+                summary = (
+                    f"新規上場 {res.added} / 上場廃止 {res.delisted} / 再上場 {res.relisted} 銘柄"
+                )
+                self.log_info(f"🔄 銘柄マスタを更新しました: {summary}")
+                # 銘柄数が推移する (例: 3,920 → 3,892) 主な理由なので、画面にも出す
+                print(
+                    f"   🔄 銘柄マスタを JPX の最新一覧と同期しました: {summary}"
+                    f" (取得対象 {len(target_codes)} 銘柄)",
+                    flush=True,
                 )
                 record_fetch_stat(self.context, "master_added", res.added)
                 record_fetch_stat(self.context, "master_delisted", res.delisted)
-                target_codes = list(repo.get_all_codes() or [])
             elif res.status in ("skipped_unsafe", "failed"):
                 self.log_warn(f"銘柄マスタの更新をスキップしました: {res.detail}")
 
@@ -302,9 +308,16 @@ class AcquisitionPhase(BasePhase):
                 try:
                     df_seed = pl.read_parquet(str(seed_parquet))
                     repo.save_fundamentals(df_seed)
-                    all_master_codes = list(repo.get_all_codes() or [])
-                    diff_seed = len(all_master_codes) - len(df_seed) if len(all_master_codes) > len(df_seed) else 0
-                    diff_note = f" (直近の新規上場等 {diff_seed} 銘柄を除く)" if diff_seed > 0 else ""
+                    # 取得対象の銘柄のうち、シードに無い銘柄 (シード作成後の新規上場など)。
+                    # 件数の差ではなく、実際にシードに無い銘柄を数える (シードには上場廃止済みの銘柄もある)
+                    seed_codes = set(df_seed["code"].cast(pl.Utf8).to_list())
+                    not_in_seed = len(set(repo.get_all_codes() or []) - seed_codes)
+                    diff_note = (
+                        f" (取得対象のうち {not_in_seed} 銘柄は、シード作成後の新規上場等で未収録。"
+                        "EDINET の開示で順次補完されます)"
+                        if not_in_seed > 0
+                        else ""
+                    )
                     print(
                         f"   ✅ 財務シードデータから {len(df_seed)} 銘柄を初期登録しました{diff_note}。",
                         flush=True,

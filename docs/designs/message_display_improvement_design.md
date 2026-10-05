@@ -1,8 +1,8 @@
 # 設計書: パイプライン実行ログおよび Colab ノートブック表示メッセージの改善方針
 
 - **作成日**: 2026-10-05
-- **対象バージョン**: v1.3.1（予定）
-- **ステータス**: レビュー待ち（実装保留）
+- **対象バージョン**: v1.3.0
+- **ステータス**: 実装済み（`ff55ce6`・`f0a46a0`。銘柄数の説明の訂正と、月次同期の画面表示は 2026-10-05 追補）
 - **対象ファイル**:
   - `notebooks/stock_analyzer_colab.ipynb`
   - `src/orchestration/phases/acquisition.py`
@@ -19,9 +19,9 @@ Google Colab 上での検証（初回構築および継続実行）において�
    - 以前の並列ダウンロード（マルチスレッド）時代の古い固定文字列が残っており、Yahoo Finance 429 規制対策でシングルスレッド化した現状と合致していなかった。
 2. **銘柄数推移の不透明さ（3920 → 3912 → 3890）**:
    - ログ上で理由の説明なく数字が遷移するため、データの欠落やバグと誤認されやすい。
-     - `3,920`: JPX公式上場銘柄リストの全行数
-     - `3,912`: 内部同梱の財務シード（直近新規上場 8 社未収録）
-     - `3,890`: 株価配信のない PRO Market / 30日連続失敗等（30 社）を除外した市場データ取得対象
+     - `3,920`: JPX 公式リストからの銘柄マスタへの初期登録数
+     - `3,912`: 同梱の財務シードの件数。**件数の差（8）は「新規上場の数」ではない**。シードには上場廃止済みの会社も含まれ、取得対象のうちシードに無い銘柄（シード作成後の新規上場）は別に数える（2026-10-03 の空の DB の実行では 43 社）
+     - `3,890` 前後: **銘柄マスタの月次同期** (JPX の最新一覧との同期: 新規上場の追加・上場廃止の除外) の結果。2026-10-03 の空の DB の実行では、新規 43 / 上場廃止 71 で 3,892 になった。PRO Market 等の再取得停止は、3 回連続で取得できなかった銘柄を 30 日止める仕組みなので、**初回は 0 件**で、2 回目以降に効く
 3. **前処理中の沈黙時間**:
    - `🚀 パイプライン実行を開始します...` から `📡 全 3890 銘柄の市場データ取得を開始します...` まで、EDINET API 通信やキャッシュ読み込み等の処理が裏で実行されているが、コンソール表示がないためフリーズしたような体感を与える。
 4. **取得完了内訳の表現不足**:
@@ -75,19 +75,16 @@ Google Colab 上での検証（初回構築および継続実行）において�
 差分が発生している理由をログに併記する。
 
 ```python
-# _ensure_stock_master
-print(
-    f"   ✅ 東証(JPX)公式リストから銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。",
-    flush=True,
-)
+# _ensure_stock_master (初期登録)
+print(f"   ✅ 東証(JPX)公式リストから銘柄マスタに {len(target_codes)} 銘柄を初期登録しました。", flush=True)
 
-# _ensure_fundamentals
-diff_seeds = len(target_codes) - len(df_seed) if len(target_codes) >= len(df_seed) else 0
-diff_note = f" (直近の新規上場等 {diff_seeds} 銘柄を除く)" if diff_seeds > 0 else ""
-print(
-    f"   ✅ 財務シードデータから {len(df_seed)} 銘柄を初期登録しました{diff_note}。",
-    flush=True,
-)
+# _ensure_stock_master (月次同期。銘柄数が推移する主な理由なので画面にも出す)
+print(f"   🔄 銘柄マスタを JPX の最新一覧と同期しました: 新規上場 {added} / 上場廃止 {delisted} / 再上場 {relisted} 銘柄 (取得対象 {n} 銘柄)", flush=True)
+
+# _ensure_fundamentals (件数の差ではなく、取得対象のうちシードに無い銘柄を数える)
+not_in_seed = len(set(repo.get_all_codes()) - set(df_seed["code"]))
+diff_note = f" (取得対象のうち {not_in_seed} 銘柄は、シード作成後の新規上場等で未収録。EDINET の開示で順次補完されます)" if not_in_seed else ""
+print(f"   ✅ 財務シードデータから {len(df_seed)} 銘柄を初期登録しました{diff_note}。", flush=True)
 ```
 
 #### ② 前処理（EDINET同期・キャッシュ）の可視化
@@ -102,6 +99,7 @@ print(f"   ✨ EDINET 同期完了 ({sync_count} 件の開示書類を反映 / �
 ```
 
 #### ③ 市場データ取得対象の選定理由の明示
+(PRO Market 等の再取得停止は、初回は 0 件。2 回目以降に該当する銘柄がある場合だけ表示される)
 ```python
 # _select_targets / _fetch_market_data
 excluded_special = len(target_codes_before) - len(target_codes)
@@ -133,7 +131,7 @@ print(
 ## 3. 実装・検証手順（実装着手時）
 
 1. **コード修正**:
-   - `notebooks/stock_analyzer_colab.ipynb` の Cell 4, 9, 10 を更新
+   - `notebooks/stock_analyzer_colab.ipynb` の Step 1・Step 3 のセルを更新 (セル番号は増減でずれるため、セル名で特定する)
    - `src/orchestration/phases/acquisition.py` のログ出力箇所を更新
 2. **ローカルテスト**:
    - `pytest` で既存テスト（特にログ関連やフェーズ実行テスト）にリグレッションがないか確認

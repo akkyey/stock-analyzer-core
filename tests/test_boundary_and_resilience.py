@@ -38,16 +38,66 @@ def test_colab_sync_reset_database_removes_tmp_and_resets(tmp_path: Path):
     assert not dummy_wal.exists()
 
 
-def test_colab_notebook_resets_database_flag_after_execution():
-    """A-1: ノートブック実行コード内で reset_database 実行直後にフラグが自動解除されること."""
+def _reset_block_source() -> str:
+    """Step 1 セルの「初期化スイッチの処理」ブロックだけを取り出す。"""
     import json
-    nb_path = Path("notebooks/stock_analyzer_colab.ipynb")
-    with open(nb_path) as f:
-        nb = json.load(f)
 
+    with open("notebooks/stock_analyzer_colab.ipynb") as f:
+        nb = json.load(f)
     cell_src = "".join(nb["cells"][4]["source"])
-    assert 'globals()["reset_database"] = False' in cell_src
-    assert "安全装置" in cell_src
+    start = cell_src.index("# 0. 初期化スイッチの処理")
+    end = cell_src.index("# Drive 再マウントガード")
+    return cell_src[start:end]
+
+
+class _FakeSync:
+    def __init__(self):
+        self.reset_calls = 0
+
+    def reset_cache(self, drive_dir, working_dir):
+        self.reset_calls += 1
+
+
+def _run_reset_block(namespace: dict) -> None:
+    exec(compile(_reset_block_source(), "<step1-reset-block>", "exec"), namespace)
+
+
+def test_colab_notebook_reset_database_runs_only_once_per_session():
+    """A-1: 「すべてのセルを実行」で Step 0 が reset_database を ON に戻しても、消去は 1 回だけ。
+
+    以前の自動解除は Step 1 の変数を戻すだけで、Step 0 のチェックボックスが ON のままだと、
+    実行のたびに DB が消えて 20 分の初回構築が繰り返されていた。
+    """
+    sync = _FakeSync()
+    ns = {"ColabSyncManager": sync, "DRIVE_DIR": "/drive", "WORKING_DIR": "/work"}
+
+    ns["reset_database"] = True  # Step 0 (チェックボックス ON)
+    _run_reset_block(ns)
+    assert sync.reset_calls == 1
+    assert ns["reset_database"] is False  # 実行後に解除される
+
+    for _ in range(3):  # 「すべてのセルを実行」: Step 0 が再び True にする
+        ns["reset_database"] = True
+        _run_reset_block(ns)
+    assert sync.reset_calls == 1, "同じセッションでは 2 回目以降は消去しない"
+    assert ns["reset_database"] is True  # 消去しない場合は、値には触れない
+
+
+def test_colab_notebook_reset_database_off_never_resets():
+    sync = _FakeSync()
+    ns = {"ColabSyncManager": sync, "DRIVE_DIR": "/drive", "WORKING_DIR": "/work", "reset_database": False}
+    _run_reset_block(ns)
+    _run_reset_block(ns)
+    assert sync.reset_calls == 0
+
+
+def test_colab_notebook_reset_database_can_reset_again_after_runtime_restart():
+    """ランタイムを再起動すると (変数が消えると)、もう一度消去できる。"""
+    sync = _FakeSync()
+    for _ in range(2):
+        ns = {"ColabSyncManager": sync, "DRIVE_DIR": "/drive", "WORKING_DIR": "/work", "reset_database": True}
+        _run_reset_block(ns)
+    assert sync.reset_calls == 2
 
 
 def test_colab_sync_pull_when_drive_unmounted_falls_back_safely(tmp_path: Path):
