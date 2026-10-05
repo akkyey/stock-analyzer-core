@@ -28,7 +28,7 @@ def test_colab_sync_reset_database_removes_tmp_and_resets(tmp_path: Path):
     # ダミーファイルの作成
     dummy_db = drive_cache / "stock_analyzer.duckdb"
     dummy_db.write_text("dummy")
-    dummy_tmp = working_cache / "stock_analyzer.tmp"
+    dummy_tmp = working_cache / "stock_analyzer.duckdb.tmp"
     dummy_tmp.write_text("temp")
     dummy_wal = working_cache / "stock_analyzer.duckdb.wal"
     dummy_wal.write_text("wal")
@@ -48,10 +48,10 @@ def test_colab_sync_pull_when_drive_unmounted_falls_back_safely(tmp_path: Path):
     working_cache.mkdir(parents=True)
 
     local_db = working_cache / "stock_analyzer.duckdb"
-    # ダミーの空DBファイル
     local_db.write_text("local_db")
 
-    with patch.object(ColabSyncManager, "verify_database_integrity", return_value=(True, "OK")):
+    with patch.object(ColabSyncManager, "is_duckdb_healthy", return_value=True), \
+         patch.object(ColabSyncManager, "verify_database_integrity", return_value=(True, "OK")):
         selected_db = ColabSyncManager.pull_database(unmounted_drive, working_dir, validate_integrity=True)
 
     assert selected_db == local_db
@@ -100,7 +100,7 @@ def test_pre_filter_boundary_zero_and_negative_price():
         {"code": "1004", "price": 50.0, "entry_date": "2026-10-02", "avg_trading_value_20d": 1e8, "zero_volume_days_5d": 0, "latest_trade_date": "2026-10-02", "is_recent_trade": True, "equity_ratio": 50.0, "net_assets": 1e9, "status": "active"},
     ]
     df = pl.DataFrame(records, schema=schema)
-    result = PreFilter.apply(df, config={"hard_filters": {"min_price": 50.0}})
+    result = PreFilter.evaluate(df, config={"hard_filters": {"min_price": 50.0}})
 
     passed_codes = result.passed_df["code"].to_list()
     assert "1004" in passed_codes  # 50円ちょうどは通過
@@ -132,7 +132,7 @@ def test_pre_filter_boundary_insolvent_negative_equity():
         {"code": "2003", "price": 500.0, "entry_date": "2026-10-02", "avg_trading_value_20d": 1e8, "zero_volume_days_5d": 0, "latest_trade_date": "2026-10-02", "is_recent_trade": True, "equity_ratio": 40.0, "net_assets": 1e9, "status": "active"},
     ]
     df = pl.DataFrame(records, schema=schema)
-    result = PreFilter.apply(df)
+    result = PreFilter.evaluate(df)
 
     passed_codes = result.passed_df["code"].to_list()
     assert passed_codes == ["2003"]
@@ -195,5 +195,5 @@ def test_quant_evaluator_extreme_outliers_capping():
     assert evaluator._score_per(0.0) == 0.0
     # PER 1.5倍だが本業赤字 (営業利益率 <= 0) の一過性トラップ -> 0点に抑制
     assert evaluator._score_per(1.5, operating_margin=-2.0) == 0.0
-    # PER 99,999倍の超割高 -> 0点
-    assert evaluator._score_per(99999.0) == 0.0
+    # PER 99,999倍の超割高 -> ペナルティ上限 -3.0点
+    assert evaluator._score_per(99999.0) == -3.0
