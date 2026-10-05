@@ -364,6 +364,7 @@ class SplitTracker:
     def __init__(self, recorded: Optional[pl.DataFrame] = None):
         self.by_code: dict[str, list[tuple[date, float]]] = {}
         self.new: list[tuple[str, date, float]] = []
+        self.adjusted_codes: set[str] = set()  # 今回、株価を調整した銘柄
         if recorded is not None:
             for code, d, r in recorded.iter_rows():
                 self.by_code.setdefault(str(code), []).append((d, r))
@@ -386,8 +387,14 @@ class SplitTracker:
         """株価に段差が残っている分割を調整し、イベントの無い分割を推定して記録・調整する。"""
         events = self.by_code.get(code)
         if events:
-            df = apply_split_adjustments(df, events)
+            df = self._apply(code, df, events)
         inferred = infer_unrecorded_splits(df)
         for d, r in inferred:
             self._record(code, d, r)
-        return apply_split_adjustments(df, inferred) if inferred else df
+        return self._apply(code, df, inferred) if inferred else df
+
+    def _apply(self, code: str, df: pl.DataFrame, events: list) -> pl.DataFrame:
+        adjusted = apply_split_adjustments(df, events)
+        if not adjusted["Close"].equals(df.sort("Date")["Close"]):
+            self.adjusted_codes.add(code)
+        return adjusted

@@ -150,6 +150,12 @@ class AcquisitionPhase(BasePhase):
     def _save_splits(self, repo: Any, splits: SplitTracker) -> None:
         """今回見つかった株式分割を記録する (株価の調整と、1 株当たり指標の補正に使う)。"""
         new = splits.new
+        if new or splits.adjusted_codes:
+            # 画面にも 1 行出す (株価に段差が残っていた銘柄は調整し、他は 1 株当たり指標の補正用に記録する)
+            print(
+                f"   ✂️ 株式分割: 新たに {len(new)} 件を記録、株価を調整した銘柄 {len(splits.adjusted_codes)} 件",
+                flush=True,
+            )
         if new:
             try:
                 repo.save_splits(new)
@@ -159,6 +165,7 @@ class AcquisitionPhase(BasePhase):
             except Exception as e:
                 self.log_warn(f"株式分割の記録に失敗しました (継続): {e}")
         record_fetch_stat(self.context, "splits_recorded", len(new))
+        record_fetch_stat(self.context, "splits_adjusted", len(splits.adjusted_codes))
 
     @staticmethod
     def _last_history_date(df_db: Any) -> Optional[date]:
@@ -383,7 +390,13 @@ class AcquisitionPhase(BasePhase):
                 # ブリッジによる DB 反映 (成果物キャッシュを保持して平常時の実通信を遮断)
                 bridge = EdinetBridge()
                 sync_count = bridge.bridge_all(purge_after=False)
-                print(f"   ✨ EDINET 同期完了 ({sync_count} 件の開示書類を反映 / キャッシュ有効)", flush=True)
+                # 取得済み (キャッシュ) の書類があるのは、2 回目以降 (初回は全てダウンロード)
+                cached = (
+                    f" / 取得済みの {turbo_mgr.cache_hits} 件はキャッシュを利用"
+                    if turbo_mgr.cache_hits
+                    else ""
+                )
+                print(f"   ✨ EDINET 同期完了 (開示書類 {sync_count} 件を反映{cached})", flush=True)
                 self.log_info(
                     f"✅ EDINET sync completed. {sync_count} documents integrated."
                 )

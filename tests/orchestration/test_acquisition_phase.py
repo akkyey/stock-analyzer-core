@@ -279,3 +279,70 @@ def test_monthly_master_sync_result_is_shown_on_screen(stub_context, capsys):
     assert len(codes) == 3892
     assert "新規上場 43 / 上場廃止 71 / 再上場 0 銘柄" in out
     assert "取得対象 3892 銘柄" in out
+
+
+# --- Colab 1 回目 (2026-10-05) の実測を受けた画面表示 -----------------------------------
+
+
+def test_split_summary_line_is_printed_with_adjusted_count(stub_context, capsys):
+    """株式分割の記録・調整の件数を、画面にも 1 行出す"""
+    from datetime import date
+
+    hist = _split_history([3000.0] * 25 + [1000.0] * 25)  # 3:1 分割の段差が残っている
+    jump = hist.index[25].date()
+    _run_acquisition(stub_context, hist, events={"1001": [(jump, 3.0)]})
+    out = capsys.readouterr().out
+    assert "株式分割: 新たに 1 件を記録、株価を調整した銘柄 1 件" in out
+    assert isinstance(jump, date)
+
+
+def test_split_summary_line_is_silent_when_nothing_happened(stub_context, capsys):
+    _run_acquisition(stub_context, _split_history([1000.0] * 50))
+    assert "株式分割:" not in capsys.readouterr().out
+
+
+def test_split_tracker_counts_only_stocks_whose_prices_changed():
+    from datetime import date
+
+    import polars as pl
+
+    from src.fetcher.incremental import SplitTracker
+
+    tracker = SplitTracker(
+        pl.DataFrame({"code": ["A", "B"], "split_date": [date(2026, 2, 10)] * 2, "ratio": [3.0, 3.0]})
+    )
+
+    def series(closes):
+        from datetime import datetime, timedelta
+
+        return pl.DataFrame(
+            {"Date": [datetime(2026, 1, 5) + timedelta(days=i) for i in range(len(closes))], "Close": closes}
+        )
+
+    tracker.adjust("A", series([3000.0] * 36 + [1000.0] * 14))  # 段差が残っている → 調整
+    tracker.adjust("B", series([1000.0] * 50))  # Yahoo が調整済み → 変えない
+    assert tracker.adjusted_codes == {"A"}
+
+
+def test_edinet_completion_message_mentions_cache_only_when_used(stub_context, capsys):
+    """初回 (取得済みが 0 件) は「キャッシュ」と書かない。2 回目以降は取得済みの件数を出す"""
+    from unittest.mock import MagicMock, patch
+
+    def run(cache_hits):
+        stub_context.config["fetcher"] = {"enable_edinet_turbo": True}
+        mgr = MagicMock(cache_hits=cache_hits, failed_dates=[])
+        with (
+            patch("src.fetcher.turbo_acquisition.TurboAcquisitionManager", return_value=mgr),
+            patch("src.fetcher.edinet_fetcher.EdinetFetcher"),
+            patch("src.services.edinet_bridge.EdinetBridge") as bridge,
+        ):
+            bridge.return_value.bridge_all.return_value = 269
+            repo = MagicMock()
+            repo.get_meta.return_value = None
+            AcquisitionPhase(stub_context)._sync_edinet(repo)
+        return capsys.readouterr().out
+
+    first = run(0)
+    assert "開示書類 269 件を反映" in first and "キャッシュ" not in first
+    later = run(250)
+    assert "取得済みの 250 件はキャッシュを利用" in later

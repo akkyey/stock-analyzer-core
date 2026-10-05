@@ -5,7 +5,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from threading import Semaphore
+from threading import Lock, Semaphore
 from typing import Any, Dict, List
 
 from src.fetcher.edinet_fetcher import (
@@ -72,6 +72,10 @@ class TurboAcquisitionManager:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.failed_dates: List[str] = []
+        # 取得済み (キャッシュ) で通信を省いた書類数と、実際にダウンロードした書類数 (進捗表示用)
+        self.cache_hits = 0
+        self.downloads = 0
+        self._count_lock = Lock()
 
         # パフォーマンス設定 (config から取得。デフォルトは旧 Turbo 設定準拠)
         fetcher_cfg = config.get("fetcher", {})
@@ -112,6 +116,10 @@ class TurboAcquisitionManager:
 
         self.logger.info(f"✨ Turbo Acquisition completed. Total: {len(final_results)}")
         return final_results
+
+    def _count(self, name: str) -> None:
+        with self._count_lock:
+            setattr(self, name, getattr(self, name) + 1)
 
     def _scan_document_list(self, days: int) -> List[Dict[str, Any]]:
         """過去 N 日分の書類を並列にスキャンする"""
@@ -230,6 +238,7 @@ class TurboAcquisitionManager:
 
             # 第1段: DuckDB 永続層キャッシュ判定 (セッション跨ぎでの実通信を100%遮断)
             if doc_id in processed_doc_ids:
+                self._count("cache_hits")
                 return None
 
             # 第2段: ローカル作業層 JSON キャッシュ判定 (同じ書類を同じ版で処理済み)
@@ -241,12 +250,14 @@ class TurboAcquisitionManager:
                         cached_item.get("parser_version") == PARSER_VERSION
                         and cached_item.get("doc_id") == doc_id
                     ):
+                        self._count("cache_hits")
                         return code, cached_item
                 except Exception:
                     pass
 
             try:
                 # 1. ダウンロード (I/O 制限)
+                self._count("downloads")
                 with dl_semaphore:
                     zip_path = self.fetcher.download_xbrl(doc_id, self.tmp_dir)
                     time.sleep(0.5)  # EDINET API への敬意としてのスリープ
