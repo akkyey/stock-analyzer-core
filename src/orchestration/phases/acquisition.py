@@ -390,13 +390,13 @@ class AcquisitionPhase(BasePhase):
                 # ブリッジによる DB 反映 (成果物キャッシュを保持して平常時の実通信を遮断)
                 bridge = EdinetBridge()
                 sync_count = bridge.bridge_all(purge_after=False)
-                # 取得済み (キャッシュ) の書類があるのは、2 回目以降 (初回は全てダウンロード)
-                cached = (
-                    f" / 取得済みの {turbo_mgr.cache_hits} 件はキャッシュを利用"
-                    if turbo_mgr.cache_hits
-                    else ""
-                )
-                print(f"   ✨ EDINET 同期完了 (開示書類 {sync_count} 件を反映{cached})", flush=True)
+                # 「反映」は、保存済みの取得結果を毎回 DB に当て直した件数で、今回新しく取得した数ではない。
+                # 新たにダウンロードした件数と、取得済み (キャッシュ) で通信を省いた件数を分けて出す
+                parts = [f"新たに取得 {turbo_mgr.downloads} 件"]
+                if turbo_mgr.cache_hits:
+                    parts.append(f"取得済み {turbo_mgr.cache_hits} 件はキャッシュを利用")
+                parts.append(f"反映した開示書類 {sync_count} 件")
+                print(f"   ✨ EDINET 同期完了 ({' / '.join(parts)})", flush=True)
                 self.log_info(
                     f"✅ EDINET sync completed. {sync_count} documents integrated."
                 )

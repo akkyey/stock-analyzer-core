@@ -257,9 +257,9 @@ class TurboAcquisitionManager:
 
             try:
                 # 1. ダウンロード (I/O 制限)
-                self._count("downloads")
                 with dl_semaphore:
                     zip_path = self.fetcher.download_xbrl(doc_id, self.tmp_dir)
+                    self._count("downloads")  # ダウンロードできた書類だけを数える
                     time.sleep(0.5)  # EDINET API への敬意としてのスリープ
 
                 # 2. パース (CPU 並列)

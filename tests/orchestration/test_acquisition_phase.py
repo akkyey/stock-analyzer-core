@@ -324,13 +324,13 @@ def test_split_tracker_counts_only_stocks_whose_prices_changed():
     assert tracker.adjusted_codes == {"A"}
 
 
-def test_edinet_completion_message_mentions_cache_only_when_used(stub_context, capsys):
-    """初回 (取得済みが 0 件) は「キャッシュ」と書かない。2 回目以降は取得済みの件数を出す"""
+def test_edinet_completion_message_separates_new_downloads_from_cache(stub_context, capsys):
+    """「反映」は毎回の当て直し件数。新たに取得した件数と、キャッシュで省いた件数を分けて出す"""
     from unittest.mock import MagicMock, patch
 
-    def run(cache_hits):
+    def run(downloads, cache_hits):
         stub_context.config["fetcher"] = {"enable_edinet_turbo": True}
-        mgr = MagicMock(cache_hits=cache_hits, failed_dates=[])
+        mgr = MagicMock(downloads=downloads, cache_hits=cache_hits, failed_dates=[])
         with (
             patch("src.fetcher.turbo_acquisition.TurboAcquisitionManager", return_value=mgr),
             patch("src.fetcher.edinet_fetcher.EdinetFetcher"),
@@ -342,7 +342,9 @@ def test_edinet_completion_message_mentions_cache_only_when_used(stub_context, c
             AcquisitionPhase(stub_context)._sync_edinet(repo)
         return capsys.readouterr().out
 
-    first = run(0)
-    assert "開示書類 269 件を反映" in first and "キャッシュ" not in first
-    later = run(250)
-    assert "取得済みの 250 件はキャッシュを利用" in later
+    # 初回: 全てダウンロード。キャッシュには触れない
+    first = run(downloads=273, cache_hits=0)
+    assert "新たに取得 273 件 / 反映した開示書類 269 件" in first and "キャッシュ" not in first
+    # 2 回目: 通信は 0 件。取得済みの書類はキャッシュを利用 (Colab 2 回目の実測)
+    later = run(downloads=0, cache_hits=271)
+    assert "新たに取得 0 件 / 取得済み 271 件はキャッシュを利用 / 反映した開示書類 269 件" in later

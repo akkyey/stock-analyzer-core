@@ -145,6 +145,31 @@ def _fetch_section(context: Any) -> str:
     return "\n".join(lines)
 
 
+def _optional_tables_and_meta(con: Any) -> list[str]:
+    """古い DB には無いこともあるテーブルの件数と、app_meta (実行状態の記録) を返す。
+
+    - stock_splits: 記録した株式分割の件数 (初回に過去 1 年分を取り直した結果)
+    - edinet_documents: 処理済みの EDINET 書類の件数 (状態別)
+    - app_meta: 銘柄マスタの同期日、EDINET の走査日、一度きりの移行の完了日など
+    """
+    lines: list[str] = []
+    existing = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    if "stock_splits" in existing:
+        n = con.execute("SELECT count(*) FROM stock_splits").fetchall()[0][0]
+        lines.append(f"  - stock_splits: {n} 行")
+    if "edinet_documents" in existing:
+        rows = con.execute(
+            "SELECT status, count(*) FROM edinet_documents GROUP BY status ORDER BY status"
+        ).fetchall()
+        detail = ", ".join(f"{status}={n}" for status, n in rows) or "なし"
+        lines.append(f"  - edinet_documents: {detail}")
+    if "app_meta" in existing:
+        rows = con.execute("SELECT key, value FROM app_meta ORDER BY key").fetchall()
+        if rows:
+            lines.append("  - app_meta: " + ", ".join(f"{k}={v}" for k, v in rows))
+    return lines
+
+
 def _db_section(working_dir: Optional[Path], drive_dir: Optional[Path]) -> str:
     lines = []
     if working_dir is not None:
@@ -160,6 +185,7 @@ def _db_section(working_dir: Optional[Path], drive_dir: Optional[Path]) -> str:
                 for tbl in ("stocks", "fundamentals", "daily_metrics"):
                     n = con.execute(f"SELECT count(*) FROM {tbl}").fetchall()[0][0]
                     lines.append(f"  - {tbl}: {n} 行")
+                lines.extend(_optional_tables_and_meta(con))
                 row = con.execute(
                     "SELECT count(distinct entry_date), min(entry_date), max(entry_date) "
                     "FROM daily_metrics"
@@ -187,7 +213,12 @@ def _db_section(working_dir: Optional[Path], drive_dir: Optional[Path]) -> str:
     if drive_dir is not None and str(drive_dir).startswith("/content/drive") and not Path(
         "/content/drive/MyDrive"
     ).exists():
-        lines.append("- Google Drive: 未マウント (Drive 上のファイルは確認できません)")
+        # Step 3 の完了時に、Drive への同期を確定させるためアンマウントするため、サマリ作成時点では
+        # 外れていることが多い (同期の成否は「Drive同期」の行を参照)
+        lines.append(
+            "- Google Drive: この時点ではマウントされていません (Step 3 の完了時に同期を確定させて"
+            "アンマウントします。Drive への同期の成否は「Drive同期」の行を参照)"
+        )
     elif drive_dir is not None:
         cache = Path(drive_dir) / "cache"
         for name in ("stock_analyzer.duckdb", "stock_analyzer.duckdb.bak"):
