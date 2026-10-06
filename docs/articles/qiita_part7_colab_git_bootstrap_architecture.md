@@ -14,6 +14,12 @@ private: false
 - カレントディレクトリを `/content` に固定した冪等なクリーンアップ、`--depth 1` による浅いクローン、指定タグ失敗時の `main` 自動フォールバックを導入した
 - ユーザーにコマンド操作を要求せず、ボタン1つで安定版コードと依存関係を展開できるセルフヒーリング型ブートストラップを確立した
 
+:::note info
+**【Colab実運用基盤シリーズ】**
+- **第1弾（データ永続化編）**: [Google Drive上のDuckDB直叩きで遅延とロック破損に直面した話：ColabとDrive間のPull/Push 2層ストレージ設計](qiita_part6_colab_ephemeral_storage_architecture.md)
+- **第2弾（コード配布編・本作）**: !git clone で配布したColabが本番で動かなくなる理由：壊れないブートストラップ設計と依存解決
+:::
+
 ---
 
 ## はじめに
@@ -182,10 +188,10 @@ if not clone_success:
 画面が長いログで埋め尽くされるのを防ぎつつ、過去セッションのモジュールキャッシュを無効化します。
 
 ```python
-# 4. 依存ライブラリの導入 (ログを汚さない -q オプション)
+# 4. 依存ライブラリの導入 (カレントディレクトリを /content に維持したまま実行)
+req_path = os.path.join(TARGET_DIR, "requirements-colab.txt")
 try:
-    os.chdir(TARGET_DIR)
-    subprocess.run(["pip", "install", "-q", "-r", "requirements-colab.txt"], check=True)
+    subprocess.run(["pip", "install", "-q", "-r", req_path], check=True)
 except subprocess.CalledProcessError as e:
     raise RuntimeError(f"❌ 依存ライブラリのインストールに失敗しました: {e}") from None
 

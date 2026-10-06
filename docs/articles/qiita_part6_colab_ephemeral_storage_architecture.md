@@ -14,6 +14,12 @@ private: false
 - 高頻度I/OはColab内蔵ローカルSSD（/content/working）で完結させ、開始時に一括Pull・終了時に一括Push（成果物先行・DB末尾置換）する2層ストレージ設計へ転換した
 - I/O遅延とロック競合を解消し、Push開始前の強制切断時にも永続層の既存データを汚さない耐障害性を確立した
 
+:::note info
+**【Colab実運用基盤シリーズ】**
+- **第1弾（データ永続化編・本作）**: Google Drive上のDuckDB直叩きで遅延とロック破損に直面した話：ColabとDrive間のPull/Push 2層ストレージ設計
+- **第2弾（コード配布編）**: [!git clone で配布したColabが本番で動かなくなる理由：壊れないブートストラップ設計と依存解決](qiita_part7_colab_git_bootstrap_architecture.md)
+:::
+
 ---
 
 ## はじめに
