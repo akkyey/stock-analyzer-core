@@ -2,6 +2,8 @@
 
 from src.fetcher.xbrl_parser import KIND_ANNUAL, KIND_INTERIM, XbrlParser
 
+FILING_TAG = "NumberOfIssuedSharesAsOfFilingDateIssuedSharesTotalNumberOfSharesEtc"
+
 
 def _xbrl(facts, contexts):
     """facts: [(要素名, コンテキスト, 値)]、contexts: {id: 期末日}"""
@@ -148,3 +150,65 @@ def test_document_without_target_period_is_empty():
         {"CurrentYTDDuration": "2023-12-31"},
     )
     assert XbrlParser().parse_content(content) == {}
+
+
+def test_shares_outstanding_prefers_filing_date_count_after_a_split():
+    """期末後・提出前に株式分割があると、有価証券報告書の 1 株当たりの値は分割後の基準で算定し直される。
+    株数も、期末時点 (要約表) ではなく、提出日現在の値を使い、基準を揃える (3443 は 3 分割で、期末
+    17,474,210 株、提出日 52,422,630 株)"""
+    content = _xbrl(
+        [
+            ("NetSalesSummaryOfBusinessResults", "CurrentYearDuration", 1000),
+            ("NetAssetsSummaryOfBusinessResults", "CurrentYearInstant", 99510000000),
+            ("NetAssetsPerShareSummaryOfBusinessResults", "CurrentYearInstant", "568.5"),
+            ("TotalNumberOfIssuedSharesSummaryOfBusinessResults", "CurrentYearInstant_NonConsolidatedMember", 17474210),
+            (FILING_TAG, "FilingDateInstant", 52422630),
+            (FILING_TAG, "FilingDateInstant_OrdinaryShareMember", 52422630),
+        ],
+        ANNUAL_CTX,
+    )
+    assert XbrlParser().parse_content(content)["shares_outstanding"] == 52422630
+
+
+def test_shares_outstanding_falls_back_to_summary_without_filing_date_total():
+    """提出日現在の合計が無い (株式の種類ごとの値しか無い) 書類は、要約表の値を使う。0 や空も採用しない"""
+    only_class = _xbrl(
+        [
+            ("NetSalesSummaryOfBusinessResults", "CurrentYearDuration", 1000),
+            ("NetAssetsSummaryOfBusinessResults", "CurrentYearInstant", 400),
+            ("TotalNumberOfIssuedSharesSummaryOfBusinessResults", "CurrentYearInstant_NonConsolidatedMember", 2000),
+            (FILING_TAG, "FilingDateInstant_OrdinaryShareMember", 3000),
+        ],
+        ANNUAL_CTX,
+    )
+    assert XbrlParser().parse_content(only_class)["shares_outstanding"] == 2000
+    zero = _xbrl(
+        [
+            ("NetSalesSummaryOfBusinessResults", "CurrentYearDuration", 1000),
+            ("NetAssetsSummaryOfBusinessResults", "CurrentYearInstant", 400),
+            ("TotalNumberOfIssuedSharesSummaryOfBusinessResults", "CurrentYearInstant_NonConsolidatedMember", 2000),
+            (FILING_TAG, "FilingDateInstant", 0),
+        ],
+        ANNUAL_CTX,
+    )
+    assert XbrlParser().parse_content(zero)["shares_outstanding"] == 2000
+
+
+def test_interim_report_also_uses_filing_date_shares():
+    content = _xbrl(
+        [
+            ("NetSalesSummaryOfBusinessResults", "InterimDuration", 500),
+            ("NetAssetsSummaryOfBusinessResults", "InterimInstant", 400),
+            ("TotalNumberOfIssuedSharesSummaryOfBusinessResults", "InterimInstant_NonConsolidatedMember", 1359000),
+            (FILING_TAG, "FilingDateInstant", 2726000),
+        ],
+        {"InterimInstant": "2026-06-30", "InterimDuration": "2026-06-30", "Prior1InterimDuration": "2025-06-30"},
+    )
+    r = XbrlParser().parse_content(content)
+    assert r["kind"] == KIND_INTERIM and r["shares_outstanding"] == 2726000
+
+
+def test_parser_version_is_bumped_so_old_results_are_reprocessed():
+    from src.fetcher.xbrl_parser import PARSER_VERSION
+
+    assert PARSER_VERSION >= 3

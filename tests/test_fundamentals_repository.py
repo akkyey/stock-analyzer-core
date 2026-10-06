@@ -170,19 +170,58 @@ def test_refresh_from_seed_updates_old_seed_values_and_records_provenance(db_con
     assert r["submitted_at"] == "2026-06-18 15:38"
 
 
-def test_refresh_from_seed_does_not_overwrite_newer_or_same_period(db_conn, tmp_path):
+def test_refresh_from_seed_does_not_overwrite_newer_period_or_unconfirmed_same_period(db_conn, tmp_path):
     repo = FundamentalsRepository()
     repo.upsert([
         {"code": "1001", "net_profit": 9.0, "period_end": "2026-06-30", "sales": 1.0, "sales_growth": 1.5},
         {"code": "1002", "net_profit": 8.0, "period_end": "2026-03-31", "sales": 1.0, "sales_growth": 2.5},
     ])
     seed = _seed(tmp_path, [
-        _seed_row("1001", net_profit=1.0, sales=2.0, period_end="2026-03-31"),  # DB の方が新しい
-        _seed_row("1002", net_profit=1.0, sales=2.0, period_end="2026-03-31"),  # 同じ期 (適用済みの書類)
+        _seed_row("1001", net_profit=1.0, sales=2.0, period_end="2026-03-31", submitted_at="2026-06-20 10:00"),  # DB の方が新しい期
+        _seed_row("1002", net_profit=1.0, sales=2.0, period_end="2026-03-31"),  # 同じ期で、シードに提出日時が無い
     ])
     assert repo.refresh_from_seed(seed) == 0
     assert _row(db_conn, "1001")["net_profit"] == 9.0 and _row(db_conn, "1001")["sales_growth"] == 1.5
     assert _row(db_conn, "1002")["net_profit"] == 8.0 and _row(db_conn, "1002")["sales_growth"] == 2.5
+
+
+def test_refresh_from_seed_reapplies_same_document_but_not_older_amendment(db_conn, tmp_path):
+    """同じ決算期でも、シードの提出日時が DB 以降なら反映する (同じ書類を、改良したパーサーで読み直した
+    株数などを、すでに同じ期の値を持つ DB に届ける)。DB の方が新しい訂正報告書のものなら反映しない"""
+    repo = FundamentalsRepository()
+    repo.upsert([
+        {"code": "6001", "net_profit": 1.0, "shares_outstanding": 100.0, "period_end": "2026-03-31",
+         "submitted_at": "2026-06-18 15:38"},  # 同じ書類 (旧パーサーの株数)
+        {"code": "6002", "net_profit": 1.0, "shares_outstanding": 100.0, "period_end": "2026-03-31",
+         "submitted_at": "2026-09-01 10:00"},  # DB は、より新しい訂正報告書
+        {"code": "6003", "net_profit": 1.0, "period_end": "2026-03-31", "submitted_at": "2026-06-18 15:38"},
+    ])
+    seed = _seed(tmp_path, [
+        _seed_row("6001", net_profit=1.0, period_end="2026-03-31", submitted_at="2026-06-18 15:38"),
+        _seed_row("6002", net_profit=2.0, period_end="2026-03-31", submitted_at="2026-06-18 15:38"),
+        _seed_row("6003", net_profit=5.0, period_end="2026-03-31", submitted_at="2026-07-30 09:00"),  # シードの方が新しい訂正
+    ])
+    assert repo.refresh_from_seed(seed) == 2
+    assert _row(db_conn, "6001")["net_profit"] == 1.0
+    assert _row(db_conn, "6002")["net_profit"] == 1.0  # 変更しない
+    assert _row(db_conn, "6003")["net_profit"] == 5.0
+    assert _row(db_conn, "6003")["submitted_at"] == "2026-07-30 09:00"
+
+
+def test_refresh_from_seed_delivers_corrected_shares_to_a_same_period_row(db_conn, tmp_path):
+    """3443 の例: 期末後に 3 分割。旧パーサーは期末の株数 (17,474,210) を読み、新しいパーサーは提出日現在の
+    株数 (52,422,630) を読む。本番の DB は同じ期の値を持つが、シードの値で置き換わる"""
+    path = tmp_path / "seed.parquet"
+    pl.DataFrame(
+        {"code": ["3443"], "shares_outstanding": [52422630.0], "period_end": ["2026-03-31"],
+         "submitted_at": ["2026-06-19 14:00"], "bs_period_end": ["2026-03-31"], "bs_submitted_at": ["2026-06-19 14:00"]}
+    ).write_parquet(path)
+    repo = FundamentalsRepository()
+    repo.upsert([{"code": "3443", "shares_outstanding": 17474210.0, "period_end": "2026-03-31",
+                  "submitted_at": "2026-06-19 14:00", "bs_period_end": "2026-03-31",
+                  "bs_submitted_at": "2026-06-19 14:00"}])
+    assert repo.refresh_from_seed(path) == 1
+    assert _row(db_conn, "3443")["shares_outstanding"] == 52422630.0
 
 
 def test_refresh_from_seed_keeps_db_values_where_seed_is_empty(db_conn, tmp_path):

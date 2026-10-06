@@ -112,7 +112,9 @@ class FundamentalsRepository:
 
         シードを EDINET から作り直したときに、既存の DB に反映するための処理。EDINET 取り込みと同じ規則で、
         銘柄ごとに、損益・1 株当たり指標は period_end、貸借対照表の項目は bs_period_end を比べ、シードの期が
-        DB より新しいか、DB の期が不明 (旧シード由来) の項目だけを更新する。シードの値が空の項目は、
+        DB より新しいか、DB の期が不明 (旧シード由来) の項目と、同じ期でシードの提出日時が DB 以降の項目だけを
+        更新する (同じ書類を、改良したパーサーで読み直した値を届けるため。DB の方が新しい訂正報告書のものは
+        変更しない)。シードの値が空の項目は、
         DB の値を消さない。ただし、売上を更新した銘柄の売上高成長率は、旧い売上との比較の値なので、
         シードの値 (空を含む) に置き換える。出所の書類が無い行 (シードの period_end が空) は更新しない。
 
@@ -129,8 +131,11 @@ class FundamentalsRepository:
         with self.duck_repo.client.get_connection() as conn:
             table_cols = {r[0] for r in conn.execute("DESCRIBE fundamentals").fetchall()}
             stored = {
-                r[0]: (r[1], r[2])
-                for r in conn.execute("SELECT code, period_end, bs_period_end FROM fundamentals").fetchall()
+                r[0]: r[1:]
+                for r in conn.execute(
+                    "SELECT code, period_end, submitted_at::VARCHAR, bs_period_end, bs_submitted_at::VARCHAR "
+                    "FROM fundamentals"
+                ).fetchall()
             }
         records = [
             {"code": row["code"], **rec}
@@ -149,21 +154,35 @@ class FundamentalsRepository:
 
     @staticmethod
     def _seed_update(row: dict[str, Any], stored: tuple, table_cols: set) -> dict[str, Any]:
-        """シードの 1 行から、DB へ書き込む項目を決める (損益と貸借対照表を、別々の決算期で判定する)。"""
+        """シードの 1 行から、DB へ書き込む項目を決める (損益と貸借対照表を、別々の決算期で判定する)。
 
-        def newer(seed_period: Any, db_period: Any) -> bool:
-            return bool(seed_period) and (not db_period or str(seed_period) > str(db_period))
+        stored は (損益の決算期, 損益の提出日時, 貸借対照表の決算期, 貸借対照表の提出日時)。
+        """
+
+        def newer(seed_period: Any, seed_submitted: Any, db_period: Any, db_submitted: Any) -> bool:
+            """シードの値が、DB の値より新しいか、同じ書類 (または、より新しい訂正) のもの。
+
+            同じ決算期でも、提出日時が DB 以降なら反映する (同じ書類を、改良したパーサーで読み直した値を、
+            すでに同じ期の値を持つ DB に届けるため)。DB の方が新しい訂正報告書のものなら反映しない。
+            """
+            if not seed_period:
+                return False
+            if not db_period or str(seed_period) > str(db_period):
+                return True
+            if str(seed_period) < str(db_period) or not seed_submitted:
+                return False
+            return not db_submitted or str(seed_submitted)[:16] >= str(db_submitted)[:16]
 
         def values(fields: tuple) -> dict[str, Any]:
             return {f: row[f] for f in fields if row.get(f) is not None and f in table_cols}
 
         rec: dict[str, Any] = {}
-        if newer(row["period_end"], stored[0]):
+        if newer(row["period_end"], row["submitted_at"], stored[0], stored[1]):
             rec.update(values(ANNUAL_PL_FIELDS))
             rec.update(period_end=row["period_end"], submitted_at=row["submitted_at"])
             if row.get("sales") is not None and "sales_growth" in table_cols:
                 rec["sales_growth"] = row.get("sales_growth")
-        if newer(row["bs_period_end"], stored[1]):
+        if newer(row["bs_period_end"], row["bs_submitted_at"], stored[2], stored[3]):
             rec.update(values(BALANCE_SHEET_FIELDS))
             rec.update(bs_period_end=row["bs_period_end"], bs_submitted_at=row["bs_submitted_at"])
         return rec
