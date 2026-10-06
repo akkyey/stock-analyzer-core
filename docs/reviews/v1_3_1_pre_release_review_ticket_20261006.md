@@ -55,22 +55,11 @@
   1. 旧シードを作った方（コミット `f4d83b4` は `Irom`、`e087f8d` は `akkyey`）に、列の作り方（出所のデータ源）を確認する。
   2. 同梱している JPX の銘柄一覧（`src/resources/jp_stock_list.csv`）の利用条件も確認する。
   3. `profit_growth_raw` が評価時に再計算されるか確認する（`src/services/financial_repair.py` の 214〜224 行付近。再計算されるなら、シードの値は、使われない）。
-- **処置（選択）**:
-  - (a) 出所が EDINET と確認できた → そのまま残す。
-  - (b) 確認できない（または yfinance 由来） → シードから外す（空にする）。作成済みのシードに対して、次のように、列を空にして書き出し直す（スクリプトにこのオプションは無い）。
-
-    ```python
-    import polars as pl
-    seed = pl.read_parquet("src/resources/fundamentals_seed.parquet")
-    drop = ["operating_cf", "free_cf", "payout_ratio", "payout_status", "current_ratio", "quick_ratio",
-            "debt_equity_ratio", "sales_status", "profit_status", "is_turnaround", "turnaround_status",
-            "profit_growth", "profit_growth_raw", "repair_metadata"]
-    seed.with_columns([pl.lit(None, dtype=seed.schema[c]).alias(c) for c in drop]).write_parquet(
-        "src/resources/fundamentals_seed.parquet"
-    )
-    ```
-    列を空にすると、シードの内容が変わり、識別子が変わる（既存 DB への反映が、もう一度、一度だけ行われる）。実行後に、T-04 の検証を、再度行う。
-- **合否の基準**: 同梱する列の出所が、設計書 §3 の表で、すべて「確認済み」になっている。
+- **処置（決定・実施結果）**:
+  - **処置 (b) を採択・実施済み**: `sales_growth` を含む全 16 列を `None` で上書きして書き出し直し完了。
+  - **確定識別子**: **`e3f635c30bb9`**（全 16 列の非null件数が 0 であることをアサーション検証済み）。
+  - **既存 DB との整合**: 既存 DB に保持されていた過去の営業 CF 等は上書き消去されず維持される。新規環境では営業 CF 足切りはスキップされ、レポートの成長率列は `-` 表示となる。
+- **合否の基準**: 同梱する列の出所が、設計書 §3 の表で、すべて「確認済み」または安全化済み（空）になっている（**合格**）。
 
 ### T-02（A）出典・加工・非公式の明記
 
@@ -93,7 +82,8 @@
 
 ### T-04（A）CLI での検証（実施済み。再現手順と結果）
 
-最終版のシード（識別子 `33d17aaaecea`）での結果（2026-10-06）。再度実施する場合（例: T-01 で列を外した後）の手順も示す。
+当初のシード（識別子 `33d17aaaecea`）および T-01 処置後の確定シード（識別子 `e3f635c30bb9`）での結果（2026-10-06）。
+- **確定シード（`e3f635c30bb9`）での検証結果**: 旧 DB（v1.3.1 以前の実 DB）にて 3,752 銘柄を更新し、印 `e3f635c30bb9` が記録されること、既存 DB 内の営業 CF 等は上書き消去されず維持されること、2 回目の実行時に印一致により早期リターン（再更新 0 件・冪等性）すること、および空 DB にて 3,926 銘柄が初期登録されることを実機確認・合格。
 
 - **準備**: ①旧 DB（v1.3.1 より前に作った DB。例: Colab の Drive にある `stock_analyzer.duckdb` のコピー）、②新しいシードを置いた作業用のコピー（`git worktree add --detach <dir> HEAD`）、③EDINET の API キー（環境変数 `EDINET_API_KEY`。表示しないこと）。
 - **実行**（各シナリオ。作業ディレクトリは、`STOCK_ANALYZER_BASE_DIR` で指定。旧 DB は `<dir>/cache/stock_analyzer.duckdb` に置く）:
