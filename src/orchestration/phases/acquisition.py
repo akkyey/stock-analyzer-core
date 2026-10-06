@@ -436,7 +436,8 @@ class AcquisitionPhase(BasePhase):
                 parts = [f"新たに取得 {turbo_mgr.downloads} 件"]
                 if turbo_mgr.cache_hits:
                     parts.append(f"取得済み {turbo_mgr.cache_hits} 件はキャッシュを利用")
-                parts.append(f"反映した開示書類 {sync_count} 件")
+                if sync_count:
+                    parts.append(f"反映した開示書類 {sync_count} 件")
                 print(f"   ✨ EDINET 同期完了 ({' / '.join(parts)})", flush=True)
                 self.log_info(
                     f"✅ EDINET sync completed. {sync_count} documents integrated."

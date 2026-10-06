@@ -328,7 +328,7 @@ def test_edinet_completion_message_separates_new_downloads_from_cache(stub_conte
     """「反映」は毎回の当て直し件数。新たに取得した件数と、キャッシュで省いた件数を分けて出す"""
     from unittest.mock import MagicMock, patch
 
-    def run(downloads, cache_hits):
+    def run(downloads, cache_hits, applied=269):
         stub_context.config["fetcher"] = {"enable_edinet_turbo": True}
         mgr = MagicMock(downloads=downloads, cache_hits=cache_hits, failed_dates=[])
         with (
@@ -336,7 +336,7 @@ def test_edinet_completion_message_separates_new_downloads_from_cache(stub_conte
             patch("src.fetcher.edinet_fetcher.EdinetFetcher"),
             patch("src.services.edinet_bridge.EdinetBridge") as bridge,
         ):
-            bridge.return_value.bridge_all.return_value = 269
+            bridge.return_value.bridge_all.return_value = applied
             repo = MagicMock()
             repo.get_meta.return_value = None
             AcquisitionPhase(stub_context)._sync_edinet(repo)
@@ -348,6 +348,9 @@ def test_edinet_completion_message_separates_new_downloads_from_cache(stub_conte
     # 2 回目: 通信は 0 件。取得済みの書類はキャッシュを利用 (Colab 2 回目の実測)
     later = run(downloads=0, cache_hits=271)
     assert "新たに取得 0 件 / 取得済み 271 件はキャッシュを利用 / 反映した開示書類 269 件" in later
+    # 反映が 0 件のとき (DB が最新で、当て直す結果が無い) は、「反映 0 件」と出さない (欠けたように見えるため)
+    nothing = run(downloads=0, cache_hits=271, applied=0)
+    assert "新たに取得 0 件 / 取得済み 271 件はキャッシュを利用)" in nothing and "反映" not in nothing
 
 
 # --- 作り直した同梱シードの、既存 DB への反映 (シードごとに 1 回だけ) --------------------------
