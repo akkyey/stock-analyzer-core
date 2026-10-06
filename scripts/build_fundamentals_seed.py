@@ -21,6 +21,7 @@ EDINET の API キーは .env (EDINET_API_KEY) から読む。値は表示しな
 使い方:
   python scripts/build_fundamentals_seed.py --work-dir /tmp/seed_build --out /tmp/seed_build/seed_new.parquet
   python scripts/build_fundamentals_seed.py --days 14 ...   # 動作確認用の短い期間 (公開用には使わない)
+  python scripts/build_fundamentals_seed.py --base-seed <旧シード> ...  # 土台のシードを指定する
 """
 
 from __future__ import annotations
@@ -34,6 +35,44 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SEED_PATH = REPO_ROOT / "src" / "resources" / "fundamentals_seed.parquet"
+
+
+PROVENANCE_COLUMNS = ["period_end", "submitted_at", "bs_period_end", "bs_submitted_at"]
+
+
+def assemble_seed(df, base_seed, listed: set[str] | None):
+    """DB の fundamentals (df) から、シードの列構成の DataFrame を組み立てる。
+
+    - 列は、土台のシードの列 + 出所の列 (土台のシードが、すでに出所の列を持つ場合も、重複させない)。
+      DB の内部列は含めない
+    - 土台のシードにあって DB のテーブルに無い列 (fetch_status 等の旧い状態列) は、土台の値を引き継ぐ
+    - updated_at は、株式分割の補正で「財務値がいつ時点のものか」を決める基準日。DB へ読み込んだ時刻
+      (今日) で上書きされているため、土台の値を引き継ぐ。土台に無い銘柄 (新規上場) は、取得した書類の
+      提出日を使う
+    - 土台のシードの銘柄と、現在の JPX の上場銘柄 (listed) だけに絞る。EDINET には、上場廃止済みなどで
+      銘柄マスタに無い提出者も含まれ、そのまま入れると、画面に出る銘柄数 (「財務シードから N 銘柄」)
+      が、取得対象と食い違って分かりにくくなる (土台に既にある上場廃止済みの銘柄は、そのまま残す)。
+      listed が None (取得できなかった) の場合は、絞り込まない
+
+    Returns:
+        (シードの DataFrame, 絞り込みで除いた件数 (絞り込まなかった場合は None))
+    """
+    import polars as pl
+
+    columns = [*base_seed.columns, *[c for c in PROVENANCE_COLUMNS if c not in base_seed.columns]]
+    legacy = [c for c in base_seed.columns if c not in df.columns or c == "updated_at"]
+    keep = [c for c in columns if c in df.columns and c != "updated_at"]
+    out = df.select(keep).join(
+        base_seed.select("code", *legacy).with_columns(pl.col("code").cast(pl.Utf8)), on="code", how="left"
+    )
+    out = out.with_columns(
+        pl.coalesce("updated_at", pl.col("submitted_at").cast(pl.Utf8)).alias("updated_at")
+    ).select(columns)
+    if listed is None:
+        return out, None
+    known = set(base_seed["code"].cast(pl.Utf8).to_list()) | listed
+    kept = out.filter(pl.col("code").is_in(list(known)))
+    return kept, out.height - kept.height
 
 
 def build(
@@ -92,31 +131,10 @@ def build(
     applied = EdinetBridge().bridge_all(purge_after=False)
     with repo.client.get_connection() as conn:
         df = conn.execute("SELECT * FROM fundamentals ORDER BY code").pl()
-    # シードの列構成 (旧シードの列 + 出所の列) で書き出す。DB の内部列は含めない。
-    # 旧シードにあって DB のテーブルに無い列 (fetch_status 等の旧い状態列) は、旧シードの値を引き継ぐ
-    old_seed = pl.read_parquet(str(seed_path))
-    provenance = ["period_end", "submitted_at", "bs_period_end", "bs_submitted_at"]
-    # updated_at は、株式分割の補正で「財務値がいつ時点のものか」を決める基準日。DB へ読み込んだ時刻
-    # (今日) で上書きされているため、旧シードの値を引き継ぐ。旧シードに無い銘柄 (新規上場) は、
-    # 取得した書類の提出日を使う
-    legacy = [c for c in old_seed.columns if c not in df.columns or c == "updated_at"]
-    keep = [c for c in [*old_seed.columns, *provenance] if c in df.columns and c != "updated_at"]
-    out = df.select(keep).join(
-        old_seed.select("code", *legacy).with_columns(pl.col("code").cast(pl.Utf8)), on="code", how="left"
-    )
-    out = out.with_columns(
-        pl.coalesce("updated_at", pl.col("submitted_at").cast(pl.Utf8)).alias("updated_at")
-    )
-    out = out.select([*old_seed.columns, *provenance])
-    # 旧シードの銘柄と、現在の JPX の上場銘柄だけに絞る。EDINET には、上場廃止済みなどで銘柄マスタに無い
-    # 提出者も含まれ、そのまま入れると、画面に出る銘柄数 (「財務シードから N 銘柄」) が、取得対象と
-    # 食い違って分かりにくくなる (旧シードに既にある上場廃止済みの銘柄は、そのまま残す)
-    listed = _listed_codes(config)
-    if listed is not None:
-        known = set(old_seed["code"].cast(pl.Utf8).to_list()) | listed
-        dropped = out.filter(~pl.col("code").is_in(list(known)))
-        out = out.filter(pl.col("code").is_in(list(known)))
-        print(f"      銘柄マスタに無い提出者 {dropped.height} 件を除きました", flush=True)
+    base_seed = pl.read_parquet(str(seed_path))
+    out, dropped = assemble_seed(df, base_seed, _listed_codes(config))
+    if dropped is not None:
+        print(f"      銘柄マスタに無い提出者 {dropped} 件を除きました", flush=True)
     out.write_parquet(str(out_path))
     print(f"[3/3] {applied} 件の書類を反映し、{out.height} 銘柄を {out_path} へ書き出しました", flush=True)
     return {
@@ -144,9 +162,18 @@ def main() -> None:
     parser.add_argument("--work-dir", type=Path, required=True, help="作業ディレクトリ (DB・取得結果の置き場)")
     parser.add_argument("--out", type=Path, required=True, help="書き出すシードの parquet")
     parser.add_argument("--days", type=int, default=400, help="EDINET を取得する過去の日数 (既定 400)")
+    parser.add_argument(
+        "--base-seed",
+        type=Path,
+        default=SEED_PATH,
+        help="土台のシード (既定: 同梱のシード)。EDINET から取れない項目と updated_at を引き継ぐ。"
+        "出所の列を持つ (作り直し済みの) シードも指定できる",
+    )
     parser.add_argument("--reuse", action="store_true", help="空でない作業ディレクトリを使う (開発用)")
     args = parser.parse_args()
-    build(args.work_dir.resolve(), args.out.resolve(), args.days, reuse=args.reuse)
+    build(
+        args.work_dir.resolve(), args.out.resolve(), args.days, seed_path=args.base_seed.resolve(), reuse=args.reuse
+    )
 
 
 if __name__ == "__main__":

@@ -150,13 +150,39 @@ def test_build_record_drops_per_share_values_of_pre_listing_document():
     for f in ("eps", "bps", "dps", "shares_outstanding"):
         assert f not in rec
     assert rec["net_profit"] == -407000000.0 and rec["net_assets"] == -407000000.0
-    normal = {**item, "eps": 295.25, "bps": 3062.82, "dps": 95.0, "shares_outstanding": 15794987460.0}
+    normal = {**item, "eps": 295.25, "bps": 3062.82, "dps": 95.0, "shares_outstanding": 15794987460.0,
+              "net_assets": 4.84e13}  # トヨタの規模 (純資産 ≒ 株数 × BPS)
     assert build_record(normal, {})["eps"] == 295.25
     # 半期報告書でも同じ (貸借対照表側の bps・株数)
     interim = {"code": "543A", "kind": "interim", "period_end": "2026-09-30", "bps": 5.0, "shares_outstanding": 10.0,
                "net_assets": 100.0}
     rec = build_record(interim, {})
     assert "bps" not in rec and "shares_outstanding" not in rec and rec["net_assets"] == 100.0
+
+
+def test_build_record_drops_per_share_values_inconsistent_with_share_count():
+    """提出日現在の株数が正常 (27 億株) でも、EPS・BPS が上場前の 1 株の基準 (約 -4 億円) のままの書類
+    (543A) は、1 株当たりの値を採用しない。株数と純資産は、使えるので残す"""
+    item = {"code": "543A", "kind": "annual", "period_end": "2026-03-31", "net_profit": -407000000.0,
+            "net_assets": -407000000.0, "eps": -407582617.0, "bps": -407582616.0, "dps": 0.0,
+            "shares_outstanding": 2756582628.0}
+    rec = build_record(item, {})
+    for f in ("eps", "bps", "dps"):
+        assert f not in rec
+    assert rec["shares_outstanding"] == 2756582628.0 and rec["net_assets"] == -407000000.0
+
+
+def test_build_record_keeps_per_share_values_in_legitimate_odd_cases():
+    """親会社の持分が負で、純資産は正 (非支配株主持分など) の銘柄 (3175 の例)、自己株式による数倍のずれは、
+    実在し得る値なので、1 株当たりの値を採用する"""
+    negative_parent = {"code": "3175", "kind": "annual", "period_end": "2026-03-31", "net_assets": 1.1249e9,
+                       "eps": 84.49, "bps": -18.46, "shares_outstanding": 1.288445e7}
+    assert build_record(negative_parent, {})["bps"] == -18.46
+    treasury = {"code": "7931", "kind": "annual", "period_end": "2026-03-31", "net_assets": 5.6262e10,
+                "eps": 290.73, "bps": 3430.96, "shares_outstanding": 2.5607086e7}
+    assert build_record(treasury, {})["eps"] == 290.73
+    # BPS が 0・空のときは判定しない
+    assert build_record({**treasury, "bps": 0.0}, {})["eps"] == 290.73
 
 
 def test_sales_growth_is_cleared_only_when_sales_changes(bridge, db_conn):
