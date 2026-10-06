@@ -242,7 +242,7 @@ def test_fundamentals_seed_note_counts_codes_missing_from_seed(stub_context, cap
         repo.get_meta.return_value = "done"
         AcquisitionPhase(stub_context)._ensure_fundamentals(repo)
     out = capsys.readouterr().out
-    assert "財務シードデータから 3 銘柄" in out
+    assert "同梱の財務データから 3 銘柄" in out
     assert "取得対象のうち 2 銘柄" in out
 
 
@@ -260,7 +260,7 @@ def test_fundamentals_seed_note_omitted_when_all_codes_are_in_seed(stub_context,
         repo.get_meta.return_value = "done"
         AcquisitionPhase(stub_context)._ensure_fundamentals(repo)
     out = capsys.readouterr().out
-    assert "財務シードデータから 3 銘柄を初期登録しました。" in out
+    assert "同梱の財務データから 3 銘柄を初期登録しました。" in out
     assert "未収録" not in out
 
 

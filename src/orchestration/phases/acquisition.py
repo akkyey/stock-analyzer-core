@@ -322,18 +322,18 @@ class AcquisitionPhase(BasePhase):
                     repo.save_fundamentals(df_seed)
                     # 新規の DB は、読み込んだシードが最新なので、既存 DB 向けの更新は不要 (印だけ残す)
                     repo.set_meta(self.SEED_REFRESH_META_KEY, seed_fingerprint(seed_parquet))
-                    # 取得対象の銘柄のうち、シードに無い銘柄 (シード作成後の新規上場など)。
+                    # 取得対象の銘柄のうち、同梱の財務データ (シード) に無い銘柄 (作成後の新規上場など)。
                     # 件数の差ではなく、実際にシードに無い銘柄を数える (シードには上場廃止済みの銘柄もある)
                     seed_codes = set(df_seed["code"].cast(pl.Utf8).to_list())
                     not_in_seed = len(set(repo.get_all_codes() or []) - seed_codes)
                     diff_note = (
-                        f" (取得対象のうち {not_in_seed} 銘柄は、シード作成後の新規上場等で未収録。"
+                        f" (取得対象のうち {not_in_seed} 銘柄は、同梱データの作成後の新規上場等で未収録。"
                         "EDINET の開示で順次補完されます)"
                         if not_in_seed > 0
                         else ""
                     )
                     print(
-                        f"   ✅ 財務シードデータから {len(df_seed)} 銘柄を初期登録しました{diff_note}。",
+                        f"   ✅ 同梱の財務データから {len(df_seed)} 銘柄を初期登録しました{diff_note}。",
                         flush=True,
                     )
                 except Exception as e:
@@ -388,7 +388,7 @@ class AcquisitionPhase(BasePhase):
             repo.set_meta(self.SEED_REFRESH_META_KEY, fingerprint)
             if updated:
                 print(
-                    f"   🔄 財務データを、新しいシードで {updated} 銘柄更新しました"
+                    f"   🔄 財務データを、新しい版の同梱データで {updated} 銘柄更新しました"
                     " (決算期の新しい値は変更していません)。",
                     flush=True,
                 )

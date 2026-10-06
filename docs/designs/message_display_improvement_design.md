@@ -83,8 +83,8 @@ print(f"   🔄 銘柄マスタを JPX の最新一覧と同期しました: 新
 
 # _ensure_fundamentals (件数の差ではなく、取得対象のうちシードに無い銘柄を数える)
 not_in_seed = len(set(repo.get_all_codes()) - set(df_seed["code"]))
-diff_note = f" (取得対象のうち {not_in_seed} 銘柄は、シード作成後の新規上場等で未収録。EDINET の開示で順次補完されます)" if not_in_seed else ""
-print(f"   ✅ 財務シードデータから {len(df_seed)} 銘柄を初期登録しました{diff_note}。", flush=True)
+diff_note = f" (取得対象のうち {not_in_seed} 銘柄は、同梱データの作成後の新規上場等で未収録。EDINET の開示で順次補完されます)" if not_in_seed else ""
+print(f"   ✅ 同梱の財務データから {len(df_seed)} 銘柄を初期登録しました{diff_note}。", flush=True)
 ```
 
 #### ② 前処理（EDINET同期・キャッシュ）の可視化
