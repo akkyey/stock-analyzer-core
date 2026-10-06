@@ -101,7 +101,7 @@ Colab は利用者が試行錯誤しながらセルを何度も再実行する�
 
 - **作業ディレクトリのルート固定（`/content` 原点回帰）**: 操作の直前に必ずカレントディレクトリを `/content` に戻す。既存の展開先ディレクトリは事前にクリーンアップし、常にゼロクリアされた状態からクローンを開始する
 - **Shallow Clone（`--depth 1`）による帯域・起動時間の節約**: 過去のコミット履歴をすべて切り捨て、最新スナップショットのみを短時間で展開する
-- **事前検証付きリトライ ＆ 自動フォールバック（セルフヒーリング）**: `git ls-remote` で通信状態とタグの存在を区別し、タグが存在しない場合は警告を表示した上で自動的に安定版（または `main` ブランチ）へ退避して取得を継続する
+- **事前検証付きリトライ ＆ 自動フォールバック（セルフヒーリング）**: `git ls-remote` で通信状態とタグの存在を区別し、タグが存在しない場合は設定フラグ（許可時のみ）に基づき `main` ブランチへ退避して取得を継続する
 - **動的インポートとモジュールキャッシュのリセット**: `sys.modules` 内の自作パッケージを明示的にクリアし、再実行時でも新しくクローンされたコードをメモリに再ロードする
 
 ```mermaid
@@ -110,16 +110,19 @@ flowchart TD
     CD --> CheckDir{"TARGET_DIR が<br/>既に存在するか？"}
     CheckDir -- "Yes" --> Clean["shutil.rmtree()<br/>(既存ディレクトリを完全消去)"]
     CheckDir -- "No" --> Verify
-    Clean --> Verify["git ls-remote でタグ存在を確認"]
+    Clean --> Verify["check_tag() でリモート確認"]
 
-    Verify -- "タグ存在 / 通信正常" --> Clone1["Attempt 1: git clone --depth 1<br/>--branch TARGET_BRANCH (指定タグ)"]
-    Verify -- "通信エラー" --> Retry["指数バックオフで再試行"]
+    Verify -- "通信エラー (error)" --> Retry["指数バックオフで再試行 (最大3回)"]
     Retry --> Verify
-    Verify -- "タグ不在 (Not Found)" --> Fallback["警告出力 ＆ ブランチを 'main' に切替"]
-    Fallback --> Clone2["Attempt 2: git clone --depth 1<br/>--branch main (自動フォールバック)"]
+    Verify -- "再試行上限超過" --> ErrorExit["RuntimeError で明示的中断<br/>(GitHub接続障害案内)"]
 
-    Clone1 --> Pip["sys.executable -m pip install -q -r requirements.txt"]
-    Clone2 --> Pip
+    Verify -- "タグ存在 (found)" --> CloneTag["Attempt: git clone --depth 1<br/>--branch TARGET_BRANCH (指定タグ)"]
+    Verify -- "タグ不在 (not_found)" --> CheckAllow{"ALLOW_MAIN_FALLBACK<br/>が有効か？"}
+    CheckAllow -- "No (無効)" --> TagExit["RuntimeError で中断<br/>(タグ名確認案内)"]
+    CheckAllow -- "Yes (有効)" --> CloneMain["警告出力 ＆ ブランチを 'main' に切替<br/>git clone --branch main"]
+
+    CloneTag --> Pip["sys.executable -m pip install -q -r requirements.txt"]
+    CloneMain --> Pip
 
     Pip --> Reload["sys.modules から自作パッケージを破棄<br/>(最新モジュールの強制再読込)"]
     Reload --> Ready["環境セットアップ完了 (次Stepへ)"]
@@ -127,6 +130,8 @@ flowchart TD
     style Start fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#333
     style Pip fill:#f0fff0,stroke:#2a2,stroke-width:1px,color:#333
     style Ready fill:#d0ffd0,stroke:#2a2,stroke-width:2px,color:#333
+    style ErrorExit fill:#ffe0e0,stroke:#d33,stroke-width:2px,color:#333
+    style TagExit fill:#ffe0e0,stroke:#d33,stroke-width:2px,color:#333
 ```
 
 ---
@@ -147,32 +152,47 @@ import time
 # 1. 作業ディレクトリを必ず /content に戻す (作業ディレクトリ消失エラーの防止)
 os.chdir("/content")
 
+# @title 【Step 1】環境セットアップ
 REPO_URL = "https://github.com/my-org/my-tool.git"
 TARGET_DIR = "/content/my-tool"
 TARGET_BRANCH = "v1.3.1"  # 検証済み安定版タグ
+ALLOW_MAIN_FALLBACK = False  # @param {type:"boolean"}
+# ↑ タグ不在時に未検証の最新開発版 (main) での実行を許容する場合は True
 
 # 2. 既存ディレクトリが存在する場合は完全に削除 (再実行時の衝突防止)
 if os.path.exists(TARGET_DIR):
     shutil.rmtree(TARGET_DIR, ignore_errors=True)
 
-# 3. リモートタグの事前確認と取得
-def tag_exists(repo_url: str, tag: str) -> bool:
-    """git ls-remote を用いてタグの存在を確認する"""
-    try:
-        res = subprocess.run(
-            ["git", "ls-remote", "--exit-code", repo_url, f"refs/tags/{tag}"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return res.returncode == 0
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        return False
+# 3. リモートタグの事前確認（3状態判定と指数バックオフ）
+def check_tag(repo_url: str, tag: str, retries: int = 3) -> str:
+    """'found' / 'not_found' / 'error' を返す。通信エラーは指数バックオフで再試行"""
+    for i in range(retries):
+        try:
+            res = subprocess.run(
+                ["git", "ls-remote", "--exit-code", repo_url, f"refs/tags/{tag}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode == 0:
+                return "found"
+            if res.returncode == 2:  # 通信成功・該当refなし
+                return "not_found"
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            pass
+        time.sleep(2 ** i)
+    return "error"
 
-target_to_clone = TARGET_BRANCH
-if not tag_exists(REPO_URL, TARGET_BRANCH):
-    print(f"⚠️ 指定タグ '{TARGET_BRANCH}' がリモートに見つかりません。最新の 'main' ブランチにフォールバックします。")
+status = check_tag(REPO_URL, TARGET_BRANCH)
+if status == "error":
+    raise RuntimeError("❌ GitHub に接続できません。ネットワーク状況を確認して再実行してください。")
+if status == "not_found":
+    if not ALLOW_MAIN_FALLBACK:
+        raise RuntimeError(f"❌ タグ '{TARGET_BRANCH}' が見つかりません。タグ名を確認してください。")
+    print(f"⚠️ タグ '{TARGET_BRANCH}' がないため main で続行します（未検証コードの可能性あり）。")
     target_to_clone = "main"
+else:
+    target_to_clone = TARGET_BRANCH
 
 # 4. Shallow Clone の実行 (通信エラー時はリトライ)
 clone_success = False
@@ -281,13 +301,13 @@ except subprocess.CalledProcessError as e:
 | :--- | :--- | :--- | :--- |
 | **初動の転送時間** | 数十秒（履歴数千コミットの場合） | **約 2〜4 秒（`--depth 1`）** | 初動の短縮 |
 | **同一セルの再実行** | `already exists` で即死 | **自動消去・再取得で衝突なし** | 冪等性の担保 |
-| **タグ未反映・タイポ時** | エラーで完全停止 | **検証を経て `main` へフォールバック** | セルフヒーリング |
+| **タグ未反映・タイポ時** | エラーで完全停止 | **検証を経て許可時のみ `main` 退避** | セルフヒーリング |
 | **自作モジュール更新** | 再起動しないと旧コード参照 | **`sys.modules` 破棄で即反映** | コード不整合の防止 |
 
 ### 2. 今回の設計の限界とトレードオフ
 
 - **GitHub 側の全面障害**: GitHub 自身がダウンしている場合はフォールバックも成立しないため、外部ホスティングの冗長化まではカバーできません
-- **`main` フォールバック時の動作差異**: タグ取得失敗時に `main` を取得した場合、開発中の未検証コードが動く可能性があります。本番運用では警告を明示するだけでなく、ノートブック側で「フォールバックを許可するかどうか」のフラグを設けるなどの制御が推奨されます
+- **`main` フォールバック時の動作差異**: タグ取得失敗時に `main` を取得した場合、開発中の未検証コードが動く可能性があります。そのため本設計では `ALLOW_MAIN_FALLBACK` フラグを用意し、明示的に許容された場合のみフォールバックする制御としています
 - **C拡張モジュールなどの更新制限**: `sys.modules` からの破棄で即時リロードできるのは純粋な Python スクリプトのみです。`numpy` や `torch` などのバイナリ拡張を含むライブラリを `pip install --upgrade` した場合は、Colab ランタイム自体の再起動（`os.kill(os.getpid(), 9)` など）が必要です
 - **トークン漏洩リスク（プライベート時）**: Secrets を用いる場合でも、`CalledProcessError` の例外オブジェクト（`str(e)`）を不用意に出力すると URL 内部のトークンがコンソールに漏洩するリスクがあります。エラーハンドリングでは `e.stderr` のみを利用し、クローン完了後に `git remote set-url` で URL をサニタイズする防御策が不可欠です
 
@@ -298,4 +318,17 @@ except subprocess.CalledProcessError as e:
 Google Colab 上でリポジトリのコードを動かす作業は、ローカル開発環境での `git clone` とは前提が異なります。
 
 「作業ディレクトリの原点復帰」「既存フォルダの事前クリーンアップ」「Shallow Clone」「事前検証付きフォールバック」「モジュールキャッシュの破棄」という一連の防壁をブートストラップに組み込むことで、ユーザーがつまずくことなくボタン1つで安定稼働する配布基盤が完成します。
+
+本稿で確立したコード展開フローと、前編（データ永続化編）で設計した 2 層ストレージフローを組み合わせることで、ノートブック全体のライフサイクルは以下のように綺麗に整流化されます。
+
+> **【Step 1】ブートストラップ実行（本稿：コード展開・依存解決）**  
+> 　↓  
+> **【Step 2】Pull Phase（前編：永続層 Drive から作業層 SSD へデータ一括展開）**  
+> 　↓  
+> **【Step 3】処理実行（ローカル SSD 上での高速バッチ・クエリ処理）**  
+> 　↓  
+> **【Step 4】Push Phase（前編：成果物先行・DB末尾置換で永続層へ同期 ＆ アンマウント）**
+
+2 つの設計を組み合わせることで、Colab は「壊れやすい対話的ノートブック」から「本番運用に耐えうる堅牢な配布バッチ基盤」へと進化します。
+
 

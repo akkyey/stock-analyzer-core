@@ -102,10 +102,10 @@ flowchart LR
         LocalOut["生成成果物<br/>(Staging Output)"]
     end
 
-    DriveDB -- "【Step 0】Pull Phase<br/>(一括取得・残存WALチェック)" --> LocalDB
+    DriveDB -- "【Step 2】Pull Phase<br/>(一括取得・残存WALチェック)" --> LocalDB
     LocalDB --> LocalWork --> LocalOut
-    LocalOut -- "【Step 3】Push Phase (1)<br/>(成果物を先行コピー)" --> DriveOut
-    LocalDB -- "【Step 3】Push Phase (2)<br/>(DBを末尾で置換)" --> DriveDB
+    LocalOut -- "【Step 4】Push Phase (1)<br/>(成果物を先行コピー)" --> DriveOut
+    LocalDB -- "【Step 4】Push Phase (2)<br/>(DBを末尾で置換)" --> DriveDB
 ```
 
 ---
@@ -196,7 +196,7 @@ def finalize() -> None:
 3. リセット要求時も Drive を即時削除せず、「空の DB で開始し、Push 成功時に初めて置き換える」方式とし、処理失敗時の既存データを保護する
 
 ```python
-# @title 【Step 0】環境初期化 & Pull Phase
+# @title 【Step 2】環境初期化 & Pull Phase
 reset_database = False  # @param {type:"boolean"}
 confirm_text = ""  # @param {type:"string"}
 # ↑ 初期化する場合のみ DELETE と入力
@@ -226,12 +226,12 @@ con = duckdb.connect(str(local_db))
 print(f"✅ Pull 完了: {local_db}")
 ```
 
-### 3. バッチ実行と最終同期（Step 3 セル）
+### 3. バッチ実行と最終同期（Step 4 セル）
 
 バッチ処理の終了後、成果物と DB を同期し、最後に必ず `finalize()` を呼び出して Drive の書き込みを確定させます。
 
 ```python
-# @title 【Step 3】パイプライン実行 & Push Phase
+# @title 【Step 4】パイプライン実行 & Push Phase
 # (ここでローカルSSD上の高速バッチ処理を実行...)
 # run_pipeline(con)
 
@@ -247,6 +247,7 @@ print("✅ バッチ完了 & Google Drive への同期が完了しました。")
 ### 4. ノートブックのフォーム化（`cellView: form`）
 
 プログラムコードを非表示にし、タイトルバーと入力フォームのみを初期表示とするため、セルメタデータに `cellView` を定義します。
+（※リポジトリのクローンや依存パッケージ解決を行う【Step 1】環境セットアップのフォーム定義例）
 
 ```json
 {
