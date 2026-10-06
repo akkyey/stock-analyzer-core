@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO_ROOT="/Users/irom/Documents/stock-analyzer-core"
-SCRATCH_ROOT="/Users/irom/.gemini/antigravity/brain/ebfa52ba-a86b-4aa9-9e8e-232d48f8f7fa/scratch"
-REMOTE_HOST="masaaki-sv"
-REMOTE_DIR="/home/irom/dev/stock-analyzer-core/docs/articles"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRATCH_ROOT="${SCRATCH_ROOT:-/tmp/scratch}"
+REMOTE_HOST="${REMOTE_HOST:-remote-server}"
+REMOTE_DIR="${REMOTE_DIR:-/path/to/stock-analyzer-core/docs/articles}"
 
 echo "=== [1/3] Copying to Gemini Scratch ==="
 mkdir -p "${SCRATCH_ROOT}"

@@ -48,7 +48,7 @@
   - `ROE`: $-100\% \le \text{ROE} \le 200\%$
 
 ### 2.4 [Tier 4] 自動ユニットテスト (Automated Test Suite)
-- [`tests/test_reporter_and_validation.py`](file:///home/irom/dev/project-stock2/stock-analyzer-core/tests/test_reporter_and_validation.py) および [`scratch/verify_calc_validity.py`](file:///home/irom/dev/project-stock2/stock-analyzer-core/scratch/verify_calc_validity.py) にて、レポート生成処理および数値の正確性を回帰テストとして自動検証する。
+- [`tests/test_reporter_and_validation.py`](../../tests/test_reporter_and_validation.py) にて、レポート生成処理および数値の正確性を回帰テストとして自動検証する。
 
 ---
 
@@ -164,7 +164,7 @@ python scratch/fetch_yfinance_fast_batch.py --mode thorough --delay 0.5
 
 ## 5. 自己修復（Self-Healing）アルゴリズム
 
-[`src/services/financial_repair.py`](file:///home/irom/dev/project-stock2/stock-analyzer-core/src/services/financial_repair.py) において、以下の自己修復ロジックを Polars ベクトル演算でミリ秒単位で適用する：
+[`src/services/financial_repair.py`](../../src/services/financial_repair.py) において、以下の自己修復ロジックを Polars ベクトル演算でミリ秒単位で適用する：
 
 1. **D/E比からの自己資本比率逆算**:
    $$\text{Equity Ratio (\%)} = \frac{100.0}{1.0 + \frac{\text{Debt Equity Ratio}}{100.0}}$$

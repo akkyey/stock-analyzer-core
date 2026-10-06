@@ -356,11 +356,12 @@ python -m src.tools.verify_csv_outputs
   - 重複銘柄がゼロであること。
   - `daily_report.csv` の必須列（`code`, `price`, `verdict`）に欠損値がゼロであること。
 
-### 3. リモート実機 (`masaaki-sv`) への同期と確認
+### 3. リモート実機環境への同期と確認
 ```bash
-# 修正したファイルを masaaki-sv へ同期
-rsync -avz src/ tests/ docs/ masaaki-sv:/home/irom/dev/stock-analyzer-core/
+# 修正したファイルをリモート環境へ同期
+rsync -avz src/ tests/ docs/ <remote-host>:/path/to/stock-analyzer-core/
 
-# masaaki-sv 上でテストとリントを実行
-ssh masaaki-sv "export PATH=\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd /home/irom/dev/stock-analyzer-core && uv run ruff check src/ tests/ && uv run pytest tests/ -q"
+# リモート上でテストとリントを実行
+ssh <remote-host> "export PATH=\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH && cd /path/to/stock-analyzer-core && uv run ruff check src/ tests/ && uv run pytest tests/ -q"
 ```
+
