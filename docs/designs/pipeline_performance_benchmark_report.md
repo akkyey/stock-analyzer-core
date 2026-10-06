@@ -2,7 +2,7 @@
 
 ## 1. 概要 (Executive Summary)
 
-本ドキュメントは、[stock-analyzer-core](file:///home/irom/dev/stock-analyzer-core) において、データベース初期化からデータ取得、DB構築、データ補完、および3層多層分類（Pre-Filter・クオンツスコアリング・ゲートキーパー判定・2ファイル分離出力）に至る全フェーズの処理性能を実機環境にて網羅的に実測・検証した公式レポートである。
+本ドキュメントは、**stock-analyzer-core** において、データベース初期化からデータ取得、DB構築、データ補完、および3層多層分類（Pre-Filter・クオンツスコアリング・ゲートキーパー判定・2ファイル分離出力）に至る全フェーズの処理性能を実機環境にて網羅的に実測・検証した公式レポートである。
 
 東証全上場銘柄（**全 3,920 銘柄**）を対象として、用途と通信条件の異なる以下の **4つのシナリオ** で完全実測を実施した。
 
@@ -93,11 +93,11 @@ graph TD
 
 | レイヤー | 主要モジュール・クラス | 主な責務・役割 |
 | :--- | :--- | :--- |
-| **外部API取得層** | [src/fetcher/facade.py: DataFetcher](file:///home/irom/dev/stock-analyzer-core/src/fetcher/facade.py)<br>[src/fetcher/market_fetcher.py: MarketFetcher](file:///home/irom/dev/stock-analyzer-core/src/fetcher/market_fetcher.py)<br>[src/fetcher/jpx.py: JPXFetcher](file:///home/irom/dev/stock-analyzer-core/src/fetcher/jpx.py)<br>[src/fetcher/edinet_fetcher.py: EdinetFetcher](file:///home/irom/dev/stock-analyzer-core/src/fetcher/edinet_fetcher.py) | - JPX公式Excel（3,900社マスタ）のダウンロード<br>- yfinance マルチスレッド並列によるOHLCV株価取得<br>- 金融庁EDINET API v2からの最新開示書類ポーリング |
-| **ストレージ層** | [src/database/duck_client.py: DuckDBClient](file:///home/irom/dev/stock-analyzer-core/src/database/duck_client.py)<br>[src/repositories/duck_repository.py: DuckDBRepository](file:///home/irom/dev/stock-analyzer-core/src/repositories/duck_repository.py)<br>[src/repositories/market_data_repository.py](file:///home/irom/dev/stock-analyzer-core/src/repositories/market_data_repository.py) | - DuckDB: 分析クエリ用インメモリ・カラムナ高速DB<br>- SQLite: 確実なACID特性を持つマスター永続化DB |
-| **補完・修復層** | [src/services/financial_repair.py: FinancialRepairService](file:///home/irom/dev/stock-analyzer-core/src/services/financial_repair.py)<br>[src/services/edinet_bridge.py: EdinetBridge](file:///home/irom/dev/stock-analyzer-core/src/services/edinet_bridge.py)<br>[src/validation_engine.py: ValidationEngine](file:///home/irom/dev/stock-analyzer-core/src/validation_engine.py) | - Polars ネイティブによる全銘柄一括ベクトル補完<br>- D/Eレシオからの自己資本比率逆算、精密PER推計<br>- 銀行業・保険業等のセクター別免除ポリシー適用 |
-| **評価・分類層** | [src/calc/pre_filter.py: PreFilter](file:///home/irom/dev/stock-analyzer-core/src/calc/pre_filter.py)<br>[src/calc/quant_evaluator.py: QuantAgentEvaluator](file:///home/irom/dev/stock-analyzer-core/src/calc/quant_evaluator.py)<br>[src/orchestration/dossier_builder.py: StockDossierBuilder](file:///home/irom/dev/stock-analyzer-core/src/orchestration/dossier_builder.py) | - 第1層: 流動性・破綻リスクの即時除外（Pre-Filter）<br>- 第2層: 多変量リニア傾斜配点（15〜98点）<br>- 第3層: 本業赤字・下落トレンドの判定キャップ |
-| **出力層** | [src/orchestration/pipeline_orchestrator.py](file:///home/irom/dev/stock-analyzer-core/src/orchestration/pipeline_orchestrator.py)<br>[data/output/daily_report.csv](file:///home/irom/dev/stock-analyzer-core/data/output/daily_report.csv)<br>[data/output/uncalculable_stocks.csv](file:///home/irom/dev/stock-analyzer-core/data/output/uncalculable_stocks.csv) | - 完全評価可能銘柄と除外銘柄の2ファイル完全分離出力 |
+| **外部API取得層** | [`src/fetcher/facade.py`](../../src/fetcher/facade.py): DataFetcher<br>[`src/fetcher/market_fetcher.py`](../../src/fetcher/market_fetcher.py): MarketFetcher<br>[`src/fetcher/jpx.py`](../../src/fetcher/jpx.py): JPXFetcher<br>[`src/fetcher/edinet_fetcher.py`](../../src/fetcher/edinet_fetcher.py): EdinetFetcher | - JPX公式Excel（3,900社マスタ）のダウンロード<br>- yfinance マルチスレッド並列によるOHLCV株価取得<br>- 金融庁EDINET API v2からの最新開示書類ポーリング |
+| **ストレージ層** | [`src/database/duck_client.py`](../../src/database/duck_client.py): DuckDBClient<br>[`src/repositories/duck_repository.py`](../../src/repositories/duck_repository.py): DuckDBRepository<br>[`src/repositories/market_data_repository.py`](../../src/repositories/market_data_repository.py) | - DuckDB: 分析クエリ用インメモリ・カラムナ高速DB<br>- SQLite: 確実なACID特性を持つマスター永続化DB |
+| **補完・修復層** | [`src/services/financial_repair.py`](../../src/services/financial_repair.py): FinancialRepairService<br>[`src/services/edinet_bridge.py`](../../src/services/edinet_bridge.py): EdinetBridge<br>[`src/validation_engine.py`](../../src/validation_engine.py): ValidationEngine | - Polars ネイティブによる全銘柄一括ベクトル補完<br>- D/Eレシオからの自己資本比率逆算、精密PER推計<br>- 銀行業・保険業等のセクター別免除ポリシー適用 |
+| **評価・分類層** | [`src/calc/pre_filter.py`](../../src/calc/pre_filter.py): PreFilter<br>[`src/calc/quant_evaluator.py`](../../src/calc/quant_evaluator.py): QuantAgentEvaluator<br>[`src/orchestration/dossier_builder.py`](../../src/orchestration/dossier_builder.py): StockDossierBuilder | - 第1層: 流動性・破綻リスクの即時除外（Pre-Filter）<br>- 第2層: 多変量リニア傾斜配点（15〜98点）<br>- 第3層: 本業赤字・下落トレンドの判定キャップ |
+| **出力層** | [`src/orchestration/pipeline_orchestrator.py`](../../src/orchestration/pipeline_orchestrator.py)<br>`data/output/daily_report.csv`<br>`data/output/uncalculable_stocks.csv` | - 完全評価可能銘柄と除外銘柄の2ファイル完全分離出力 |
 
 ---
 
@@ -156,7 +156,7 @@ flowchart TD
 | **1. データ取得** | JPX銘柄マスタ、市況時系列、財務データの読込 | **2.236 秒** | 67.46 % | 全3,920社 + 時系列9.8万行 + 財務4,126件 |
 | **2. DB構築** | SQLite & DuckDB へのバルク格納・インデックス作成 | **0.791 秒** | 23.87 % | **計 106,274 件 格納**<br>（スループット: **134,371 件/秒**） |
 | **3. 補完** | 自己資本比率逆算、PER修復、スケーリング | **52.01 ms** | 1.57 % | 全3,920社 一括ベクトル補完・修復<br>（フェーズ全体: 52.01 ms / ベクトル修復単体: 5.79 ms） |
-| **4. 分類** | 第1層足切り ➔ 第2層スコアリング ➔ 第3層判定 ➔ 出力 | **0.159 秒** | 4.79 % | [daily_report.csv](file:///home/irom/dev/stock-analyzer-core/data/output/daily_report.csv): 2,120社<br>[uncalculable_stocks.csv](file:///home/irom/dev/stock-analyzer-core/data/output/uncalculable_stocks.csv): 1,800社 |
+| **4. 分類** | 第1層足切り ➔ 第2層スコアリング ➔ 第3層判定 ➔ 出力 | **0.159 秒** | 4.79 % | `daily_report.csv`: 2,120社<br>`uncalculable_stocks.csv`: 1,800社 |
 | **合計 (Total)** | **全工程一気通貫完了** | **3.314 秒** | **100.00 %** | **東証全銘柄パイプライン完了** |
 
 ---

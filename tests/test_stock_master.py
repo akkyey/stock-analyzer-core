@@ -169,26 +169,73 @@ def test_no_data_tracking_cooldown_and_recovery():
     dead = codes[:2]
     fetched_ok = set(codes[2:])  # 98% が取得成功 = 健全な実行
 
-    # 1〜2 回目: 失敗回数のみ加算 (まだ停止しない)
-    for _ in range(2):
-        s = sm.update_no_data_tracking(repo, fetched_ok, codes, codes_with_history=set(), today=TODAY)
+    # 1〜2 日目: 失敗回数のみ加算 (まだ停止しない)
+    for day in range(2):
+        d = TODAY + timedelta(days=day)
+        s = sm.update_no_data_tracking(repo, fetched_ok, codes, codes_with_history=set(), today=d)
         assert s["failed"] == 2 and s["cooled"] == 0
-    assert sm.get_cooling_codes(repo, today=TODAY) == set()
+    assert sm.get_cooling_codes(repo, today=TODAY + timedelta(days=1)) == set()
 
-    # 3 回目: 30 日間の再取得停止
-    s = sm.update_no_data_tracking(repo, fetched_ok, codes, codes_with_history=set(), today=TODAY)
+    # 3 日目: 30 日間の再取得停止
+    third = TODAY + timedelta(days=2)
+    s = sm.update_no_data_tracking(repo, fetched_ok, codes, codes_with_history=set(), today=third)
     assert s["cooled"] == 2
-    assert sm.get_cooling_codes(repo, today=TODAY) == set(dead)
+    assert sm.get_cooling_codes(repo, today=third) == set(dead)
     assert _row(repo, dead[0])[2] == sm.NO_DATA_REASON
     # 29 日後もまだ停止中、30 日後は再確認のため対象に戻る
-    assert sm.get_cooling_codes(repo, today=TODAY + timedelta(days=29)) == set(dead)
-    assert sm.get_cooling_codes(repo, today=TODAY + timedelta(days=30)) == set()
+    assert sm.get_cooling_codes(repo, today=third + timedelta(days=29)) == set(dead)
+    assert sm.get_cooling_codes(repo, today=third + timedelta(days=30)) == set()
 
     # データが取れたら回復 (失敗回数・停止・理由をリセット)
-    s = sm.update_no_data_tracking(repo, set(codes), codes, codes_with_history=set(), today=TODAY)
+    s = sm.update_no_data_tracking(repo, set(codes), codes, codes_with_history=set(), today=third)
     assert s["recovered"] == 2
-    assert sm.get_cooling_codes(repo, today=TODAY) == set()
+    assert sm.get_cooling_codes(repo, today=third) == set()
     assert _row(repo, dead[0])[2] is None
+
+
+def test_no_data_failures_are_counted_once_per_day():
+    """同じ日に何回実行しても、失敗は 1 回と数える。一時的な取得失敗で、同じ日の 3 回の実行だけで、
+    30 日間の再取得停止にならない (Colab の本番で、同じ日の 3 回の実行で、44 銘柄が停止になった)"""
+    repo = _repo_with(_bulk(50))
+    codes = _bulk(50)
+    dead = codes[:2]
+    fetched_ok = set(codes[2:])
+    for _ in range(5):  # 同じ日に 5 回
+        s = sm.update_no_data_tracking(repo, fetched_ok, codes, codes_with_history=set(), today=TODAY)
+        assert s["cooled"] == 0
+    assert sm.get_cooling_codes(repo, today=TODAY) == set()
+    with repo.client.get_connection() as conn:
+        counts = conn.execute(
+            "SELECT fail_count, last_fail_date FROM stocks WHERE code = ?", [dead[0]]
+        ).fetchone()
+    assert counts == (1, TODAY.isoformat())
+    # 翌日・翌々日にも失敗が続けば、3 日連続で停止する
+    for day in (1, 2):
+        s = sm.update_no_data_tracking(
+            repo, fetched_ok, codes, codes_with_history=set(), today=TODAY + timedelta(days=day)
+        )
+    assert s["cooled"] == 2
+
+
+def test_stocks_schema_migration_adds_last_fail_date(tmp_path):
+    """旧い DB (last_fail_date など新しい列が無い stocks テーブル) でも、スキーマの更新で列が加わる"""
+    import duckdb
+
+    from src.database.duck_client import DuckDBClient
+    from src.repositories.duck_repository import DuckDBRepository
+
+    path = tmp_path / "old.duckdb"
+    with duckdb.connect(str(path)) as con:
+        con.execute("CREATE TABLE stocks (code VARCHAR PRIMARY KEY, name VARCHAR)")
+        con.execute("INSERT INTO stocks VALUES ('7203', 'トヨタ')")
+    client = object.__new__(DuckDBClient)  # シングルトン (テスト用の :memory:) を避けて、旧 DB を指す
+    client.db_path, client.memory_limit = str(path), "1GB"
+    DuckDBRepository(client)  # 初期化で、スキーマを更新する
+    with duckdb.connect(str(path)) as con:
+        cols = {r[1] for r in con.execute("PRAGMA table_info('stocks')").fetchall()}
+        row = con.execute("SELECT code, name, fail_count, last_fail_date FROM stocks").fetchone()
+    assert {"fail_count", "last_fail_date", "excluded_until"} <= cols
+    assert row[:2] == ("7203", "トヨタ")  # 既存の行は残る
 
 
 def test_no_data_tracking_does_not_count_unhealthy_or_history_cases():

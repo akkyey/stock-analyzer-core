@@ -123,6 +123,7 @@ class DuckDBRepository:
                     exclusion_reason VARCHAR,
                     excluded_until VARCHAR,
                     fail_count INTEGER DEFAULT 0,
+                    last_fail_date VARCHAR,
                     edinet_code VARCHAR,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -226,6 +227,7 @@ class DuckDBRepository:
                 "exclusion_reason VARCHAR",
                 "excluded_until VARCHAR",
                 "fail_count INTEGER DEFAULT 0",
+                "last_fail_date VARCHAR",
                 "edinet_code VARCHAR",
             ):
                 conn.execute(f"ALTER TABLE stocks ADD COLUMN IF NOT EXISTS {stock_col}")

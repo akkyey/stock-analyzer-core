@@ -168,7 +168,8 @@ def update_no_data_tracking(
 
     - データを取得できた銘柄: 失敗回数と再取得停止をリセット
     - 取得できず、かつ DB に履歴も無い銘柄: 失敗回数を加算。NO_DATA_THRESHOLD 回連続で
-      NO_DATA_COOLDOWN_DAYS 日間、再取得を止める (期間後に 1 回だけ再確認)
+      NO_DATA_COOLDOWN_DAYS 日間、再取得を止める (期間後に 1 回だけ再確認)。失敗回数は、
+      1 日に 1 回までしか数えない (同じ日に 3 回実行しても、一時的な取得失敗で、30 日間止めない)
     直近 2 日に取引が無いだけの銘柄 (履歴あり) や、通信障害で全体の取得率が低い実行は数えない。
 
     Returns:
@@ -186,7 +187,7 @@ def update_no_data_tracking(
     with repo.client.get_connection() as conn:
         if ok:
             recovered = conn.execute(
-                "UPDATE stocks SET fail_count = 0, excluded_until = NULL, "
+                "UPDATE stocks SET fail_count = 0, excluded_until = NULL, last_fail_date = NULL, "
                 "exclusion_reason = CASE WHEN exclusion_reason = ? THEN NULL ELSE exclusion_reason END "
                 "WHERE code IN (SELECT * FROM (SELECT UNNEST(?))) "
                 "AND (coalesce(fail_count, 0) > 0 OR excluded_until IS NOT NULL) "
@@ -196,9 +197,10 @@ def update_no_data_tracking(
             stats["recovered"] = len(recovered)
         if failed:
             conn.execute(
-                "UPDATE stocks SET fail_count = coalesce(fail_count, 0) + 1 "
-                "WHERE code IN (SELECT * FROM (SELECT UNNEST(?)))",
-                [failed],
+                "UPDATE stocks SET fail_count = coalesce(fail_count, 0) + 1, last_fail_date = ? "
+                "WHERE code IN (SELECT * FROM (SELECT UNNEST(?))) "
+                "AND (last_fail_date IS NULL OR last_fail_date < ?)",
+                [today.isoformat(), failed, today.isoformat()],
             )
             stats["failed"] = len(failed)
             cooled = conn.execute(

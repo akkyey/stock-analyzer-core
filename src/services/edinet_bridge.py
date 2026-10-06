@@ -18,25 +18,37 @@ from src.fetcher.xbrl_parser import (
     PARSER_VERSION,
     XbrlParser,
 )
-from src.repositories.fundamentals_repository import FundamentalsRepository
-
-# 有価証券報告書から更新する貸借対照表の項目 (半期報告書の方が新しければ更新しない)
-BALANCE_SHEET_FIELDS = ("total_assets", "net_assets", "equity_ratio", "shares_outstanding", "bps")
-# 有価証券報告書から更新する損益・1 株当たり指標
-ANNUAL_PL_FIELDS = (
-    "sales",
-    "operating_income",
-    "net_profit",
-    "prev_net_profit",
-    "roe",
-    "eps",
-    "dps",
+from src.repositories.fundamentals_repository import ANNUAL_PL_FIELDS as _SEED_PL_FIELDS
+from src.repositories.fundamentals_repository import (
+    BALANCE_SHEET_FIELDS,
+    FundamentalsRepository,
 )
+
+# 有価証券報告書から更新する損益・1 株当たり指標 (営業利益率は、売上と営業利益から計算して補う)
+ANNUAL_PL_FIELDS = tuple(f for f in _SEED_PL_FIELDS if f != "operating_margin")
 INTERIM_FIELDS = XbrlParser.INTERIM_FIELDS
+# 自己資本比率 (%) として採用する範囲。債務超過 (純資産が負) では 100% を大きく下回るため下限は広く取るが、
+# 総資産が 0 と読まれた書類 (例: 543A の -4.08×10^10) のような、桁の違う値は採用しない
+EQUITY_RATIO_RANGE = (-1000.0, 100.0)
+# 発行済株式数がこれ未満の書類は、1 株当たりの値を採用しない。上場前に提出された書類 (543A は 1 株) では、
+# EPS・BPS が純利益・純資産そのもの (約 -4 億円) になり、PER などが意味のない値になる
+MIN_PLAUSIBLE_SHARES = 1000.0
+# 純資産 / (発行済株式数 × BPS) の許容範囲 (絶対値)。ほぼ 1 のはずだが、自己株式 (BPS は自己株式を除く)・
+# 非支配株主持分 (BPS は親会社の持分) で、1 から外れる (実データの正常な銘柄は 0.026 倍以上)。
+# 3 桁以上外れる場合は、1 株当たりの値と株数の基準が食い違っている (543A は、提出日現在の株数が 27 億株で、
+# EPS・BPS は、上場前の 1 株の基準で算定されていた)。符号の違い (親会社の持分が負で、純資産が正) は、
+# 実在し得るため、異常とはしない
+PER_SHARE_CONSISTENCY_RANGE = (1e-3, 1e3)
+PER_SHARE_FIELDS = ("eps", "bps", "dps")
 
 
 def _is_num(v: Any) -> TypeGuard[float]:
     return isinstance(v, (int, float)) and v == v  # NaN を除く
+
+
+def _same_amount(a: float, b: float) -> bool:
+    """売上が同じ値か (丸めの誤差は同じとみなす)。"""
+    return abs(a - b) <= 1e-9 * max(abs(a), abs(b), 1.0)
 
 
 def _before(period: str, stored: str, or_equal: bool = False) -> bool:
@@ -46,16 +58,17 @@ def _before(period: str, stored: str, or_equal: bool = False) -> bool:
     return period <= stored if or_equal else period < stored
 
 
-def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Optional[Dict[str, Any]]:
+def build_record(item: Dict[str, Any], stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """取得結果 1 件から、fundamentals へ書き込む項目を決める。
 
     Args:
         item: パーサーの結果 (kind / period_end / submit_date / 各項目)
-        stored: DB の現在の出所 {"period_end", "bs_period_end"} (無ければ None)
+        stored: DB の現在の出所 {"period_end", "bs_period_end"} と売上 "sales" (無ければ None)
 
     Returns:
         書き込む項目 (code を含む)。古い期の書類などで書き込むものが無ければ None。
     """
+    item = _drop_implausible_per_share(item)
     period_end = item.get("period_end") or ""
     submitted = item.get("submit_date") or None
     stored_pl = stored.get("period_end") or ""
@@ -65,7 +78,9 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
     if kind == KIND_ANNUAL:
         if _before(period_end, stored_pl):
             return None
-        record = _annual_record(item, period_end, submitted, update_bs=not _before(period_end, stored_bs))
+        record = _annual_record(
+            item, period_end, submitted, update_bs=not _before(period_end, stored_bs), stored_sales=stored.get("sales")
+        )
     elif kind == KIND_INTERIM:
         # 同じ期の再適用は同じ値になるため許容し、古い期だけを除く
         if _before(period_end, stored_bs) or _before(period_end, stored_pl, or_equal=True):
@@ -82,16 +97,50 @@ def build_record(item: Dict[str, Any], stored: Dict[str, Optional[str]]) -> Opti
 
 
 def _pick(item: Dict[str, Any], fields: tuple) -> Dict[str, Any]:
-    """item の項目のうち、数値のものだけを取り出す。"""
-    return {f: float(item[f]) for f in fields if _is_num(item.get(f))}
+    """item の項目のうち、数値のものだけを取り出す (範囲外の自己資本比率は除く)。"""
+    picked = {f: float(item[f]) for f in fields if _is_num(item.get(f))}
+    ratio = picked.get("equity_ratio")
+    if ratio is not None and not (EQUITY_RATIO_RANGE[0] <= ratio <= EQUITY_RATIO_RANGE[1]):
+        del picked["equity_ratio"]  # 純資産 / 総資産で計算できる場合は、_fill_equity_ratio が補う
+    return picked
+
+
+def _drop_implausible_per_share(item: Dict[str, Any]) -> Dict[str, Any]:
+    """株数と 1 株当たりの値が使えない書類の、該当する値を除いた写しを返す。
+
+    - 発行済株式数が極端に少ない書類 (上場前など): 株数と 1 株当たりの値
+    - 純資産 / (株数 × BPS) が 3 桁以上ずれる書類: 1 株当たりの値のみ (株数と純資産は残す)
+
+    損益側 (eps・dps) と貸借対照表側 (bps・shares_outstanding) は別々に取り出すため、書類全体で判定する。
+    """
+    shares = item.get("shares_outstanding")
+    if _is_num(shares) and shares < MIN_PLAUSIBLE_SHARES:
+        return {k: v for k, v in item.items() if k not in ("shares_outstanding", *PER_SHARE_FIELDS)}
+    net_assets, bps = item.get("net_assets"), item.get("bps")
+    if _is_num(shares) and _is_num(net_assets) and _is_num(bps) and bps != 0:
+        ratio = abs(net_assets / (shares * bps))
+        if not PER_SHARE_CONSISTENCY_RANGE[0] <= ratio <= PER_SHARE_CONSISTENCY_RANGE[1]:
+            # 株数と純資産は金額・株数として使えるため残し、基準の食い違う 1 株当たりの値だけを除く
+            return {k: v for k, v in item.items() if k not in PER_SHARE_FIELDS}
+    return item
 
 
 def _annual_record(
-    item: Dict[str, Any], period_end: str, submitted: Optional[str], update_bs: bool
+    item: Dict[str, Any],
+    period_end: str,
+    submitted: Optional[str],
+    update_bs: bool,
+    stored_sales: Optional[float] = None,
 ) -> Dict[str, Any]:
     """有価証券報告書から書き込む項目 (貸借対照表は、半期報告書の方が新しくなければ更新)。"""
     record = _pick(item, ANNUAL_PL_FIELDS)
     record.update(period_end=period_end or None, submitted_at=submitted)
+    if "sales" in record and _is_num(stored_sales) and not _same_amount(record["sales"], stored_sales):
+        # 売上が DB の値から変わったときは、旧い売上との比較で計算された売上高成長率 (同梱シード由来。
+        # EDINET の取り込みでは計算していない) を空にする。残すと、新しい売上と食い違った成長率が
+        # 表示されてしまう (取り込みの「空の値で上書きしない」原則の、意図した例外)。売上が同じ
+        # (同じ決算期の売上) なら、成長率は整合しているため残す
+        record["sales_growth"] = None
     if update_bs:
         record.update(_pick(item, BALANCE_SHEET_FIELDS))
         record.update(bs_period_end=period_end or None, bs_submitted_at=submitted)
@@ -189,6 +238,7 @@ class EdinetBridge:
             stored[code] = {
                 "period_end": merged.get("period_end", current.get("period_end")),
                 "bs_period_end": merged.get("bs_period_end", current.get("bs_period_end")),
+                "sales": merged.get("sales", current.get("sales")),
             }
             outcomes.append((item, "success"))
 

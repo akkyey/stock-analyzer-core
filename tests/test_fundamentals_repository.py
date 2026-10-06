@@ -126,3 +126,151 @@ def test_restore_missing_from_seed_fills_only_nulls(db_conn, tmp_path):
     # シード由来の値には、シードの作成日時を基準日として記録する (株式分割の補正用)
     basis = dict(db_conn.execute("SELECT code, submitted_at FROM fundamentals").fetchall())
     assert basis == {"2590": "2026-09-23 15:44", "9267": "2026-09-20 10:00"}
+
+
+# --- 同梱シードの作り直しを、既存の DB に反映する (refresh_from_seed) --------------------
+
+
+def _seed(tmp_path, rows):
+    path = tmp_path / "seed.parquet"
+    schema = {
+        "code": pl.Utf8, "sales": pl.Float64, "sales_growth": pl.Float64, "net_profit": pl.Float64,
+        "eps": pl.Float64, "dps": pl.Float64, "net_assets": pl.Float64, "bps": pl.Float64,
+        "period_end": pl.Utf8, "submitted_at": pl.Utf8, "bs_period_end": pl.Utf8, "bs_submitted_at": pl.Utf8,
+    }
+    pl.DataFrame(rows, schema=schema).write_parquet(path)
+    return path
+
+
+def _row(db_conn, code):
+    return db_conn.execute("SELECT * FROM fundamentals WHERE code = ?", [code]).pl().to_dicts()[0]
+
+
+def _seed_row(code, **kw):
+    base = {"code": code, "sales": None, "sales_growth": None, "net_profit": None, "eps": None, "dps": None,
+            "net_assets": None, "bps": None, "period_end": None, "submitted_at": None,
+            "bs_period_end": None, "bs_submitted_at": None}
+    return {**base, **kw}
+
+
+def test_refresh_from_seed_updates_old_seed_values_and_records_provenance(db_conn, tmp_path):
+    """出所の無い (旧シード由来の) 値は、新しいシードの値に更新し、出所 (決算期・提出日時) を記録する"""
+    repo = FundamentalsRepository()
+    repo.upsert([{"code": "7203", "net_profit": 1.0, "eps": None, "sales": 10.0, "sales_growth": 3.0}])
+    seed = _seed(tmp_path, [_seed_row("7203", net_profit=2.0, eps=295.25, sales=12.0, sales_growth=None,
+                                       period_end="2026-03-31", submitted_at="2026-06-18 15:38",
+                                       net_assets=5.0, bps=3062.8, bs_period_end="2026-03-31",
+                                       bs_submitted_at="2026-06-18 15:38")])
+    assert repo.refresh_from_seed(seed) == 1
+    r = _row(db_conn, "7203")
+    assert (r["net_profit"], r["eps"], r["sales"]) == (2.0, 295.25, 12.0)
+    assert (r["net_assets"], r["bps"]) == (5.0, 3062.8)
+    assert r["sales_growth"] is None  # 売上を更新したため、旧い売上との比較の成長率は空にする
+    assert (r["period_end"], r["bs_period_end"]) == ("2026-03-31", "2026-03-31")
+    assert r["submitted_at"] == "2026-06-18 15:38"
+
+
+def test_refresh_from_seed_does_not_overwrite_newer_period_or_unconfirmed_same_period(db_conn, tmp_path):
+    repo = FundamentalsRepository()
+    repo.upsert([
+        {"code": "1001", "net_profit": 9.0, "period_end": "2026-06-30", "sales": 1.0, "sales_growth": 1.5},
+        {"code": "1002", "net_profit": 8.0, "period_end": "2026-03-31", "sales": 1.0, "sales_growth": 2.5},
+    ])
+    seed = _seed(tmp_path, [
+        _seed_row("1001", net_profit=1.0, sales=2.0, period_end="2026-03-31", submitted_at="2026-06-20 10:00"),  # DB の方が新しい期
+        _seed_row("1002", net_profit=1.0, sales=2.0, period_end="2026-03-31"),  # 同じ期で、シードに提出日時が無い
+    ])
+    assert repo.refresh_from_seed(seed) == 0
+    assert _row(db_conn, "1001")["net_profit"] == 9.0 and _row(db_conn, "1001")["sales_growth"] == 1.5
+    assert _row(db_conn, "1002")["net_profit"] == 8.0 and _row(db_conn, "1002")["sales_growth"] == 2.5
+
+
+def test_refresh_from_seed_reapplies_same_document_but_not_older_amendment(db_conn, tmp_path):
+    """同じ決算期でも、シードの提出日時が DB 以降なら反映する (同じ書類を、改良したパーサーで読み直した
+    株数などを、すでに同じ期の値を持つ DB に届ける)。DB の方が新しい訂正報告書のものなら反映しない"""
+    repo = FundamentalsRepository()
+    repo.upsert([
+        {"code": "6001", "net_profit": 1.0, "shares_outstanding": 100.0, "period_end": "2026-03-31",
+         "submitted_at": "2026-06-18 15:38"},  # 同じ書類 (旧パーサーの株数)
+        {"code": "6002", "net_profit": 1.0, "shares_outstanding": 100.0, "period_end": "2026-03-31",
+         "submitted_at": "2026-09-01 10:00"},  # DB は、より新しい訂正報告書
+        {"code": "6003", "net_profit": 1.0, "period_end": "2026-03-31", "submitted_at": "2026-06-18 15:38"},
+    ])
+    seed = _seed(tmp_path, [
+        _seed_row("6001", net_profit=1.0, period_end="2026-03-31", submitted_at="2026-06-18 15:38"),
+        _seed_row("6002", net_profit=2.0, period_end="2026-03-31", submitted_at="2026-06-18 15:38"),
+        _seed_row("6003", net_profit=5.0, period_end="2026-03-31", submitted_at="2026-07-30 09:00"),  # シードの方が新しい訂正
+    ])
+    assert repo.refresh_from_seed(seed) == 2
+    assert _row(db_conn, "6001")["net_profit"] == 1.0
+    assert _row(db_conn, "6002")["net_profit"] == 1.0  # 変更しない
+    assert _row(db_conn, "6003")["net_profit"] == 5.0
+    assert _row(db_conn, "6003")["submitted_at"] == "2026-07-30 09:00"
+
+
+def test_refresh_from_seed_delivers_corrected_shares_to_a_same_period_row(db_conn, tmp_path):
+    """3443 の例: 期末後に 3 分割。旧パーサーは期末の株数 (17,474,210) を読み、新しいパーサーは提出日現在の
+    株数 (52,422,630) を読む。本番の DB は同じ期の値を持つが、シードの値で置き換わる"""
+    path = tmp_path / "seed.parquet"
+    pl.DataFrame(
+        {"code": ["3443"], "shares_outstanding": [52422630.0], "period_end": ["2026-03-31"],
+         "submitted_at": ["2026-06-19 14:00"], "bs_period_end": ["2026-03-31"], "bs_submitted_at": ["2026-06-19 14:00"]}
+    ).write_parquet(path)
+    repo = FundamentalsRepository()
+    repo.upsert([{"code": "3443", "shares_outstanding": 17474210.0, "period_end": "2026-03-31",
+                  "submitted_at": "2026-06-19 14:00", "bs_period_end": "2026-03-31",
+                  "bs_submitted_at": "2026-06-19 14:00"}])
+    assert repo.refresh_from_seed(path) == 1
+    assert _row(db_conn, "3443")["shares_outstanding"] == 52422630.0
+
+
+def test_refresh_from_seed_keeps_db_values_where_seed_is_empty(db_conn, tmp_path):
+    """シードの値が空の項目は、DB の値を消さない。売上高成長率は、売上を更新しなければ変えない"""
+    repo = FundamentalsRepository()
+    repo.upsert([{"code": "2001", "dps": 30.0, "net_profit": 1.0, "sales": 5.0, "sales_growth": 4.0}])
+    seed = _seed(tmp_path, [_seed_row("2001", net_profit=2.0, dps=None, sales=None,
+                                       period_end="2026-03-31", submitted_at="2026-06-01 10:00")])
+    assert repo.refresh_from_seed(seed) == 1
+    r = _row(db_conn, "2001")
+    assert (r["net_profit"], r["dps"], r["sales"], r["sales_growth"]) == (2.0, 30.0, 5.0, 4.0)
+
+
+def test_refresh_from_seed_skips_rows_without_source_document_and_unknown_codes(db_conn, tmp_path):
+    repo = FundamentalsRepository()
+    repo.upsert([{"code": "3001", "net_profit": 1.0}])
+    seed = _seed(tmp_path, [
+        _seed_row("3001", net_profit=7.0),  # 出所の書類が無い行 (旧シードと同じ中身)
+        _seed_row("9999", net_profit=7.0, period_end="2026-03-31"),  # DB に無い銘柄は追加しない
+    ])
+    assert repo.refresh_from_seed(seed) == 0
+    assert _row(db_conn, "3001")["net_profit"] == 1.0
+    assert repo.get_count() == 1
+
+
+def test_refresh_from_seed_balance_sheet_and_pl_are_judged_separately(db_conn, tmp_path):
+    """貸借対照表だけ新しい (半期報告書で更新済み) 場合は、損益だけ更新する"""
+    repo = FundamentalsRepository()
+    repo.upsert([{"code": "4001", "net_profit": 1.0, "net_assets": 100.0, "bs_period_end": "2026-09-30",
+                  "period_end": "2025-03-31"}])
+    seed = _seed(tmp_path, [_seed_row("4001", net_profit=2.0, net_assets=50.0, period_end="2026-03-31",
+                                       bs_period_end="2026-03-31")])
+    assert repo.refresh_from_seed(seed) == 1
+    r = _row(db_conn, "4001")
+    assert r["net_profit"] == 2.0 and r["net_assets"] == 100.0 and r["bs_period_end"] == "2026-09-30"
+
+
+def test_refresh_from_seed_old_format_seed_is_ignored(db_conn, tmp_path):
+    """出所の列が無い旧形式のシードでは、何もしない (旧シードと同じ中身を、新しい値として扱わない)"""
+    path = tmp_path / "old.parquet"
+    pl.DataFrame({"code": ["5001"], "net_profit": [2.0]}).write_parquet(path)
+    repo = FundamentalsRepository()
+    repo.upsert([{"code": "5001", "net_profit": 1.0}])
+    assert repo.refresh_from_seed(path) == 0 and repo.refresh_from_seed(tmp_path / "none.parquet") == 0
+
+
+def test_seed_fingerprint_changes_with_content(tmp_path):
+    from src.repositories.fundamentals_repository import seed_fingerprint
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.write_bytes(b"seed-1"), b.write_bytes(b"seed-2")
+    assert seed_fingerprint(a) != seed_fingerprint(b) and seed_fingerprint(a) == seed_fingerprint(a)

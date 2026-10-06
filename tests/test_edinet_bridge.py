@@ -121,6 +121,99 @@ def test_build_record_interim_older_than_stored_is_skipped():
     assert build_record(item, {"bs_period_end": "2026-03-31"}) is not None
 
 
+def test_build_record_drops_out_of_range_equity_ratio():
+    """総資産が 0 と読まれた書類 (543A) の自己資本比率 -4.08×10^10 は採用しない。
+    債務超過 (4381 の -109.1) は、実際にあり得る値なので採用する"""
+    absurd = {"code": "543A", "kind": "annual", "period_end": "2026-03-31", "equity_ratio": -40758261600.0,
+              "net_assets": -407000000.0, "total_assets": 0.0}
+    assert "equity_ratio" not in build_record(absurd, {})  # 総資産 0 のため、計算でも補えない
+    assert build_record({**absurd, "total_assets": 410795000.0, "net_assets": -447251000.0}, {})[
+        "equity_ratio"
+    ] == pytest.approx(-447251000.0 / 410795000.0 * 100.0)  # 報告値を捨て、純資産 / 総資産で補う
+    insolvent = {"code": "4381", "kind": "annual", "period_end": "2026-03-31", "equity_ratio": -109.1}
+    assert build_record(insolvent, {})["equity_ratio"] == -109.1
+    assert build_record({"code": "1", "kind": "annual", "period_end": "2026-03-31", "equity_ratio": 100.0}, {})[
+        "equity_ratio"
+    ] == 100.0
+    assert "equity_ratio" not in build_record(
+        {"code": "1", "kind": "interim", "period_end": "2026-09-30", "equity_ratio": 250.0}, {}
+    )
+
+
+def test_build_record_drops_per_share_values_of_pre_listing_document():
+    """上場前に提出された書類 (543A は発行済株式数 1 株) の EPS・BPS・DPS・株数は採用しない。
+    損益・貸借対照表の金額は、株数に依存しないため採用する"""
+    item = {"code": "543A", "kind": "annual", "period_end": "2026-03-31", "net_profit": -407000000.0,
+            "net_assets": -407000000.0, "eps": -407582617.0, "bps": -407582616.0, "dps": 0.0,
+            "shares_outstanding": 1.0}
+    rec = build_record(item, {})
+    for f in ("eps", "bps", "dps", "shares_outstanding"):
+        assert f not in rec
+    assert rec["net_profit"] == -407000000.0 and rec["net_assets"] == -407000000.0
+    normal = {**item, "eps": 295.25, "bps": 3062.82, "dps": 95.0, "shares_outstanding": 15794987460.0,
+              "net_assets": 4.84e13}  # トヨタの規模 (純資産 ≒ 株数 × BPS)
+    assert build_record(normal, {})["eps"] == 295.25
+    # 半期報告書でも同じ (貸借対照表側の bps・株数)
+    interim = {"code": "543A", "kind": "interim", "period_end": "2026-09-30", "bps": 5.0, "shares_outstanding": 10.0,
+               "net_assets": 100.0}
+    rec = build_record(interim, {})
+    assert "bps" not in rec and "shares_outstanding" not in rec and rec["net_assets"] == 100.0
+
+
+def test_build_record_drops_per_share_values_inconsistent_with_share_count():
+    """提出日現在の株数が正常 (27 億株) でも、EPS・BPS が上場前の 1 株の基準 (約 -4 億円) のままの書類
+    (543A) は、1 株当たりの値を採用しない。株数と純資産は、使えるので残す"""
+    item = {"code": "543A", "kind": "annual", "period_end": "2026-03-31", "net_profit": -407000000.0,
+            "net_assets": -407000000.0, "eps": -407582617.0, "bps": -407582616.0, "dps": 0.0,
+            "shares_outstanding": 2756582628.0}
+    rec = build_record(item, {})
+    for f in ("eps", "bps", "dps"):
+        assert f not in rec
+    assert rec["shares_outstanding"] == 2756582628.0 and rec["net_assets"] == -407000000.0
+
+
+def test_build_record_keeps_per_share_values_in_legitimate_odd_cases():
+    """親会社の持分が負で、純資産は正 (非支配株主持分など) の銘柄 (3175 の例)、自己株式による数倍のずれは、
+    実在し得る値なので、1 株当たりの値を採用する"""
+    negative_parent = {"code": "3175", "kind": "annual", "period_end": "2026-03-31", "net_assets": 1.1249e9,
+                       "eps": 84.49, "bps": -18.46, "shares_outstanding": 1.288445e7}
+    assert build_record(negative_parent, {})["bps"] == -18.46
+    treasury = {"code": "7931", "kind": "annual", "period_end": "2026-03-31", "net_assets": 5.6262e10,
+                "eps": 290.73, "bps": 3430.96, "shares_outstanding": 2.5607086e7}
+    assert build_record(treasury, {})["eps"] == 290.73
+    # BPS が 0・空のときは判定しない
+    assert build_record({**treasury, "bps": 0.0}, {})["eps"] == 290.73
+
+
+def test_sales_growth_is_cleared_only_when_sales_changes(bridge, db_conn):
+    """売上が DB の値から変わったときだけ、旧い売上との比較の売上高成長率 (シード由来) を空にする。
+    同じ決算期の売上 (同じ値) なら成長率は整合しているため残す。売上を取れなかった書類でも変えない"""
+    FundamentalsRepository().upsert(
+        [{"code": "1381", "sales": 2.6426e10, "sales_growth": 2.28, "profit_growth": 5.0},
+         {"code": "1414", "sales": 9.0e10, "sales_growth": 6.2},
+         {"code": "1500", "sales": 7.0e9, "sales_growth": 1.1}]
+    )
+    common = {"kind": "annual", "period_end": "2026-03-31", "submit_date": "2026-06-20 15:00"}
+    _write(bridge, "1381_annual.json", {"code": "1381", **common, "sales": 2.9244e10})  # 売上が変わった
+    _write(bridge, "1414_annual.json", {"code": "1414", **common, "net_profit": 1.0e9})  # 売上は取れず
+    _write(bridge, "1500_annual.json", {"code": "1500", **common, "sales": 7.0e9, "net_profit": 1.0})  # 同じ売上
+    bridge.bridge_all()
+    with bridge.repository.duck_repo.client.get_connection() as conn:
+        a, b, c = _fund(conn, "1381"), _fund(conn, "1414"), _fund(conn, "1500")
+    assert a["sales"] == 2.9244e10 and a["sales_growth"] is None
+    assert a["profit_growth"] == 5.0  # 他の項目は変えない
+    assert b["sales_growth"] == 6.2
+    assert c["sales_growth"] == 1.1
+
+
+def test_sales_growth_is_kept_when_stored_sales_is_unknown():
+    """DB に売上が無い場合は、比較できないため成長率に触れない"""
+    item = {"code": "1", "kind": "annual", "period_end": "2026-03-31", "sales": 5.0}
+    assert "sales_growth" not in build_record(item, {})
+    assert build_record(item, {"sales": 4.0})["sales_growth"] is None
+    assert "sales_growth" not in build_record(item, {"sales": 5.0})
+
+
 # --- 書類の選択 -------------------------------------------------------------
 
 

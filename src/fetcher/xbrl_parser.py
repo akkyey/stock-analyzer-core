@@ -24,12 +24,18 @@ from typing import Any, Dict, Optional
 import lxml.etree as et
 
 # 抽出ロジックを変えたら上げる。古い版で処理した書類は取り込み直す
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 KIND_ANNUAL = "annual"
 KIND_INTERIM = "interim"
 
 NON_CONSOLIDATED = "_NonConsolidatedMember"
+
+# 提出日現在の発行済株式数 (全株式の合計。株式の種類ごとの値は、メンバー付きのコンテキストで別に報告される)。
+# 有価証券報告書の 1 株当たり純資産・当期純利益は、期末後・提出前の株式分割や併合を反映して算定し直されるため、
+# 期末時点の株数 (要約表) ではなく、この値と基準が揃う
+FILING_DATE_SHARES_TAG = "NumberOfIssuedSharesAsOfFilingDateIssuedSharesTotalNumberOfSharesEtc"
+FILING_DATE_CONTEXT = "FilingDateInstant"
 
 # 期間ごとのコンテキスト名
 _CONTEXTS = {
@@ -309,6 +315,11 @@ class XbrlParser:
             value = lookup(names, base_ctx, allow_nc)
             if value is not None:
                 extracted[field] = value * 100.0 if field in self.RATIO_FIELDS else value
+
+        # 発行済株式数は、提出日現在の値を優先する (無ければ、要約表の期末時点の値)
+        filing_shares = facts.get((FILING_DATE_SHARES_TAG, FILING_DATE_CONTEXT))
+        if filing_shares is not None and filing_shares > 0:
+            extracted["shares_outstanding"] = filing_shares
 
         if kind == KIND_INTERIM:
             extracted = {k: v for k, v in extracted.items() if k in self.INTERIM_FIELDS}

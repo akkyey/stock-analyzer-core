@@ -92,6 +92,18 @@ class DuckDBClient:
                 },
             )
             return conn
+        except duckdb.ConnectionException as e:
+            if "different configuration" in str(e):
+                # 別のセルで DB を読み取り専用などで開いたまま閉じていない場合 (Colab で起きる)
+                raise duckdb.ConnectionException(
+                    "【DB の接続が、別のセルに残っています】同じ DB を、別の設定 (読み取り専用など) で"
+                    "開いたままのセルがあるため、開けません。確認用のセルなどで duckdb.connect(...) を"
+                    "開いたままにしていないか確認し、`with duckdb.connect(...) as con:` の形で必ず閉じるか、"
+                    "ランタイムを再起動してください (保存済みのデータは壊れていません)。\n"
+                    f"元のエラー: {e}"
+                ) from e
+            logger.error(f"Failed to connect to DuckDB: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to connect to DuckDB: {e}")
             raise
