@@ -1,3 +1,14 @@
+---
+title: Google Drive上のDuckDB直叩きで遅延とロック破損に直面した話：ColabとDrive間のPull/Push 2層ストレージ設計
+tags:
+  - Python
+  - GoogleColaboratory
+  - DuckDB
+  - GoogleDrive
+  - アーキテクチャ
+private: false
+---
+
 # Google Drive上のDuckDB直叩きで遅延とロック破損に直面した話：ColabとDrive間のPull/Push 2層ストレージ設計
 
 ## 3行要約
