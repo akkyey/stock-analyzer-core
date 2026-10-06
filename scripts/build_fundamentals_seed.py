@@ -39,6 +39,25 @@ SEED_PATH = REPO_ROOT / "src" / "resources" / "fundamentals_seed.parquet"
 
 PROVENANCE_COLUMNS = ["period_end", "submitted_at", "bs_period_end", "bs_submitted_at"]
 
+UNVERIFIED_COLUMNS = [
+    "operating_cf",
+    "free_cf",
+    "payout_ratio",
+    "payout_status",
+    "current_ratio",
+    "quick_ratio",
+    "debt_equity_ratio",
+    "sales_status",
+    "profit_status",
+    "is_turnaround",
+    "turnaround_status",
+    "profit_growth",
+    "profit_growth_raw",
+    "sales_growth",
+    "repair_metadata",
+    "fetch_status",
+]
+
 
 def assemble_seed(df, base_seed, listed: set[str] | None):
     """DB の fundamentals (df) から、シードの列構成の DataFrame を組み立てる。
@@ -76,7 +95,12 @@ def assemble_seed(df, base_seed, listed: set[str] | None):
 
 
 def build(
-    work_dir: Path, out_path: Path, days: int, seed_path: Path = SEED_PATH, reuse: bool = False
+    work_dir: Path,
+    out_path: Path,
+    days: int,
+    seed_path: Path = SEED_PATH,
+    reuse: bool = False,
+    drop_unverified: bool = True,
 ) -> dict:
     """シードを作り直し、out_path に書き出して、件数の概要を返す。"""
     if work_dir.exists() and any(work_dir.iterdir()) and not reuse:
@@ -135,6 +159,10 @@ def build(
     out, dropped = assemble_seed(df, base_seed, _listed_codes(config))
     if dropped is not None:
         print(f"      銘柄マスタに無い提出者 {dropped} 件を除きました", flush=True)
+    if drop_unverified:
+        cols_to_null = [c for c in UNVERIFIED_COLUMNS if c in out.columns]
+        out = out.with_columns([pl.lit(None, dtype=out.schema[c]).alias(c) for c in cols_to_null])
+        print(f"      出所未確認の {len(cols_to_null)} 列を安全化 (空) にしました", flush=True)
     out.write_parquet(str(out_path))
     print(f"[3/3] {applied} 件の書類を反映し、{out.height} 銘柄を {out_path} へ書き出しました", flush=True)
     return {
@@ -170,9 +198,19 @@ def main() -> None:
         "出所の列を持つ (作り直し済みの) シードも指定できる",
     )
     parser.add_argument("--reuse", action="store_true", help="空でない作業ディレクトリを使う (開発用)")
+    parser.add_argument(
+        "--keep-unverified",
+        action="store_true",
+        help="出所未確認の列を空にせず、土台の値を引き継ぐ (既定は安全のためすべて空にする)",
+    )
     args = parser.parse_args()
     build(
-        args.work_dir.resolve(), args.out.resolve(), args.days, seed_path=args.base_seed.resolve(), reuse=args.reuse
+        args.work_dir.resolve(),
+        args.out.resolve(),
+        args.days,
+        seed_path=args.base_seed.resolve(),
+        reuse=args.reuse,
+        drop_unverified=not args.keep_unverified,
     )
 
 
