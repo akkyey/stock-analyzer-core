@@ -1,24 +1,40 @@
 ---
-title: "!git clone で配布したColabが本番で動かなくなる理由：再実行に強い環境セットアップと依存解決"
+title: "Colabで再実行時の「fatal: destination path already exists」を防ぐ：GitHubリポジトリの安全なクローン・実行セットアップ設計"
 tags:
   - Python
   - GoogleColaboratory
   - Git
   - GitHub
-  - アーキテクチャ
 private: false
 ---
 
-## TL;DR
-- Google Colab で GitHub リポジトリをクローンして実行させる配布モデルでは、再実行時の既存パス衝突、タグ未反映によるエラー中断、作業ディレクトリ消失によるインポートエラーが頻発する
-- カレントディレクトリを `/content` に固定したクリーンアップ、`--depth 1` による履歴を省いたクローン、タグ事前確認による main ブランチ代替取得を組み合わせたセットアップ処理にする
-- これにより、ユーザーにコマンド操作を要求せず、ボタン1つで安定版コードと依存関係を展開できる起動基盤を確保できる
+## TL;DR: 結論だけ知りたい方へ（今すぐエラーを防ぐ最小コード）
+
+セルの再実行で `fatal: destination path 'my-tool' already exists and is not an empty directory.` が出て困っている場合は、クローン直前に **カレントディレクトリを `/content` に戻して既存フォルダを削除する** 以下の数行をセルの先頭に追加してください。
+
+```python
+import os, shutil
+
+# 1. カレントディレクトリを必ず /content に戻す（迷子防止）
+os.chdir("/content")
+
+# 2. 既にフォルダが存在していれば削除する（再実行時の衝突防止）
+TARGET_DIR = "/content/my-tool"
+if os.path.exists(TARGET_DIR):
+    shutil.rmtree(TARGET_DIR, ignore_errors=True)
+
+# 3. クローン実行
+!git clone https://github.com/my-org/my-tool.git {TARGET_DIR}
+```
+
+> **これだけでは不十分なケースとは？**  
+> 個人利用の単発スクリプトであれば上記で足りますが、**「モジュール更新がメモリに残って反映されない（`sys.modules` キャッシュ問題）」「配布相手の環境でタグ不在や通信切断で止まる」「プライベートリポジトリの認証トークンが残る」** といった実践的な課題を解決するには、追加の考慮が必要です。本稿ではこれらを堅牢に解決する設計と完全なコードを解説します。
 
 :::note info
 **【Colab実運用基盤シリーズ】**
-- **第1弾（データ永続化編）**: [Google Drive上のDuckDBを直接読み書きして遅延とロック破損が起きた話：ColabとDrive間のデータステージング（2層ストレージ）設計](qiita_part6_colab_ephemeral_storage_architecture.md)
+- **第1弾（データ永続化編）**: [Google ColabでGoogle Drive上のSQLite / DuckDBが遅い・ロック破損する問題と、ローカルディスクを使ったデータステージング設計](qiita_part6_colab_ephemeral_storage_architecture.md)
 <!-- ※ 第1弾公開後に実際のQiita URLへ差し替えてください -->
-- **第2弾（コード配布編・本作）**: !git clone で配布したColabが本番で動かなくなる理由：再実行に強い環境セットアップと依存解決
+- **第2弾（コード配布編・本作）**: Colabで再実行時の「fatal: destination path already exists」を防ぐ：GitHubリポジトリの安全なクローン・実行セットアップ設計
 :::
 
 ---
