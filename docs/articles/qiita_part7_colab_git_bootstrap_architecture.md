@@ -97,8 +97,6 @@ Colab ノートブックのカーネルは、単一の持続的な Python プロ
 2. **`sys.modules` によるモジュールキャッシュの残存**:
    Python のインポート機構（`importlib`）は、一度読み込んだモジュールをプロセス空間の辞書 `sys.modules` にキャッシュします。ファイルシステム上の `.py` ファイルを新バージョンでクローンし直しても、Python はディスクを再走査せずメモリ上の古いモジュールを返し続けます。その結果、セルの再実行を行っても最新のバグ修正が反映されず、新設された関数が見つからない `AttributeError` や古いロジックによる不整合が発生します。
 
-[^idempotency-note]: **冪等性（Idempotency / べきとうせい）**: ある操作を1回実行しても、複数回繰り返して実行しても、得られる結果やシステムの状態が全く同一になる性質のこと。
-
 ---
 
 ## 第4章：どう設計し直したか（再実行に強い環境セットアップ）
@@ -146,7 +144,7 @@ flowchart TD
 
 ## 第5章：実装のポイントとコード
 
-ここまでに整理した設計を、Google Colab 上でそのまま動作確認できるようにまとめた完全なセットアップコードです。
+ここまでに整理した設計を、Google Colab 上でそのまま動作確認できるようにまとめた動作確認用のセットアップコードです。
 
 ノートブックの1つのセルに貼り付け、上部のパラメータ（`REPO_URL` やタグ名）をご自身のリポジトリに合わせて設定して実行してください。クローン、依存関係のインストール、モジュールキャッシュの破棄、パス解決までが一気通貫で完了します。
 
@@ -160,6 +158,7 @@ ALLOW_MAIN_FALLBACK = False  # @param {type:"boolean"}
 TARGET_DIR = "/content/my-tool"
 PACKAGE_NAME = "src"  # 読み込むパッケージフォルダ名（例: src または my_tool）
 
+import importlib
 import os
 import re
 import shutil
@@ -259,10 +258,16 @@ if TARGET_DIR not in sys.path:
 
 # 7. エントリポイントのインポート確認
 try:
-    from src.main import run_pipeline
-    print("✅ エントリポイントのインポートに成功しました。")
-except ImportError:
-    print("ℹ️ エントリポイントのインポートはスキップしました（ご自身のリポジトリ構造に合わせて書き換えてください）。")
+    main_mod = importlib.import_module(f"{PACKAGE_NAME}.main")
+    run_pipeline = getattr(main_mod, "run_pipeline", None)
+    print(f"✅ エントリポイント（{PACKAGE_NAME}.main）のインポートに成功しました。")
+except ModuleNotFoundError as e:
+    # パッケージまたは main モジュール自体が存在しない場合のみスキップ
+    if e.name in (PACKAGE_NAME, f"{PACKAGE_NAME}.main"):
+        print(f"ℹ️ {PACKAGE_NAME}.main が見つからないため、インポートをスキップしました（ご自身のリポジトリ構造に合わせて書き換えてください）。")
+    else:
+        # 依存ライブラリ等の読み込み失敗は本物のエラーとして再送出
+        raise
 
 print("✅ セットアップが完了しました。")
 ```
@@ -277,7 +282,7 @@ print("✅ セットアップが完了しました。")
 3. **フォームを整えてコードを隠す（任意）**:
    - セルの右上メニュー（縦三点リーダー）から「フォーム」➔「コードを非表示」を選択すると、一般利用者の画面には生コードが隠れ、タイトルと入力フォーム（実行ボタン）だけが表示された綺麗な UI として配布できます。
 4. **後続セル（Step 2）から実行**:
-   - 次のセル（Step 2）を作成し、`from src.main import run_pipeline; run_pipeline()` のように呼び出せば、クローンされたコードがそのまま動作します。
+   - 次のセル（Step 2）を作成し、`from {PACKAGE_NAME}.main import run_pipeline; run_pipeline()`（例: `from src.main import run_pipeline; run_pipeline()`）のように呼び出せば、クローンされたコードがそのまま動作します。
 
 :::note info
 パッケージ名（ここでは `src`）は、サードパーティ製ライブラリと重複しない固有のパッケージ名（例: `my_tool`）にしておくと、名前空間の衝突をより確実に防ぐことができます。

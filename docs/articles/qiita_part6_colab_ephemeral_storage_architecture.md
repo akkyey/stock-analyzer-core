@@ -261,7 +261,11 @@ def pull_phase(fresh: bool = False) -> Path:
     if PUSH_MARKER.exists():
         interrupted_run = PUSH_MARKER.read_text(encoding="utf-8").strip()
         print(f"⚠️ 前回のPush処理（run_id: {interrupted_run}）が途中で中断しています。")
-        print("成果物フォルダに中途半端なファイルが残っている可能性があるため、確認の上クリーンアップします。")
+        print("成果物フォルダに中途半端なファイルが残っている可能性があるため、クリーンアップします。")
+        for stale in (DRIVE_DIR / "output").glob(f"*{interrupted_run}*"):
+            if stale.is_file():
+                stale.unlink(missing_ok=True)
+                print(f"  -> 中断された成果物を削除: {stale.name}")
         PUSH_MARKER.unlink(missing_ok=True)
 
     # 前回セッションの残骸を作業層（ローカル）から除去
@@ -397,7 +401,7 @@ Google Drive には書き込みを行っていないため、書きかけの欠�
 
 - **進行中マーカー（`_push_in_progress`）による未完了検知**:
   Push の開始直前に、Google Drive の `output` フォルダへ `_push_in_progress`（中身は実行ID）を書き込み、DB の置換完了後に削除します。
-  作業層（ローカル）の DB 内にステータスを書き込む方式では、Push 途中で切断された場合に Drive 側には旧版 DB しか残らず、前回のバッチが途中で失敗したこと自体を次回起動時に検知できません。Drive 側にマーカーファイルを置くことで、次回起動時（`pull_phase`）にマーカーの残存を調べ、「前回の Push が途中で切れた」と確実に判断できます。検知時は中途半端な成果物の整理を行い、健全な旧版 DB から安全に再実行できます。
+  作業層（ローカル）の DB 内にステータスを書き込む方式では、Push 途中で切断された場合に Drive 側には旧版 DB しか残らず、前回のバッチが途中で失敗したこと自体を次回起動時に検知できません。Drive 側にマーカーファイルを置くことで、次回起動時（`pull_phase`）にマーカーの残存を調べ、「前回の Push が途中で切れた」と高精度に検知できます（※FUSE の書き込み順序や反映遅延があるためベストエフォートとなります）。検知時は中途半端な成果物の整理を行い、健全な旧版 DB から安全に再実行できます。
 - **成果物先行・DB末尾置換の順序制御**:
   CSV やレポート等の成果物を先に同期し、マスタである DB ファイルの置換を一番最後に行います。成果物のコピー途中で切断された場合、一部の成果物は反映されるものの、**DB 本体は旧版のまま維持** されます。
 - **一時ファイル（`.tmp`）経由の置換（`_safe_replace`）**:
