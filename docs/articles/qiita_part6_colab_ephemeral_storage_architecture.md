@@ -17,7 +17,7 @@ private: false
 :::note info
 **【Colab実運用基盤シリーズ】**
 - **第1弾（データ永続化編・本作）**: Google Drive上のDuckDBを直接読み書きして遅延とロック破損が起きた話：ColabとDrive間のデータステージング（2層ストレージ）設計
-- **第2弾（コード配布編）**: [!git clone で配布したColabが本番で動かなくなる理由：壊れないブートストラップ設計と依存解決](qiita_part7_colab_git_bootstrap_architecture.md)
+- **第2弾（コード配布編）**: [!git clone で配布したColabが本番で動かなくなる理由：再実行に強い環境セットアップと依存解決](qiita_part7_colab_git_bootstrap_architecture.md)
 <!-- ※ 第2弾公開後に実際のQiita URLへ差し替えてください -->
 :::
 
@@ -40,7 +40,7 @@ private: false
 
 ---
 
-## 第1章：初期の設計と、暗黙の前提
+## 第1章：よくある書き方と、見落としていたこと
 
 Colab 上でデータを失わずにバッチ処理を実行する最もシンプルなアプローチは、Google Drive をマウントし、そのディレクトリ上に直接データベースや成果物を出力する構成です。
 
@@ -89,11 +89,11 @@ con.execute(
 con.close()
 ```
 
-この初期設計の背景には、以下のような「暗黙の前提（無意識の思い込み）」が存在していました。
+この初期設計には、次のような都合のよい想定（思い込み）がありました。
 
-- **前提 1（ストレージ透過性の前提）**: マウントされた Google Drive（FUSE ファイルシステム[^fuse-note]）はローカルファイルシステムと同等に扱える。データベースファイル（SQLite、DuckDB、Parquet 等）を Drive 配下に直接配置して読み書きを行っても、整合性と実用的な速度が維持される
-- **前提 2（逐次同期の前提）**: 処理の進行に伴い、生成されたファイルや更新されたレコードを都度 Google Drive 上に直接書き込むことで、セッションの突然死（タイムアウトや切断）に対する耐性が最も高くなる
-- **前提 3（即時永続化の前提）**: Python プログラム側でファイルクローズや書き込み処理が正常終了した時点で、クラウドストレージ側（Google Drive）にもデータが即座に同期・永続化されている
+- **「Google Drive はローカルと同じように扱える」という想定**: マウントされた Google Drive（FUSE ファイルシステム[^fuse-note]）は普通のフォルダに見えるため、データベースファイル（DuckDB や SQLite）を直接配置して読み書きしても問題なく動くと思い込んでいた
+- **「都度保存すれば安全」という想定**: 処理の進行に合わせて生成ファイルやレコードを1件ずつ Google Drive に直接書き込めば、途中でセッションが切れても安全だと思い込んでいた
+- **「close() すれば保存されている」という想定**: Python プログラム側でファイルや DB 接続を閉じれば、その瞬間にクラウドストレージ側（Google Drive）にもデータが確実に保存されていると思い込んでいた
 
 [^ephemeral-note]: **エフェメラル（Ephemeral）**: 「一時的な」「短命な」という意味の英単語。クラウドや仮想環境において、インスタンスの停止やセッション切断とともに保存データやインストール環境がすべて消滅・初期化される「使い捨て」の実行環境を指します。
 [^fuse-note]: **FUSE（Filesystem in Userspace）**: Linux のカーネルを変更せずに、ユーザー空間のプログラムを経由してファイルシステムを構築する仕組み。Colab の Google Drive マウントは、クラウドストレージの API 呼び出しをローカルのディレクトリ操作のように見せかけているため、通信の往復遅延やロックセマンティクスの制限がローカルディスクと大きく異なります。
@@ -102,7 +102,7 @@ con.close()
 
 ## 第2章：Google Driveへの直接I/Oで起きた3つのトラブル
 
-東証全銘柄（約3,900銘柄）のデータ処理を Colab 無料枠（CPU）で上記前提のもと実行したところ、運用上見過ごせない3つのトラブルが発生しました。
+東証全銘柄（約3,900銘柄）のデータ処理を Colab 無料枠（CPU）で上記の想定のもと実行したところ、運用上見過ごせない3つのトラブルが発生しました。
 
 ### 1. FUSE 経由の大きなI/O遅延とロック破損
 Google Drive を `/content/drive` にマウントし、その配下に配置した組込み型リレーショナルデータベース（DuckDB）に対して直接接続と更新を試みた際、ローカル環境と比較して以下の乖離が発生しました。
@@ -116,9 +116,9 @@ Google Drive を `/content/drive` にマウントし、その配下に配置し�
 - ランタイム再起動時、ロックファイル（`.wal`[^wal-note] やロックフラグ）の開放遅延による接続拒否
 
 ### 2. セッション切断時の不完全な書き込み
-前述のように逐次同期を前提とし、Drive 上の出力フォルダへ個別レポートを1件ずつ直接書き込んでいた際、ループの途中でセッションが切断されると「全3,900件中1,200件だけ出力され、残りの2,700件が欠損した書きかけフォルダ」が永続層に残存しました。
+前述のように都度保存する想定で、Drive 上の出力フォルダへ個別レポートを1件ずつ直接書き込んでいた際、ループの途中でセッションが切断されると「全3,900件中1,200件だけ出力され、残りの2,700件が欠損した書きかけフォルダ」が永続層に残存しました。
 
-次回起動時にパイプラインを実行すると、過去の正常なキャッシュなのか、前回の異常中断で中途半端に残ったファイル群なのかをプログラムが識別できず、欠損データを前提に後続の集計処理が進んで計算結果の不整合が生じる現象が発生しました。
+次回起動時にパイプラインを実行すると、過去の正常なキャッシュなのか、前回の異常中断で中途半端に残ったファイル群なのかをプログラムが識別できず、欠損データをそのまま使って後続の集計処理が進んで計算結果の不整合が生じる現象が発生しました。
 
 ### 3. 正常終了したはずなのにデータが蒸発（未反映・先祖返り）
 Python のコード上で `con.close()` や `file.close()` が完了し、コンソール上にはエラーなく正常終了と表示されたため、処理が終わったと判断してブラウザを閉じた（または放置してセッションがタイムアウトした）ところ、不可解な現象が発生しました。
@@ -133,7 +133,7 @@ Python のコード上で `con.close()` や `file.close()` が完了し、コン
 
 ## 第3章：なぜFUSEでDBを動かすと失敗するのか
 
-起きていた問題の原因を掘り下げると、Colab と Google Drive の仕組みに対する前提そのものに構造的な無理がありました。
+起きていた問題の原因を掘り下げると、Colab と Google Drive の仕組みに対する理解が足りず、無理な使い方をしてしまっていました。
 
 ### 1. ローカルブロックデバイスと FUSE（クラウド連携）の構造的差異
 
@@ -171,10 +171,10 @@ Python のコード上で `file.close()` や `con.close()` を呼んでも、FUS
 - **FUSE特性を活かした Stage-in（一括読み込み・Pull）フロー**:
   バッチ開始時に、Google Drive からマスタDB（`app_data.duckdb`）をローカル作業層へ一括コピー（シーケンシャルリード）します。
   - **FUSE 特性の活用**: 第3章で示した通り、FUSE はランダムアクセスには弱い一方、シーケンシャルな一括読み込みであれば安定したスループットを発揮します。起動時に1回だけ一括転送することで、計算実行中のクエリ遅延を解消します
-  - **残存 WAL 検知とローカル初期化**: 作業層に残る前回セッションの残骸をクリーンアップした上で、永続層側に過去の異常終了による `.wal` が残存していないかを検証し、健全なマスタDBを作業層へ展開します
+  - **未完了マーカー検知と残存 WAL チェック**: 作業層に残る前回セッションの残骸をクリーンアップした上で、永続層側に前回Pushの中断痕跡（`_push_in_progress`）や過去の異常終了による `.wal` が残存していないかを検証し、健全なマスタDBを作業層へ展開します
   - **永続層の保護（Read-only 動作）**: Pull フェーズは永続層に対して読み取り専用として動作するため、ファイルロックを取得せず、仮に転送途中で切断されても永続層のデータは破損しません
 - **安全な Stage-out（一括書き戻し・Push）フロー**:
-  全処理が正常完了した段階で、生成された成果物と更新済み DB を作業層から永続層へ一括コピー（シーケンシャルライト）します。Push 処理中の切断に備え、「成果物の先行同期 ➔ 直前DBの `.bak` 退避 ➔ 一時ファイル（`.tmp`）経由でのDB末尾置換 ➔ 明示的フラッシュ（`flush_and_unmount`）」という順序制御を敷きます
+  全処理が正常完了した段階で、生成された成果物と更新済み DB を作業層から永続層へ一括コピー（シーケンシャルライト）します。Push 処理中の切断に備え、「進行中マーカー（`_push_in_progress`）の配置 ➔ 成果物の先行同期 ➔ 直前DBの `.bak` 退避 ➔ 一時ファイル（`.tmp`）経由でのDB末尾置換 ➔ マーカー削除 ➔ 明示的フラッシュ（`flush_and_unmount`）」という順序制御を敷きます
 
 [^staging-note]: **データステージング（Data Staging）**: クラウドや HPC（科学技術計算等）のバッチ処理において、低速な永続ストレージ（S3 や Google Drive 等）から高速な計算ノードのローカル作業ディスクへ処理前にデータを一括転送（Stage-in）し、計算終了後に成果物だけを一括書き戻す（Stage-out）標準的なアーキテクチャパターン。
 
@@ -183,6 +183,7 @@ flowchart LR
     subgraph Persistent["永続層（Google Drive）"]
         DriveDB["永続データベース<br/>(Master / Cache)"]
         DriveOut["最終成果物<br/>(CSV / Reports)"]
+        DriveMarker["進行中マーカー<br/>(_push_in_progress)"]
     end
 
     subgraph Ephemeral["作業層（Colab ローカルディスク: /content/working）"]
@@ -192,13 +193,14 @@ flowchart LR
         LocalOut["生成成果物<br/>(Staging Output)"]
     end
 
-    DriveDB -- "【Step 2】Pull Phase<br/>(一括取得・残存WALチェック)" --> LocalDB
+    DriveDB -- "【Step 2】Pull Phase<br/>(一括取得・未完了/WAL検証)" --> LocalDB
     LocalDB --> LocalWork --> LocalOut
-    LocalOut -- "【Step 4】Push Phase (1)<br/>(成果物を先行コピー)" --> DriveOut
-    LocalDB -- "【Step 4】Push Phase (2)<br/>(DBを末尾で置換)" --> DriveDB
+    LocalOut -- "【Step 4】Push Phase (1)<br/>(マーカー作成 ＆ 成果物を先行コピー)" --> DriveOut
+    LocalDB -- "【Step 4】Push Phase (2)<br/>(DBを末尾置換 ＆ マーカー削除)" --> DriveDB
 
     style DriveDB fill:#f0f4f8,stroke:#4a6fa5,stroke-width:1px,color:#333
     style DriveOut fill:#f0f4f8,stroke:#4a6fa5,stroke-width:1px,color:#333
+    style DriveMarker fill:#fff3e0,stroke:#e65100,stroke-width:1px,color:#333
     style LocalDB fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#333
     style LocalWork fill:#fffde7,stroke:#fbc02d,stroke-width:1px,color:#333
     style LocalOut fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#333
@@ -208,26 +210,36 @@ flowchart LR
 
 ## 第5章：実装のポイントとコード
 
-### 1. 2層ストレージの Pull/Push 同期（成果物先行・DB末尾置換）
+ここまでに整理したステージング設計を、Google Colab 上でそのまま動作確認できるようにまとめたコードです。
 
-開始時に永続層から作業層へ必要な資産を一括展開（Stage-in / Pull）し、終了時に作業層から永続層へ成果物を一括同期（Stage-out / Push）します。
+Google Drive のマウントから、ローカルディスクへの展開（Stage-in / Pull）、サンプルの集計処理、成果物の一括同期（Stage-out / Push）、キャッシュフラッシュまでを一気通貫で実行できます。ノートブックのセルに貼り付け、そのまま実行してください。
 
-- **Pull Phase**: 永続層（Drive）に対しては読み取り専用として振る舞い、残存 `.wal` を検知した上で作業層へコピーします
-- **Push Phase**: 途中で切断されても「DBは旧版のまま」残るよう、成果物を先に同期し、DB を最後に置換します。直前世代の DB は `.bak` として保存します
+### コードのポイント
+- **Pull Phase**: 永続層（Drive）に対しては読み取り専用として振る舞い、前回Pushの中断痕跡（`_push_in_progress`）や残存 `.wal` を検知した上で作業層へコピーします
+- **Compute Phase**: 高速なローカルディスク（`/content/working`）上で計算処理と DB 更新を完結させ、例外発生時は Push をスキップして永続層を保護します
+- **Push Phase**: 途中で切断されても「DBは旧版のまま」残るよう、進行中マーカー配置 ➔ 成果物の先行同期 ➔ DB置換 ➔ マーカー削除の順序で同期します。直前世代の DB は `.bak` として保存します
 
-```python:stage_and_sync.py
-import shutil
+```python:colab_staging_pipeline.py
+# @title 【Step 2〜4】2層ストレージ・ステージングパイプライン
 from pathlib import Path
+from datetime import datetime
+import shutil
 import duckdb
+from google.colab import drive
 
+# 1. Google Drive のマウント
+drive.mount("/content/drive")
+
+# パス定義
 DRIVE_DIR = Path("/content/drive/MyDrive/AppStorage")
 WORKING_DIR = Path("/content/working")
 DB_NAME = "app_data.duckdb"
+PUSH_MARKER = DRIVE_DIR / "output" / "_push_in_progress"
 
 
 def _safe_replace(src: Path, dest: Path) -> None:
     """同一フォルダ内の一時ファイル経由で置換する。
-    ※Drive(FUSE)上での rename の原子性（中途半端な状態を残さず瞬時に置き換わる性質）は完全には保証されないため、
+    ※Drive(FUSE)上での rename の原子性は完全には保証されないため、
       「書きかけファイルを本番名で直接参照させない」ためのベストエフォート策。
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -238,14 +250,21 @@ def _safe_replace(src: Path, dest: Path) -> None:
 
 def pull_phase(fresh: bool = False) -> Path:
     """永続層 → 作業層 (Pull)。fresh=True なら空のDBから開始する。
-    永続層(Drive)には書き込まない。"""
+    永続層(Drive)のDBには書き込まない。"""
     for sub in ("cache", "output"):
         (WORKING_DIR / sub).mkdir(parents=True, exist_ok=True)
 
     drive_db = DRIVE_DIR / "cache" / DB_NAME
     local_db = WORKING_DIR / "cache" / DB_NAME
 
-    # 前回セッションの残骸を作業層から除去
+    # 前回のPushが途中で中断したかチェック（Drive側のマーカーファイルの有無）
+    if PUSH_MARKER.exists():
+        interrupted_run = PUSH_MARKER.read_text(encoding="utf-8").strip()
+        print(f"⚠️ 前回のPush処理（run_id: {interrupted_run}）が途中で中断しています。")
+        print("成果物フォルダに中途半端なファイルが残っている可能性があるため、確認の上クリーンアップします。")
+        PUSH_MARKER.unlink(missing_ok=True)
+
+    # 前回セッションの残骸を作業層（ローカル）から除去
     for p in (local_db, local_db.with_name(local_db.name + ".wal")):
         p.unlink(missing_ok=True)
 
@@ -259,47 +278,66 @@ def pull_phase(fresh: bool = False) -> Path:
     return local_db
 
 
-def push_phase(local_db_path: Path) -> None:
+def push_phase(local_db_path: Path, run_id: str) -> None:
     """作業層 → 永続層 (Push)。
-    成果物を先に、DBを最後に置換する。途中で切断されても
-    DBは旧版のまま維持されるため、次回は前回正常時点から再実行できる。"""
-    # (1) 成果物の先行同期
+    マーカー配置 ➔ 成果物同期 ➔ DB置換 ➔ マーカー削除の順序で同期する。
+    途中で切断されてもDBは旧版のまま維持され、次回起動時に中断を検知できる。"""
+    (DRIVE_DIR / "output").mkdir(parents=True, exist_ok=True)
+
+    # (1) 同期開始マーカーの作成（中身は run_id）
+    PUSH_MARKER.write_text(run_id, encoding="utf-8")
+
+    # (2) 成果物の先行同期
     for out_file in (WORKING_DIR / "output").glob("*"):
         if out_file.is_file():
             _safe_replace(out_file, DRIVE_DIR / "output" / out_file.name)
 
-    # (2) DBの置換（最後に置換。直前世代を .bak として退避）
+    # (3) DBの置換（最後に置換。直前世代を .bak として退避）
     drive_db = DRIVE_DIR / "cache" / DB_NAME
     if drive_db.exists():
         shutil.copy2(drive_db, drive_db.with_name(drive_db.name + ".bak"))
     _safe_replace(local_db_path, drive_db)
 
+    # (4) 同期完了：マーカーを削除
+    PUSH_MARKER.unlink(missing_ok=True)
+
 
 def finalize() -> None:
     """Driveへの書き込みキャッシュをフラッシュする。バッチの最後で呼ぶ。"""
-    from google.colab import drive
     drive.flush_and_unmount()
-```
 
-### 2. 安全なパイプライン実行フロー（Stage-in ➔ 処理 ➔ Stage-out）
 
-ステージング設計の安全性を活かすため、計算処理（Compute）と書き戻し（Push）で例外ハンドリングを分離してライフサイクルを制御します。
+def run_sample_batch(con: duckdb.DuckDBPyConnection, run_id: str) -> None:
+    """動作確認用のサンプル計算処理（実際の運用ではご自身のパイプラインに差し替えてください）"""
+    # 1. ローカルDBのテーブル作成とレコード追加
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS batch_history (
+            run_id VARCHAR PRIMARY KEY,
+            executed_at TIMESTAMP,
+            status VARCHAR
+        )
+    """)
+    con.execute("INSERT INTO batch_history VALUES (?, now(), 'success')", [run_id])
 
-```python:run_staged_pipeline.py
-# バッチ実行のライフサイクル制御
-from pathlib import Path
-import duckdb
+    # 2. サンプル成果物（個別レポートCSV）の出力
+    sample_csv = WORKING_DIR / "output" / f"report_{run_id}.csv"
+    sample_csv.write_text("ticker,name,status\n7203,トヨタ自動車,processed\n9984,ソフトバンクG,processed\n", encoding="utf-8")
+    print(f"  -> ローカル作業層にサンプル成果物を生成: {sample_csv.name}")
+
 
 def main():
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     # 1. Stage-in (Pull): Google Drive からローカルディスクへ展開
+    print(f"=== バッチ実行開始 (run_id: {run_id}) ===")
     local_db_path = pull_phase()
     con = duckdb.connect(str(local_db_path))
 
     # 2. Compute Phase: ローカルディスク上で計算処理とDB更新を実行
     try:
         print("ローカルディスク上でバッチ処理を実行中...")
-        # run_batch_processing(con)
-        
+        run_sample_batch(con, run_id)
+
         # DBへの変更をフラッシュして安全にクローズ
         con.execute("CHECKPOINT")
         con.close()
@@ -312,16 +350,20 @@ def main():
     # 3. Stage-out (Push) Phase: Google Drive へ一括書き戻し
     try:
         print("Google Drive へ一括書き戻し中 (Push Phase)...")
-        push_phase(local_db_path)
-        
+        push_phase(local_db_path, run_id)
+
         # 4. Finalize: FUSE の非同期バッファを強制フラッシュして完了
         finalize()
         print("すべての処理と Google Drive への同期が正常完了しました。")
     except Exception as e:
         print(f"Google Drive への同期中にエラーが発生しました: {e}")
-        print("Google Drive 側の状態（.bak の存在など）を確認してください。")
+        print("Google Drive 側の状態（_push_in_progress や .bak の存在など）を確認してください。")
         print(f"ローカルディスク（{local_db_path}）に今回の最新データが残っています。")
         raise
+
+
+# セル実行
+main()
 ```
 
 ---
@@ -338,7 +380,7 @@ def main():
 | :--- | :---: | :---: | :--- |
 | **DB接続・単純クエリ発行** | 約 180〜420 ms（遅延大） | **約 2〜5 ms** | 数十〜百倍程度の短縮 |
 | **約3,900件のバッチ更新** | 5分以上（頻繁にロック待機） | **約 8.5 秒（ローカルI/O完結）** | I/Oボトルネックの解消 |
-| **途中切断時の耐障害性** | `.wal` 残存・中間ファイル汚染 | **旧版維持・安全なリトライ可能** | ロールバック相当の整合性維持 |
+| **途中切断時の耐障害性** | `.wal` 残存・中途半端な成果物の残存 | **旧版維持・安全なリトライ可能** | ロールバック相当の整合性維持 |
 
 ※FUSE 環境での数値は Google Drive との通信レイテンシや負荷状況により変動しますが、ローカルディスクへの分離により大きな性能向上が確認できます。
 
@@ -353,10 +395,11 @@ Google Drive には書き込みを行っていないため、書きかけの欠�
 #### ② Push（書き戻し）実行中に切断された場合（多段階の保護）
 ローカルから Google Drive への一括同期（Stage-out）の最中に切断されるケースに対しては、以下の順序制御と保護策を講じています。
 
+- **進行中マーカー（`_push_in_progress`）による未完了検知**:
+  Push の開始直前に、Google Drive の `output` フォルダへ `_push_in_progress`（中身は実行ID）を書き込み、DB の置換完了後に削除します。
+  作業層（ローカル）の DB 内にステータスを書き込む方式では、Push 途中で切断された場合に Drive 側には旧版 DB しか残らず、前回のバッチが途中で失敗したこと自体を次回起動時に検知できません。Drive 側にマーカーファイルを置くことで、次回起動時（`pull_phase`）にマーカーの残存を調べ、「前回の Push が途中で切れた」と確実に判断できます。検知時は中途半端な成果物の整理を行い、健全な旧版 DB から安全に再実行できます。
 - **成果物先行・DB末尾置換の順序制御**:
   CSV やレポート等の成果物を先に同期し、マスタである DB ファイルの置換を一番最後に行います。成果物のコピー途中で切断された場合、一部の成果物は反映されるものの、**DB 本体は旧版のまま維持** されます。
-- **バッチ完了ステータスによる未完了検知**:
-  第1章で示した通り、マスタDB内の `batch_runs` テーブルにバッチIDと `completed` ステータスを最後にコミットする設計にしています。途中で切れて「新しい成果物」と「古い DB」が混在した場合でも、次回起動時にプログラムは DB 内のステータスを見て「前回のバッチは未完了」と判定できます。未完了を検知した際は、前回の未完了バッチIDに対応する成果物を上書き・クリーンアップした上で安全に再計算を実行します。
 - **一時ファイル（`.tmp`）経由の置換（`_safe_replace`）**:
   Drive 上で直接本番ファイル名を上書きするのではなく、同一ディレクトリ内に `app_data.duckdb.tmp` としてコピーを完了させた後、置換（`replace()`）します。FUSE 上の rename の原子性は完全には保証されませんが、通信切断によって「書きかけの不完全な DB ファイル」が本番名として直接参照されるリスクを低減するベストエフォート策として機能します。
 - **直前世代のバックアップ（`.bak` 退避）**:
@@ -369,11 +412,11 @@ Google Drive の空き容量不足（`OSError: [Errno 28] No space left on devic
 
 - **永続層（Google Drive）の安全停止（マスタ旧版の維持）**:
   一時ファイル（`.tmp`）の生成中、または `.bak` 退避の時点で例外が発生して処理が中断します。本番ファイル名（`app_data.duckdb`）への置換処理（`tmp.replace()`）には到達しないため、Google Drive 上のマスタ DB は「前回の正常な状態」が保護されます。書きかけの壊れた DB が本番ファイルに置き換わることはありません。
-  ※なお、`flush_and_unmount()` 自体が失敗した場合は、replace 後の通信切断によりクラウド側への反映が未完了となるリスクがありますが、直前に退避した `.bak` が安全弁として機能します。
+  ※なお、`flush_and_unmount()` 自体が失敗した場合は、replace 後の通信切断によりクラウド側への反映が未完了となるリスクがあります。直前に退避した `.bak` が安全弁として機能しますが、`.bak` のコピー自体も同じフラッシュ完了を待っている状態であるため未反映の可能性があります。その場合でもローカルディスク（`/content/working`）側に今回生成した最新ファイルが残っているため、セッションが生きていれば手動リカバリが可能です。
 - **作業層（ローカルディスク）でのデータ残存と手動リカバリ**:
   例外でスクリプトが停止しても、今回計算した最新の成果物と DB は Colab ローカルディスク（`/content/working`）上に残っています。
-  - **セッション存続時**: Google Drive 上の不要ファイルを整理して容量を確保した後、Drive の再マウント確認（`drive.mount("/content/drive")`）を行った上で、ノートブック上で `push_phase(local_db_path); finalize()` を再実行すれば、今回の計算結果を失わずに Drive へ反映できます。また、`files.download()` を用いてローカル PC へ緊急退避することも可能です。
-  - **セッション強制終了時**: ランタイムが停止してローカル作業データが破棄された場合でも、Google Drive 側のマスタ DB は健全な旧版のまま維持されています。次回起動時は「前回のバッチは未完了」として健全な旧版マスタから安全に再計算・リトライできます。
+  - **セッション存続時**: Google Drive 上の不要ファイルを整理して容量を確保した後、Drive の再マウント確認（`drive.mount("/content/drive")`）を行った上で、ノートブック上で `push_phase(local_db_path, run_id); finalize()` を再実行すれば、今回の計算結果を失わずに Drive へ反映できます。また、`files.download()` を用いてローカル PC へ緊急退避することも可能です。
+  - **セッション強制終了時**: ランタイムが停止してローカル作業データが破棄された場合でも、Google Drive 側のマスタ DB は健全な旧版のまま維持されています。次回起動時は Drive 上のマーカーファイル（`_push_in_progress`）によって「前回の Push は途中で切れた」と検知され、健全な旧版マスタから安全に再計算・リトライできます。
 
 ### 3. 今回の設計が持つトレードオフと運用上の制約
 本アーキテクチャは「ローカルディスクでの高速性」と「切断時に永続データを汚さない安全性」を優先した設計です。そのため、以下の**トレードオフ（何を得て、何を妥協したか）**が存在します。
@@ -394,3 +437,8 @@ Google Drive の空き容量不足（`OSError: [Errno 28] No space left on devic
 Google Colab を単なる実験用ノートブックではなく定期的なバッチ基盤として活用する場合、FUSE ストレージを過信せず、エフェメラルなローカル環境と永続ストレージの役割を明確に分けることが重要になります。
 
 株価スクリーナーのように、過去データをマスタDBとして育てながら高頻度な計算を行うワークロードでは、データステージングによる2層分離がシンプルで扱いやすい選択肢となりました。同じように Colab 上でのデータ破損や I/O 遅延に悩んでいる方の参考になれば幸いです。
+
+---
+
+> **免責事項（Disclaimer）**  
+> 本記事に掲載されているコードや設定例は筆者の検証環境に基づくものであり、外部サービス（Google Colab、Google Drive 等）の仕様変更や実行環境の違い等によって生じたいかなる損害についても責任を負いかねます。実際の運用や設定はご自身の責任において確認の上で行ってください。
