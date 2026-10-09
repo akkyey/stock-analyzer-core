@@ -301,23 +301,22 @@ def pull_phase(fresh: bool = False) -> Path:
     if drive_db.with_name(drive_db.name + ".wal").exists():
         print("⚠️ Drive上に .wal が残存しています。DBが最新でない可能性があります。")
 
-    if not fresh and drive_db.exists():
-        # Driveの本番DBが健全か検証。破損していれば Drive側の書き換えは行わず、
+    bak_db = drive_db.with_name(drive_db.name + ".bak")
+    if not fresh and (drive_db.exists() or bak_db.exists()):
+        # Driveの本番DBが健全か検証。破損または不在であれば Drive側の書き換えは行わず、
         # 直前の健全なバックアップ（.bak）を作業層へ展開して処理を開始する
         if _is_db_healthy(drive_db):
             shutil.copy2(drive_db, local_db)
+        elif _is_db_healthy(bak_db):
+            print(f"⚠️ Drive上の本番DBが不完全または破損しているため、バックアップ（{bak_db.name}）を作業層へ展開します。")
+            print("※次回の正常なPush完了時に、Drive上の本番DBが自動的に健全な状態へ更新されます。")
+            shutil.copy2(bak_db, local_db)
         else:
-            bak_db = drive_db.with_name(drive_db.name + ".bak")
-            if _is_db_healthy(bak_db):
-                print(f"⚠️ Drive上の本番DBが不完全または破損しているため、バックアップ（{bak_db.name}）を作業層へ展開します。")
-                print("※次回の正常なPush完了時に、Drive上の本番DBが自動的に健全な状態へ更新されます。")
-                shutil.copy2(bak_db, local_db)
-            else:
-                raise RuntimeError(
-                    f"❌ Drive上の本番DB（{drive_db.name}）およびバックアップ（{bak_db.name}）の双方が破損しているか、"
-                    "読み込みに失敗しました。\n"
-                    "Drive上のファイルを手動で確認・復旧するか、pull_phase(fresh=True) で新規DBから再初期化してください。"
-                )
+            raise RuntimeError(
+                f"❌ Drive上の本番DB（{drive_db.name}）およびバックアップ（{bak_db.name}）の双方が破損しているか、"
+                "読み込みに失敗しました。\n"
+                "Drive上のファイルを手動で確認・復旧するか、pull_phase(fresh=True) で新規DBから再初期化してください。"
+            )
 
     return local_db
 
