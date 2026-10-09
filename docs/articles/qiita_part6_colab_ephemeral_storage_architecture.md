@@ -315,7 +315,7 @@ def pull_phase(fresh: bool = False) -> Path:
             raise RuntimeError(
                 f"❌ Drive上の本番DB（{drive_db.name}）およびバックアップ（{bak_db.name}）の双方が破損しているか、"
                 "読み込みに失敗しました。\n"
-                "Drive上のファイルを手動で確認・復旧するか、pull_phase(fresh=True) で新規DBから再初期化してください。"
+                "Drive上のファイルを手動で確認・復旧するか、main(fresh=True) で新規DBから再初期化してください。"
             )
 
     return local_db
@@ -368,12 +368,12 @@ def run_sample_batch(con: duckdb.DuckDBPyConnection, run_id: str) -> None:
     print(f"  -> ローカル作業層にサンプル成果物を生成: {sample_csv.name}")
 
 
-def main():
+def main(fresh: bool = False):
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # 1. Stage-in (Pull): Google Drive からローカルディスクへ展開
     print(f"=== バッチ実行開始 (run_id: {run_id}) ===")
-    local_db_path = pull_phase()
+    local_db_path = pull_phase(fresh=fresh)
     con = duckdb.connect(str(local_db_path))
 
     # 2. Compute Phase: ローカルディスク上で計算処理とDB更新を実行
