@@ -20,6 +20,8 @@ os.chdir("/content")
 
 # 2. 既にフォルダが存在していれば削除する（再実行時の衝突防止）
 TARGET_DIR = "/content/my-tool"
+if os.path.abspath(TARGET_DIR).startswith("/content/drive"):
+    raise ValueError("❌ TARGET_DIR に Google Drive 配下は指定できません（データ保護）。")
 if os.path.exists(TARGET_DIR):
     shutil.rmtree(TARGET_DIR, ignore_errors=True)
 
@@ -185,12 +187,17 @@ import time
 os.chdir("/content")
 
 # 2. 既存ディレクトリが存在する場合は削除 (再実行時の衝突防止)
+# ※Drive配下の誤削除を防ぐためガードを配置
+if os.path.abspath(TARGET_DIR).startswith("/content/drive"):
+    raise ValueError("❌ TARGET_DIR に Google Drive 配下のパスは指定できません（データ保護のため）。")
 if os.path.exists(TARGET_DIR):
     shutil.rmtree(TARGET_DIR, ignore_errors=True)
 
 # 3. リモートタグの事前確認（3状態判定と指数バックオフ）
 def check_tag(repo_url: str, tag: str, retries: int = 3) -> str:
     """'found' / 'not_found' / 'error' を返す。通信エラーは指数バックオフで再試行"""
+    git_env = os.environ.copy()
+    git_env["GIT_TERMINAL_PROMPT"] = "0"  # 認証プロンプトによる無応答停止を防止
     for i in range(retries):
         try:
             res = subprocess.run(
@@ -198,6 +205,7 @@ def check_tag(repo_url: str, tag: str, retries: int = 3) -> str:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=git_env,
             )
             if res.returncode == 0:
                 return "found"
@@ -224,6 +232,8 @@ else:
 
 # 4. 最新コミットだけの取得 (--depth 1)
 clone_success = False
+git_env = os.environ.copy()
+git_env["GIT_TERMINAL_PROMPT"] = "0"
 for attempt in range(1, 3):
     try:
         print(f"📥 リポジトリを取得中 (attempt {attempt}/2, target: {target_to_clone})...")
@@ -232,6 +242,7 @@ for attempt in range(1, 3):
             check=True,
             capture_output=True,
             text=True,
+            env=git_env,
         )
         clone_success = True
         break
@@ -266,6 +277,7 @@ if os.path.exists(req_path):
 for mod in list(sys.modules.keys()):
     if mod == PACKAGE_NAME or mod.startswith(f"{PACKAGE_NAME}."):
         del sys.modules[mod]
+importlib.invalidate_caches()  # ファインダーの内部ファイル検索キャッシュをリセット
 
 # パスを追加してインポートを有効化
 if TARGET_DIR not in sys.path:
@@ -351,7 +363,7 @@ except subprocess.CalledProcessError as e:
 
 | 項目 / 状態 | 通常の `!git clone` | 改善したセットアップ | 改善効果 |
 | :--- | :---: | :---: | :--- |
-| **初動の転送時間** | 数十秒（全履歴取得時） | **約 2〜4 秒（`--depth 1`）** | 初動の短縮 |
+| **初動の転送時間** | 約 5〜10 秒（全履歴取得時） | **約 2〜4 秒（`--depth 1`）** | 初動の短縮 |
 | **同一セルの再実行** | `already exists` でエラー停止 | **自動消去・再取得で衝突なし** | 冪等性の担保 |
 | **タグ push 漏れ・タイポ時** | エラーによる処理中断 | **検証を経て許可時のみ `main` 退避** | タグ不在時に main 代替取得 |
 | **自作モジュール更新** | 再起動しないと旧コード参照 | **`sys.modules` 破棄で即反映** | コード不整合の防止 |
@@ -385,15 +397,15 @@ Google Colab 上でリポジトリのコードを動かす作業は、ローカ�
 
 「作業ディレクトリを /content に戻す」「既存フォルダの事前クリーンアップ」「`--depth 1` による最新取得」「タグ不在時の main 代替取得」「モジュールキャッシュの破棄」という一連の対策をセットアップセルに組み込むことで、ボタン1つで安定して起動できる配布基盤を構築できます。
 
-本稿で確立したコード展開フローと、前編（データ永続化編）で設計した 2 層ストレージフローを組み合わせることで、ノートブック全体のライフサイクルは以下のように整理されます。
+本稿で確立したコード展開フローと、第1弾（データ永続化編）で設計した 2 層ストレージフローを組み合わせることで、ノートブック全体のライフサイクルは以下のように整理されます。
 
 > **【Step 1】環境セットアップ（本稿：コード展開・依存解決）**  
 > 　↓  
-> **【Step 2】Pull Phase（前編：永続層 Drive から作業層ローカルディスクへデータステージング展開）**  
+> **【Step 2】Pull Phase（第1弾：永続層 Drive から作業層ローカルディスクへデータステージング展開）**  
 > 　↓  
 > **【Step 3】処理実行（ローカルディスク上での高速バッチ・クエリ処理）**  
 > 　↓  
-> **【Step 4】Push Phase（前編：成果物先行・DB末尾置換でデータステージング書き戻し ＆ アンマウント）**
+> **【Step 4】Push Phase（第1弾：成果物先行・DB末尾置換でデータステージング書き戻し ＆ アンマウント）**
 
 2 つの設計を組み合わせることで、対話的なノートブックであっても運用に耐えうる安定したバッチ実行基盤として活用できるようになります。
 
