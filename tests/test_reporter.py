@@ -211,3 +211,17 @@ def test_source_labels_reflect_actual_origin(tmp_path):
     assert {k: v[1] for k, v in m3.items() if k != "roe"} == {
         "per": "stored", "pbr": "stored", "div_yield": "stored", "market_cap": "stored",
     }
+
+
+def test_profit_growth_prefers_computed_raw_value(tmp_path):
+    """Profit_Growth は評価時に計算した profit_growth_raw を優先し、無ければ保存値、どちらも無ければ '-'"""
+    reporter = StockReporter(output_dir=str(tmp_path))
+
+    def row(**fields):
+        latest = {"code": "1111", "price": 100.0, **fields}
+        return reporter._format_single_item({"latest": latest}, None)["Profit_Growth"]
+
+    assert row(profit_growth_raw=12.5, profit_growth=-3.1) == 12.5
+    assert row(profit_growth_raw=0.0, profit_growth=-3.1) == 0.0
+    assert row(profit_growth=-3.1) == -3.1
+    assert row() == "-"

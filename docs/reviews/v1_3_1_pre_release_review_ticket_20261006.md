@@ -69,8 +69,8 @@
 
 ### T-03（B）個人の PC のパスの除去
 
-- **背景**: 追跡中のファイルに、`/home/irom/...`・`file:///home/irom/...`（個人の PC のパスとユーザー名）がある。
-- **対象**（`git grep -cIE "/home/irom|/Users/irom|file:///home" -- . ':!*.parquet'` の結果。件数）:
+- **背景**: 追跡中のファイルに、ホームディレクトリ配下の絶対パス・`file://` のリンク（個人の PC のパスとユーザー名）がある。
+- **対象**（`git grep -cIE "/home/[i]rom|/Users/[i]rom|file:///[h]ome" -- . ':!*.parquet'`（この文自身に一致しないよう、文字クラスで書いている） の結果。件数）:
   - `docs/archive/designs/2026-03-27_repository_decoupling_security.md`（1）
   - `docs/designs/csv_agent_reading_guide.md`（3）
   - `docs/designs/data_validity_and_hybrid_fetch_architecture.md`（2）
@@ -205,7 +205,7 @@
 | T-03 | 合格 | 2026-10-06 | 該当 6 ファイル（+報告書・スクリプト）の個人パスを除去・相対リンク化。grep 0 件達成 |
 | T-04 | 合格 | 2026-10-06 | 新シード（`e3f635c30bb9`）にて旧 DB（3,752 件反映、旧値保持確認）および空 DB（初期登録 3,926 件）・冪等性の正常動作を確認 |
 | T-05 | 合格 | 2026-10-06 | シード原本を退避済み。再作成不要で処置 (b) の適用完了 |
-| T-06 | 作業待ち | 2026-10-06 | 新シードコミット push 後に Colab 実機で確認予定 |
+| T-06 | 合格 | 2026-10-06 | Colab 実機で、3,744 銘柄を更新、印 `fundamentals_seed_refreshed` = `e3f635c30bb9`、所要 18.9 分（リリース報告書 §3） |
 | T-07 | 保留（方針決定） | 2026-10-06 | 履歴リセットは有料版公開時に再考。私物除外・TARGET_BRANCH 確認を順次実施 |
 | T-08 | 保留 | 2026-10-06 | 公開後タスクとして維持 |
 

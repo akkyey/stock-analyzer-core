@@ -243,7 +243,12 @@ class StockReporter:
             "ROE_Src": metrics["roe"][1],
             "ROE": metrics["roe"][0],
             "Sales_Growth": _s(common.get("sales_growth")),
-            "Profit_Growth": _s(common.get("profit_growth")),
+            # 評価時に EDINET の純利益から計算する値を優先する (同梱データには成長率を入れていない)
+            "Profit_Growth": _s(
+                common.get("profit_growth_raw")
+                if common.get("profit_growth_raw") is not None
+                else common.get("profit_growth")
+            ),
             "Operating_Margin": _s(common.get("operating_margin")),
             "Equity_Ratio": _s(common.get("equity_ratio")),
             "RSI": self._format_rsi(common),
