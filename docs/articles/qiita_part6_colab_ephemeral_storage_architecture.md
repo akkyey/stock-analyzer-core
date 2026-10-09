@@ -251,31 +251,24 @@ def _safe_replace(src: Path, dest: Path) -> None:
     tmp.replace(dest)
 
 
-def _verify_and_restore_db(db_path: Path) -> None:
-    """DBが開けるか簡易検証し、破損していれば .bak から復旧を試みる。"""
-    bak_path = db_path.with_name(db_path.name + ".bak")
+def _is_db_healthy(db_path: Path) -> bool:
+    """DBが開けてカタログを走査できるか検証する（ファイル末尾破損・カタログ破損を検知）。"""
     if not db_path.exists():
-        if bak_path.exists():
-            print(f"⚠️ 本番DBが存在しないため、直前バックアップ（{bak_path.name}）から復旧します。")
-            shutil.copy2(bak_path, db_path)
-        return
-
+        return False
     try:
-        test_con = duckdb.connect(str(db_path), read_only=True)
-        test_con.execute("SELECT 1").fetchall()
-        test_con.close()
+        con = duckdb.connect(str(db_path), read_only=True)
+        # ヘッダだけでなくカタログメタデータを読み込んで破損を検知
+        con.execute("SELECT count(*) FROM duckdb_tables()").fetchall()
+        con.close()
+        return True
     except Exception as e:
-        print(f"⚠️ 本番DBの検証に失敗しました（破損の可能性）: {e}")
-        if bak_path.exists():
-            print(f"  -> 直前バックアップ（{bak_path.name}）から復元します。")
-            shutil.copy2(bak_path, db_path)
-        else:
-            print("  -> バックアップファイル（.bak）が見つかりません。")
+        print(f"⚠️ DB健全性チェック失敗 ({db_path.name}): {e}")
+        return False
 
 
 def pull_phase(fresh: bool = False) -> Path:
     """永続層 → 作業層 (Pull)。fresh=True なら空のDBから開始する。
-    永続層(Drive)のDBには書き込まない。"""
+    永続層(Drive)には一切書き込まず、読み取り専用として動作する。"""
     for sub in ("cache", "output"):
         (WORKING_DIR / sub).mkdir(parents=True, exist_ok=True)
 
@@ -295,8 +288,6 @@ def pull_phase(fresh: bool = False) -> Path:
                 stale.unlink(missing_ok=True)
                 print(f"  -> 中断された成果物を削除: {stale.name}")
 
-        # 中断時に本番DB置換が未完了・破損していないか検証し、必要に応じて .bak から復旧
-        _verify_and_restore_db(drive_db)
         PUSH_MARKER.unlink(missing_ok=True)
 
     # 前回セッションの残骸を作業層（ローカル）から除去
@@ -309,8 +300,20 @@ def pull_phase(fresh: bool = False) -> Path:
     if drive_db.with_name(drive_db.name + ".wal").exists():
         print("⚠️ Drive上に .wal が残存しています。DBが最新でない可能性があります。")
 
-    if not fresh and drive_db.exists():
-        shutil.copy2(drive_db, local_db)
+    if not fresh:
+        # Driveの本番DBが健全か検証。破損していれば Drive側の書き換えは行わず、
+        # 直前の健全なバックアップ（.bak）を作業層へ展開して処理を開始する
+        if _is_db_healthy(drive_db):
+            shutil.copy2(drive_db, local_db)
+        else:
+            bak_db = drive_db.with_name(drive_db.name + ".bak")
+            if _is_db_healthy(bak_db):
+                print(f"⚠️ Drive上の本番DBが不完全または破損しているため、バックアップ（{bak_db.name}）を作業層へ展開します。")
+                print("※次回の正常なPush完了時に、Drive上の本番DBが自動的に健全な状態へ更新されます。")
+                shutil.copy2(bak_db, local_db)
+            elif drive_db.exists():
+                print("⚠️ 本番DB・バックアップともに検証に失敗しました。既存の本番DBを作業層へコピーします。")
+                shutil.copy2(drive_db, local_db)
 
     return local_db
 
@@ -435,7 +438,7 @@ Google Drive には書き込みを行っていないため、書きかけの欠�
 - **進行中マーカー（`_push_in_progress`）による未完了検知と自動復旧**:
   Push の開始直前に、Google Drive の `output` フォルダへ `_push_in_progress`（中身は実行ID）を書き込み、DB の置換完了後に削除します。
   作業層（ローカル）の DB 内にステータスを書き込む方式では、Push 途中で切断された場合に Drive 側には旧版 DB しか残らず、前回のバッチが途中で失敗したこと自体を次回起動時に検知できません。Drive 側にマーカーファイルを置くことで、次回起動時（`pull_phase`）にマーカーの残存を調べ、「前回の Push が途中で切れた」と高精度に検知できます（※FUSE の書き込み順序や反映遅延があるためベストエフォートとなります）。
-  検知時は、該当回の中断された成果物（ファイル名に `run_id` を含む一時ファイル群）をクリーンアップするとともに、本番 DB が置換途中で破損していないかを簡易クエリで検証し、破損があれば直前のバックアップ（`.bak`）から自動復元した上で安全に再実行します。
+  検知時は、該当回の中断された成果物（ファイル名に `run_id` を含む一時ファイル群）をクリーンアップします。さらに、Drive 上の本番 DB が置換途中で破損していないかをカタログ走査（`duckdb_tables()`）で検証し、もし破損していれば Drive 側を直接書き換えるのではなく、直前の健全なバックアップ（`.bak`）を作業層へ展開して処理を開始します（正常に計算が完了した後の Push で Drive 側も健全な最新状態へと安全に更新されます）。
   ※なお、固定名（例: `daily_report.csv`）で出力している成果物は `run_id` のパターン一致では削除されず次回の正常な Push で上書きされる運用となるため、中断直後の内容が一時的に残存しうる点には留意が必要です。
 - **成果物先行・DB末尾置換の順序制御**:
   CSV やレポート等の成果物を先に同期し、マスタである DB ファイルの置換を一番最後に行います。成果物のコピー途中で切断された場合、一部の成果物は反映されるものの、**DB 本体は旧版のまま維持** されます。
