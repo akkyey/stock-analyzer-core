@@ -175,7 +175,7 @@ Python のコード上で `file.close()` や `con.close()` を呼んでも、FUS
   バッチ開始時に、Google Drive からマスタDB（`app_data.duckdb`）をローカル作業層へ一括コピー（シーケンシャルリード）します。
   - **FUSE 特性の活用**: 第3章で示した通り、FUSE はランダムアクセスには弱い一方、シーケンシャルな一括読み込みであれば安定したスループットを発揮します。起動時に1回だけ一括転送することで、計算実行中のクエリ遅延を解消します
   - **未完了マーカー検知と残存 WAL チェック**: 作業層に残る前回セッションの残骸をクリーンアップした上で、永続層側に前回Pushの中断痕跡（`_push_in_progress`）や過去の異常終了による `.wal` が残存していないかを検証し、健全なマスタDBを作業層へ展開します
-  - **永続層の保護（Read-only 動作）**: Pull フェーズは永続層に対して読み取り専用として動作するため、ファイルロックを取得せず、仮に転送途中で切断されても永続層のデータは破損しません
+  - **永続層の保護（DBに対する Read-only 動作）**: Pull フェーズは永続層の DB に対して書き込みを行わず読み取り専用として動作するため、ファイルロックを取得せず、仮に転送途中で切断されても永続層の DB は破損しません（※中断マーカーや前回の不完全な成果物ファイルの削除整理のみを行います）
 - **安全な Stage-out（一括書き戻し・Push）フロー**:
   全処理が正常完了した段階で、生成された成果物と更新済み DB を作業層から永続層へ一括コピー（シーケンシャルライト）します。Push 処理中の切断に備え、「進行中マーカー（`_push_in_progress`）の配置 ➔ 成果物の先行同期 ➔ 直前DBの `.bak` 退避 ➔ 一時ファイル（`.tmp`）経由でのDB末尾置換 ➔ マーカー削除 ➔ 明示的フラッシュ（`flush_and_unmount`）」という順序制御を敷きます
 
@@ -268,7 +268,8 @@ def _is_db_healthy(db_path: Path) -> bool:
 
 def pull_phase(fresh: bool = False) -> Path:
     """永続層 → 作業層 (Pull)。fresh=True なら空のDBから開始する。
-    永続層(Drive)には一切書き込まず、読み取り専用として動作する。"""
+    永続層(Drive)のDBファイルには書き込まず読み取り専用として扱い、
+    中断マーカーや前回の不完全な成果物の削除整理のみ行う。"""
     for sub in ("cache", "output"):
         (WORKING_DIR / sub).mkdir(parents=True, exist_ok=True)
 
@@ -300,7 +301,7 @@ def pull_phase(fresh: bool = False) -> Path:
     if drive_db.with_name(drive_db.name + ".wal").exists():
         print("⚠️ Drive上に .wal が残存しています。DBが最新でない可能性があります。")
 
-    if not fresh:
+    if not fresh and drive_db.exists():
         # Driveの本番DBが健全か検証。破損していれば Drive側の書き換えは行わず、
         # 直前の健全なバックアップ（.bak）を作業層へ展開して処理を開始する
         if _is_db_healthy(drive_db):
@@ -311,9 +312,12 @@ def pull_phase(fresh: bool = False) -> Path:
                 print(f"⚠️ Drive上の本番DBが不完全または破損しているため、バックアップ（{bak_db.name}）を作業層へ展開します。")
                 print("※次回の正常なPush完了時に、Drive上の本番DBが自動的に健全な状態へ更新されます。")
                 shutil.copy2(bak_db, local_db)
-            elif drive_db.exists():
-                print("⚠️ 本番DB・バックアップともに検証に失敗しました。既存の本番DBを作業層へコピーします。")
-                shutil.copy2(drive_db, local_db)
+            else:
+                raise RuntimeError(
+                    f"❌ Drive上の本番DB（{drive_db.name}）およびバックアップ（{bak_db.name}）の双方が破損しているか、"
+                    "読み込みに失敗しました。\n"
+                    "Drive上のファイルを手動で確認・復旧するか、pull_phase(fresh=True) で新規DBから再初期化してください。"
+                )
 
     return local_db
 
