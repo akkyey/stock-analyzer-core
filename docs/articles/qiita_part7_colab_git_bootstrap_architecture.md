@@ -32,8 +32,7 @@ if os.path.exists(TARGET_DIR):
 
 :::note info
 **【Colab実運用基盤シリーズ】**
-- **第1弾（データ永続化編）**: [Google ColabでGoogle Drive上のSQLite / DuckDBが遅い・ロック破損する問題と、ローカルディスクを使ったデータステージング設計](qiita_part6_colab_ephemeral_storage_architecture.md)
-<!-- ※ 第1弾公開後に実際のQiita URLへ差し替えてください -->
+- **第1弾（データ永続化編）**: [Google ColabでGoogle Drive上のSQLite / DuckDBが遅い・ロック破損する問題と、ローカルディスクを使ったデータステージング設計](https://qiita.com/akkyey/items/320aaae5305b98bc0ad5)
 - **第2弾（コード配布編・本作）**: Colabで再実行時の「fatal: destination path already exists」を防ぐ：GitHubリポジトリの安全なクローン・実行セットアップ設計
 :::
 

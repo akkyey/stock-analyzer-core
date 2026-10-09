@@ -18,8 +18,7 @@ private: false
 :::note info
 **【Colab実運用基盤シリーズ】**
 - **第1弾（データ永続化編・本作）**: Google ColabでGoogle Drive上のSQLite / DuckDBが遅い・ロック破損する問題と、ローカルディスクを使ったデータステージング設計
-- **第2弾（コード配布編）**: [!git clone で配布したColabが再実行で動かなくなる理由：fatal: destination path already exists を防ぐ環境セットアップ設計](qiita_part7_colab_git_bootstrap_architecture.md)
-<!-- ※ 第2弾公開後に実際のQiita URLへ差し替えてください -->
+- **第2弾（コード配布編）**: [Colabで再実行時の「fatal: destination path already exists」を防ぐ：GitHubリポジトリの安全なクローン・実行セットアップ設計](https://qiita.com/akkyey/items/1214793c2c384b81fe63)
 :::
 
 ---
