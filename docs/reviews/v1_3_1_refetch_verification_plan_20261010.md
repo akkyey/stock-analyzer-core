@@ -166,3 +166,11 @@ JPX の銘柄一覧の同梱をやめた後と、所要時間の案内の出し�
 **気づいた点**:
 - 市場データ取得の終盤で、「取得できなかった銘柄 20/20 件」と「Chunk 1 returned empty. Retry 1/2」「2/2」が出た。V6 と同じ種類で、原因は未確認。最終的には 3,846 銘柄がそろった。
 - Step 3 は Drive への同期のあと、Drive の接続を外す（`flush_and_unmount`）。そのため、実行後に Drive 上の DB（`/content/drive/MyDrive/<保存先>/cache/stock_analyzer.duckdb`）を開くと「database does not exist」になる。確認には、作業領域の DB（`/content/working/cache/stock_analyzer.duckdb`。同期した DB と同じ中身）を使う。
+
+### 6.10 v1.3.2 の公開と Colab での表示の確認（2026-10-11）
+
+- ノートの `TARGET_BRANCH` を `"v1.3.2"` にして（`110b55f`）、注釈付きタグ `v1.3.2` を打ち、`main` とタグを push した。タグ時点の検証テスト（`tests/test_colab_sync.py`）は合格。
+- Colab で、`main` のノートを新しい実行環境で開き、空の保存先（`StockAnalyzerLast2`）で Step 0・Step 1 を実行した。
+  - 「リポジトリを取得中 (… branch/tag: v1.3.2)」と出て、`v1.3.2` を取得した。
+  - 「【初回実行モードを検知しました】」と、所要時間「20〜30 分程度（通信や混雑の状況で前後します）」が出た。**合格**。
+- 気づいた点: 前のセッションのタブ・実行環境のまま開くと、古いノート（`v1.3.1` を読む）と、作業領域に残った DB が使われ、初回の案内が出ない。確認は「ランタイムを接続解除して削除」をしてから、ノートを開き直して行う。
