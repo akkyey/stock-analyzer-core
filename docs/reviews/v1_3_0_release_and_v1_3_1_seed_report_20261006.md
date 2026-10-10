@@ -280,7 +280,7 @@
 
 - **EDINET 由来の列**（損益・貸借対照表・1 株当たりの値・ROE・自己資本比率）は、公共データ利用規約（PDL1.0）に従えば、利用できる。**出典・加工の記載が必要で、現状の README・利用ガイドには、記載がない**。
 - **旧シードから引き継いだ列**（`operating_cf`・`current_ratio` など）は、作り方がリポジトリに無く、出所を確認できない。列名が yfinance の財務項目に対応しており、yfinance は個人利用向け。**足切りで使われるのは `operating_cf` だけで、空にしても、動作への影響は小さい**。
-- JPX の上場銘柄一覧の CSV（`src/resources/jp_stock_list.csv`）も同梱しており、利用条件は未確認。
+- JPX の上場銘柄一覧の CSV（`src/resources/jp_stock_list.csv`）も同梱していたが、2026-10-10 に JPX の規約を確認し、削除した（実行時の取得のみ。[方針の設計書 §2.1](../designs/data_sources_and_redistribution_policy.md)）。
 
 ### 8.5 公開前の確認で分かったこと
 

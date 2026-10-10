@@ -91,4 +91,4 @@ ruff check . && mypy src/ --ignore-missing-imports && radon cc -a src/ && pytest
   - `94f1d26` 〜 `f25b54e`: 境界値・異常値テストスイート（Phase 1 〜 Phase 3）の実装
   - `afb3730`: `reset_database` 自動解除（自己防衛ロジック）の実装とテスト
 - **同期状態**:
-  - ローカル、GitHub リモート（`origin/release/v1.3.0`）、開発サーバー（`masaaki-sv`）の **3環境すべて完全同期済み**。
+  - ローカル、GitHub リモート（`origin/release/v1.3.0`）、開発サーバーの **3環境すべて完全同期済み**。

@@ -28,7 +28,7 @@
 | 5 | 中 | 「既存 DB には 16 列の旧値が維持される」の記述が不正確。`sales_growth` は、シードの売上が更新された銘柄で、財務データの更新時に空になる | 方針の設計書・利用ガイドを訂正（維持されるのは 15 列） |
 | 6 | 低 | README・利用ガイドの「公共データ利用規約（第 1.0 版）」のリンクが EDINET 利用規約のページだった | PDL1.0 の原文ページ（`https://www.digital.go.jp/resources/open_data/public_data_license_v1.0`）へのリンクを追加 |
 | 7 | 低 | レビュー票: T-06 が「作業待ち」のまま。T-03 の検索コマンドの文字列が自分自身に一致していた | T-06 を「合格」に更新。検索パターンを文字クラスで書き直し（検索結果 0 件） |
-| 8 | 低 | 同梱の JPX 銘柄一覧（`src/resources/jp_stock_list.csv`）の利用条件が未確認 | **未対応**（§5） |
+| 8 | 低 | 同梱の JPX 銘柄一覧（`src/resources/jp_stock_list.csv`）の利用条件が未確認 | 2026-10-10 に対応: JPX の規約を確認し、同梱の CSV を削除（実行時の取得のみ）。[方針の設計書 §2.1](../designs/data_sources_and_redistribution_policy.md) |
 
 ## 3. 設計: 財務データの取り直し（`refetch_edinet_year`）
 
