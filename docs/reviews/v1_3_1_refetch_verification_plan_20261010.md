@@ -65,7 +65,7 @@
 
 1. **指摘 A（決定）**: 365 日の取り直しは、メンテナンス時だけの特別なオプションにする。CLI では一回限りの指定とし、`config.yaml` には残さない（残すと毎回の実行が 365 日分の走査になるため）。実装済み: `python -m src scan --refetch-edinet-year`（`src/__main__.py`、テスト `tests/test_cli_refetch.py`）。実機での実行確認は未実施（検証スクリプトでの設定の渡し方と同じ `fetcher.edinet_scan_days = 365`）。
 2. **指摘 B（決定）**: Docker は利用予定がないため、対象外とする。`Dockerfile` の不具合は、今回は修正しない。
-3. 指摘 C（Windows・macOS）: 未決定。
+3. 指摘 C（Windows・macOS）: **未検証のまま公開する**。README に「未検証」と明記した（Docker は対象外と併記）。
 4. 指摘 D（GitHub Actions）: 有料版の設計時に決める。
 
 ## 6. 実施記録（ローカル CLI・Linux）

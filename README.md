@@ -91,6 +91,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> **動作確認の範囲**: ローカル実行は、Linux と Google Colab で確認しています。Windows・macOS は未検証です（動作しない場合があります。日本語の表示が崩れるときは、環境変数 `PYTHONUTF8=1` を設定してください）。Docker は対象外です。
+
 ### 3. 環境設定
 
 ```bash
